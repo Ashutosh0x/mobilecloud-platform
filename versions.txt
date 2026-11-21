@@ -1,0 +1,28 @@
+FURLPAY PLATFORM VERSIONS & COMMIT ANCHORS (2026-11-21)
+Repository: mobilecloud-platform (initialized during FP-ENG-2026-AUD-01 remediation)
+
+sources-anchoring-commit: 31d3e7160c0a466c608ab3cfa8bf8dce71f17072
+  (all workspace sources, 26 snapshots, specs rev 2.0, por-xdr-toolkit,
+   audit/TESTNET_BASELINE_2026-11-21, INTEGRITY_MANIFEST.sha256 pre-image set)
+docs-and-manifest-commit: see `git log --oneline` HEAD (this file + docs/ +
+  INTEGRITY_MANIFEST.sha256 committed together)
+
+toolchain (matches audit/TESTNET_BASELINE_2026-11-21/versions.txt):
+  rustc 1.100.0
+  stellar-xdr =22.1.0 (frozen audit toolchain; toolkit + xdr reference encoder)
+  soroban-sdk 22.0.11
+  endpoint protocol 30 (rpc 30.0.1-6b6ec60c)
+
+workspace test totals (recounted 2026-11-21):
+  107 green tests = 16 core-engine + 23 por-verifier + 58 por-kernel + 10 trading-engine
+  + 4 tests in tools/por-xdr-toolkit (standalone crate)
+  snapshots: 26 = 17 baseline (byte-identical) + 9 Gate 7
+
+deployed contract (testnet):
+  CDWNCMD6NG652YNX5PV2VLAWW4HMJGFICVE55NSDMSPS76H2VSLOEDPI
+  wasm hash 8ebcebc32894d39cbd50867249952f8fb0d9b04e6ae1251ccf34c26aad013648
+
+verification:
+  sha256sum -c INTEGRITY_MANIFEST.sha256          (repo-wide, 55 entries)
+  cd audit/TESTNET_BASELINE_2026-11-21 && sha256sum -c MANIFEST.sha256
+  python -I audit/TESTNET_BASELINE_2026-11-21/crypto/verify_baseline.py
