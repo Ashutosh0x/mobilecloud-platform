@@ -73,27 +73,22 @@
 
 MobileCloud combines two decoupled, high-performance engines within one monorepo:
 
-```
-+----------------------------------------------------------------------------------------------------+
-|  [ ENGINE 1: MOBILECLOUD ]                             [ ENGINE 2: FURLPAY PROOF-OF-RESERVE ]      |
-|  Autonomous On-Device Edge Cloud                       Verifiable Institutional RWA Telemetry      |
-|  --------------------------------------------------    ------------------------------------------  |
-|  • Vercel Build Output API v3 compliant router         • RFC 8785 canonical evidence envelopes     |
-|  • 16.5s Next.js builds on 3nm ARM64 silicon           • Checked 256-bit reconciliation kernel     |
-|  • 1.97W wall draw ($0.23/mo electricity)              • Alpaca JWS / ISO 20022 / Dinari TA feeds  |
-|  • Zero-millisecond battery hardware UPS               • Acurast 3-of-5 hardware TEE quorum mesh   |
-|  • Tri-Modal Terminal (App, Browser, SSH)              • Stellar Soroban M-of-N Ed25519 contract   |
-|  • Anycast ingress via Cloudflare tunnel               • 5-tier reserve state governance machine   |
-|  • Solana atomic arbitrage + Jito MEV bundles          • Soroban circuit breaker + risk invariants |
-+----------------------------------------------------------------------------------------------------+
-```
+| ENGINE 1: MOBILECLOUD<br/>*(Autonomous On-Device Edge Cloud)* | ENGINE 2: FURLPAY PROOF-OF-RESERVE<br/>*(Verifiable Institutional RWA Telemetry)* |
+| :--- | :--- |
+| • Open Build Output API v3 compliant router | • RFC 8785 canonical evidence envelopes |
+| • 16.5s Next.js builds on 3nm ARM64 silicon | • Checked 256-bit reconciliation kernel |
+| • 1.97W wall draw ($0.23/mo electricity) | • Alpaca JWS / ISO 20022 / Dinari TA feeds |
+| • Zero-millisecond battery hardware UPS | • Acurast 3-of-5 hardware TEE quorum mesh |
+| • Tri-Modal Terminal (App, Browser, SSH) | • Stellar Soroban M-of-N Ed25519 contract |
+| • Anycast ingress via Cloudflare tunnel | • 5-tier reserve state governance machine |
+| • Solana atomic arbitrage + Jito MEV bundles | • Soroban circuit breaker + risk invariants |
 
 ---
 
 ## Detailed Platform Features
 
 ### 1. Engine 1: MobileCloud Autonomous Edge Computing
-* **Vercel Build Output API v3 Compliance**: Native ARM64 routing daemon (`core-engine`) that parses `.vercel/output`, static routing rules, edge middleware redirects, rewrites, custom headers, and fallback handlers directly on Android.
+* **Open Build Output API v3 Compliance**: Native ARM64 routing daemon (`core-engine`) that parses standardized `.output`, static routing rules, edge middleware redirects, rewrites, custom headers, and fallback handlers directly on Android.
 * **On-Device Bun & Turbopack Builder**: Compiles modern JavaScript/TypeScript frameworks (Next.js, Vite, Astro, Remix) directly on device in **16.5 seconds** on modern 3nm ARM64 silicon.
 * **Atomic Zero-Downtime Deployment Promotion**: Symlink-based deployment switcher promoting builds in **< 15 ms** with instant one-click rollbacks to previous immutable hash targets.
 * **Native Compression & Dynamic Image Optimization**: High-throughput Brotli and Zstd streaming compression combined with on-device `libvips` image transcoding and WebP/AVIF generation.

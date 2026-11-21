@@ -1,4 +1,4 @@
-//! Vercel Build Output API v3 route parser and request dispatcher.
+//! Open Build Output API v3 route parser and request dispatcher.
 //!
 //! Reads `.mobilecloud/output/config.json` from the project's live
 //! deployment and executes the standard route table semantics
@@ -104,7 +104,7 @@ impl BuildOutputConfig {
         let raw = std::fs::read_to_string(&path)?;
         let mut cfg: BuildOutputConfig = serde_json::from_str(&raw)
             .map_err(|e| RouterError::InvalidConfig(e.to_string()))?;
-        // Vercel v3 uses "continue"; remap through serde alias via manual scan
+        // Build Output v3 uses "continue"; remap through serde alias via manual scan
         // because of the keyword clash.
         let raw_value: Value =
             serde_json::from_str(&raw).map_err(|e| RouterError::InvalidConfig(e.to_string()))?;
@@ -407,7 +407,7 @@ fn try_serve_static(
     Ok(Some(response))
 }
 
-/// Immutable hashed assets get year-long caching (Vercel convention).
+/// Immutable hashed assets get year-long caching (standard edge convention).
 fn cache_control_for(path: &Path) -> &'static str {
     let s = path.to_string_lossy();
     if s.contains("/_next/static/") || s.contains("/assets/") {

@@ -1,4 +1,4 @@
-//! Dynamic image optimization engine (the `/_vercel/image` analog).
+//! Dynamic image optimization engine (the standard edge image route analog).
 //!
 //! Serves `/_mobilecloud/image?url=..&w=..&h=..&fit=..&q=..` backed by:
 //!
