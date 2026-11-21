@@ -5,6 +5,8 @@ Cargo.lock.orig
 
 # Android / Gradle
 android-app/.gradle/
+android-app/.kotlin/
+.kotlin/
 android-app/build/
 android-app/local.properties
 android-app/.idea/
@@ -17,6 +19,7 @@ android-app/.externalNativeBuild/
 *.apk
 *.aab
 *.keystore
+*.jks
 
 # Node / Web CloudShell
 web-cloudshell/node_modules/
@@ -33,6 +36,12 @@ cache/
 *.db
 *.db-wal
 *.db-shm
+
+# Web dashboard
+apps/web-dashboard/node_modules/
+apps/web-dashboard/.next/
+apps/web-dashboard/data/
+*.tsbuildinfo
 
 # OS noise
 .DS_Store

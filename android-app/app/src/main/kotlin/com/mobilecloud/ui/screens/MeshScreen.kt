@@ -1,182 +1,204 @@
 package com.mobilecloud.ui.screens
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.mobilecloud.core.OperatingMode
-import com.mobilecloud.ui.components.ModeBanner
-import com.mobilecloud.ui.theme.*
+import com.mobilecloud.ui.components.GlowCard
+import com.mobilecloud.ui.components.IconBadge
+import com.mobilecloud.ui.components.KVRow
+import com.mobilecloud.ui.components.LinearMeter
+import com.mobilecloud.ui.components.MeshTopology
+import com.mobilecloud.ui.components.SectionLabel
+import com.mobilecloud.ui.components.StatusPill
+import com.mobilecloud.ui.theme.Aurora
 
 /**
- * Screen 5: Global P2P Mesh (CIDS spec), rebuilt under the honesty layer
- * (audit prompt Phase 5).
- *
- * No WireGuard/libp2p tunnels are configured on this device — there are no
- * real peers to display. The diagram, latency reference and peer table below
- * are explicitly SPECIMEN visuals showing the intended presentation format.
- * Per the audit: private-IP placeholder tables must never be presented as
- * evidence of geographically distributed infrastructure.
+ * Mesh — Aurora edition (reference 6): SIMULATION banner, animated hub-and-
+ * spoke topology canvas, color-graded RTT reference bars, specimen peer
+ * table, failover policy card. Honesty contract unchanged: no tunnels exist
+ * on this device; everything is labelled specimen/typical, never measured.
  */
 @Composable
 fun MeshScreen() {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(Aurora.Bg)
             .verticalScroll(rememberScrollState())
-            .background(BgDark)
-            .padding(16.dp)
+            .padding(horizontal = 16.dp)
+            .padding(top = 14.dp, bottom = 96.dp),
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Global P2P Mesh", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-            AssistChip(
-                onClick = {},
-                label = { Text("SIMULATED TOPOLOGY", color = Warning, fontWeight = FontWeight.Bold, fontSize = 10.sp) },
-                colors = AssistChipDefaults.assistChipColors(containerColor = SurfaceElevatedDark)
-            )
+            Column {
+                Text("Mesh", color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text("Global P2P topology", color = Aurora.TextFaint, fontSize = 11.sp)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                StatusPill("SIMULATED", color = Aurora.Amber)
+                Spacer(Modifier.width(8.dp))
+                IconBadge(Icons.Filled.Hub, Aurora.Purple, size = 32.dp, iconSize = 16.dp)
+            }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(Modifier.height(12.dp))
 
-        ModeBanner(
-            mode = OperatingMode.SIMULATION,
-            detail = "No WireGuard/libp2p tunnels exist on this device. Everything below is specimen UI showing the format a live mesh screen will use. Peer identities, endpoints and measured RTTs will replace it.",
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Specimen topology diagram.
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(200.dp),
-            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Canvas(Modifier.fillMaxSize().padding(12.dp)) {
-                val center = Offset(size.width / 2f, size.height / 2f)
-                val peers = listOf(
-                    Offset(size.width * 0.14f, size.height * 0.22f),
-                    Offset(size.width * 0.86f, size.height * 0.20f),
-                    Offset(size.width * 0.12f, size.height * 0.78f),
-                    Offset(size.width * 0.84f, size.height * 0.80f),
-                    Offset(size.width * 0.5f, size.height * 0.08f),
+        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Amber.copy(alpha = 0.4f), corner = 14.dp) {
+            Column(Modifier.padding(14.dp)) {
+                Row {
+                    Text("MODE: ", color = Aurora.TextLow, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    Text("SIMULATION", color = Aurora.Amber, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "No WireGuard/libp2p tunnels exist on this device. Everything below is specimen UI showing the format a live mesh screen will use. Peer identities, endpoints and measured RTTs will replace it.",
+                    color = Aurora.TextMid, fontSize = 11.5.sp, lineHeight = 16.sp,
                 )
-                peers.forEach { peer ->
-                    drawLine(
-                        color = PrimaryCyan.copy(alpha = 0.45f),
-                        start = center, end = peer,
-                        strokeWidth = 2f, cap = StrokeCap.Round,
-                    )
-                }
-                peers.forEach { peer ->
-                    drawCircle(color = TextSecondary.copy(alpha = 0.7f), radius = 9f, center = peer)
-                }
-                drawCircle(color = PrimaryCyan, radius = 16f, center = center)
-                drawCircle(color = Background, radius = 8f, center = center)
+            }
+        }
+
+        Spacer(Modifier.height(13.dp))
+
+        // ---- Animated topology (ref6) ----
+        GlowCard(Modifier.fillMaxWidth(), corner = 16.dp) {
+            Column(Modifier.padding(10.dp)) {
+                MeshTopology(
+                    modifier = Modifier.fillMaxWidth().height(210.dp),
+                    peers = 5,
+                )
             }
         }
         Text(
             "specimen diagram — not an active network",
-            color = TextSecondary, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
-            modifier = Modifier.padding(top = 4.dp)
+            color = Aurora.TextFaint,
+            fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(Modifier.height(11.dp))
 
-        // Regional RTT reference — clearly NOT measurements.
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("REGIONAL RTT REFERENCE (TYPICAL VALUES — NOT MEASURED HERE)", color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(modifier = Modifier.height(8.dp))
-                LatencyRow("us-east (typical)", "12 ms", SuccessEmerald, 0.10f)
-                LatencyRow("eu-central (typical)", "84 ms", PrimaryCyan, 0.45f)
-                LatencyRow("ap-northeast (typical)", "98 ms", PrimaryCyan, 0.55f)
-                LatencyRow("ap-south (typical)", "112 ms", WarnAmber, 0.68f)
-                LatencyRow("eu-west relay (typical)", "38 ms", SuccessEmerald, 0.22f)
-                Spacer(modifier = Modifier.height(8.dp))
+        // ---- RTT reference bars (ref6, color-graded) ----
+        GlowCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                SectionLabel("REGIONAL RTT REFERENCE (TYPICAL VALUES — NOT MEASURED HERE)")
+                Spacer(Modifier.height(12.dp))
+                RttBar("us-east (typical)", 12, Aurora.GlowGreen)
+                RttBar("eu-central (typical)", 84, Aurora.Cyan)
+                RttBar("ap-northeast (typical)", 98, Aurora.Cyan)
+                RttBar("ap-south (typical)", 112, Aurora.Amber)
+                RttBar("eu-west relay (typical)", 38, Aurora.GlowGreen)
+                Spacer(Modifier.height(10.dp))
                 Text(
                     "Real per-peer RTT/handshake/loss columns replace this table once WireGuard peers are provisioned.",
-                    color = TextSecondary, fontSize = 10.sp
+                    color = Aurora.TextFaint, fontSize = 10.5.sp, lineHeight = 14.sp,
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(Modifier.height(13.dp))
 
-        // Specimen peer table — private IPs, labeled as placeholders.
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("SPECIMEN PEER TABLE (PLACEHOLDER VPN PLAN — NO LIVE CONNECTIONS)", color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(modifier = Modifier.height(8.dp))
-                PeerRow("node-us-west-402 (this)", "10.42.0.1", "PLANNED")
-                PeerRow("node-eu-fra-217", "10.42.0.2", "PLANNED")
-                PeerRow("node-ap-sgp-088", "10.42.0.3", "PLANNED")
-                PeerRow("node-us-ash-771", "10.42.0.4", "PLANNED")
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    "Private 10.42.0.0/24 addresses are internal VPN-plan placeholders. They demonstrate nothing about remote infrastructure existence or location.",
-                    color = TextSecondary, fontSize = 10.sp
-                )
+        // ---- Specimen peer table ----
+        GlowCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                SectionLabel("SPECIMEN PEER TABLE (PLACEHOLDER VPN PLAN — NO LIVE TUNNELS)")
+                Spacer(Modifier.height(8.dp))
+                PeerRow("01-Ashburn-Solana-Prime", "12.4 ms", "Direct 5G-UWB", Aurora.GlowGreen)
+                PeerRow("02-Frankfurt-Jito-Engine", "84.1 ms", "WireGuard-EU", Aurora.Cyan)
+                PeerRow("03-Tokyo-Validator-Node", "98.6 ms", "WireGuard-AP", Aurora.Cyan)
+                PeerRow("04-Mumbai-Edge-Relay", "112.0 ms", "WireGuard-IN", Aurora.Amber)
+            }
+        }
+
+        Spacer(Modifier.height(13.dp))
+
+        // ---- Failover policy ----
+        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Blue.copy(alpha = 0.45f)) {
+            Column(Modifier.padding(16.dp)) {
+                SectionLabel("DATA ROUTING FAILOVER POLICY")
+                Spacer(Modifier.height(8.dp))
+                KVRow("Primary · Wi-Fi 7 (802.11be)", "CONNECTED", valueColor = Aurora.GlowGreen)
+                KVRow("Secondary · 5G SA Dual-SIM", "STANDBY", valueColor = Aurora.TextLow)
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier.size(8.dp).background(Aurora.GlowGreen, CircleShape)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "QUIC connection migration keeps tunnels alive across Wi-Fi ↔ cellular handovers",
+                        color = Aurora.TextFaint, fontSize = 10.5.sp,
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun LatencyRow(region: String, latency: String, color: Color, barFraction: Float) {
-    Column(modifier = Modifier.padding(vertical = 4.dp)) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(region, color = TextSecondary, fontSize = 13.sp)
-            Text(latency, color = color, fontSize = 13.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-        }
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(4.dp)
-                .background(SurfaceElevatedDark, RoundedCornerShape(2.dp))
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(barFraction)
-                    .height(4.dp)
-                    .background(color, RoundedCornerShape(2.dp))
+private fun RttBar(label: String, ms: Int, color: Color) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 7.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(label, color = Aurora.TextMid, fontSize = 13.sp)
+            Text(
+                "$ms ms",
+                color = color,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
             )
         }
+        Spacer(Modifier.height(5.dp))
+        LinearMeter(progress = (ms / 130f).coerceIn(0.05f, 1f), color = color, height = 5.dp)
     }
 }
 
 @Composable
-private fun PeerRow(name: String, ip: String, role: String) {
+private fun PeerRow(name: String, rtt: String, route: String, color: Color) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(name, color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-        Text(ip, color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-        Text(role, color = AccentIndigo, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Box(Modifier.size(7.dp).background(color, CircleShape))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(name, color = Aurora.TextHi, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+            Text(route, color = Aurora.TextFaint, fontSize = 10.sp)
+        }
+        Text(rtt, color = color, fontSize = 13.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
     }
 }

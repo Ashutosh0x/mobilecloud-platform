@@ -1,268 +1,292 @@
 package com.mobilecloud.ui.screens
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mobilecloud.core.NodeModeState
-import com.mobilecloud.core.OperatingMode
 import com.mobilecloud.core.TradingEngineController
-import com.mobilecloud.ui.components.ModeBanner
-import com.mobilecloud.ui.theme.*
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import com.mobilecloud.ui.components.DotTickSlider
+import com.mobilecloud.ui.components.GlowCard
+import com.mobilecloud.ui.components.HoldToConfirmButton
+import com.mobilecloud.ui.components.SectionLabel
+import com.mobilecloud.ui.theme.Aurora
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
- * Screen 2: HFT Arbitrage Engine (CIDS spec), rebuilt under the honesty layer
- * (audit prompt Phase 3 / Phase 11).
+ * Trading — HFT Arbitrage Engine, Aurora edition (reference 4).
  *
- * This build has NO exchange connectivity: no Backpack/Raydium/Jito clients
- * are wired, no transactions are signed or submitted. The rows below are
- * clearly-labelled SPECIMEN data illustrating what the execution feed will
- * look like once a live venue adapter exists. The Emergency Halt is a REAL
- * fail-closed controller: it persists, gates any future submission path via
- * [TradingEngineController.requireClear], and is also tripped by the thermal
- * supervisor.
+ * Honesty contract unchanged: NO venue clients are wired, nothing executes
+ * on-chain; feed rows are labelled SPECIMEN. The Emergency Halt remains a
+ * REAL fail-closed controller (persisted; gates future submission paths;
+ * also tripped by the thermal supervisor).
  */
-data class TradeLogEntry(
+private data class SpecimenTrade(
     val time: String,
     val bundleId: String,
-    val buyVenue: String,
-    val sellVenue: String,
-    val netProfitUsdc: String,
-    val spreadBps: String,
-    val isCommitted: Boolean
+    val route: String,
+    val profit: String,
+    val bps: String,
+    val toxic: Boolean = false,
 )
 
 @Composable
 fun TradingScreen() {
     val context = LocalContext.current
-    var minSpreadBps by remember { mutableStateOf(12f) }
+    var minSpreadBps by remember { mutableFloatStateOf(12f) }
     val haltState by TradingEngineController.state.collectAsState()
     val mode by NodeModeState.mode.collectAsState()
+    val haptics = LocalHapticFeedback.current
 
-    val recentTrades = remember {
+    val feed = remember {
         listOf(
-            TradeLogEntry("14:02:11.428", "#8912 (specimen)", "Backpack ($88.40)", "Raydium ($88.58)", "+$9.00 est.", "16.2 bps", true),
-            TradeLogEntry("14:02:08.114", "#8911 (specimen)", "Backpack ($88.35)", "Orca ($88.51)", "+$19.20 est.", "18.1 bps", true),
-            TradeLogEntry("14:01:55.802", "#8910 (specimen)", "Toxic Arb Detected", "Competitor Front-Run", "$0.00", "Reverted Inside VM", false)
+            SpecimenTrade("14:02:11.428", "#8912 (specimen)", "Backpack ($88.40) → Raydium ($88.58)", "+$9.00 est. (not realized)", "16.2 bps"),
+            SpecimenTrade("14:02:08.114", "#8911 (specimen)", "Backpack ($88.35) → Orca ($88.51)", "+$19.20 est. (not realized)", "18.1 bps"),
+            SpecimenTrade("14:01:55.802", "#8910 (specimen)", "Toxic Arb Detected → Competitor Front-Run", "$0.00 · reverted inside VM", "—", toxic = true),
+            SpecimenTrade("14:01:41.770", "#8909 (specimen)", "Backpack ($88.41) → Raydium ($88.55)", "+$7.00 est. (not realized)", "15.8 bps"),
         )
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(BgDark)
-            .padding(16.dp)
+            .background(Aurora.Bg)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp)
+            .padding(top = 14.dp, bottom = 96.dp),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("HFT Arbitrage Engine", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-            AssistChip(
-                onClick = {},
-                label = { Text("SIMULATION — NO REAL ORDERS", color = Warning, fontWeight = FontWeight.Bold, fontSize = 10.sp) },
-                colors = AssistChipDefaults.assistChipColors(containerColor = SurfaceElevatedDark)
-            )
-        }
+        ScreenTitle("Trading", "HFT arbitrage engine")
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(Modifier.height(12.dp))
 
-        ModeBanner(
-            mode = mode,
+        // ---- Mode notice (amber, ref4) ----
+        ModeCard(
+            modeLabel = mode.label,
+            modeColor = Aurora.Amber,
             detail = "No venue API clients are configured. Nothing below was executed on-chain; estimated profit is NOT realized profit. Proof of execution will require transaction signatures + wallet reconciliation.",
         )
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(Modifier.height(13.dp))
 
-        // Spread card — specimen quotes, labelled as such.
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("SPECIMEN QUOTES — ANT / USDC (NOT LIVE)", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Backpack CLOB: $88.40", color = TextPrimary, fontFamily = FontFamily.Monospace)
-                    Text("►", color = PrimaryCyan)
-                    Text("Raydium AMM: $88.58", color = TextPrimary, fontFamily = FontFamily.Monospace)
+        // ---- Specimen quotes (big mono) ----
+        GlowCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                SectionLabel("SPECIMEN QUOTES — ANT / USDC (NOT LIVE)")
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Backpack CLOB: \$88.40", color = Aurora.TextHi, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
+                    Spacer(Modifier.width(10.dp))
+                    Text("▶", color = Aurora.Blue, fontSize = 16.sp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Raydium AMM:", color = Aurora.TextHi, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
+                    Text("\$88.58", color = Aurora.TextHi, fontSize = 17.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                 }
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(Modifier.height(10.dp))
                 Text(
                     "Illustrative dislocation: +18.4 bps — a live adapter must recompute from real order books",
-                    color = TextSecondary, fontSize = 12.sp
+                    color = Aurora.TextLow,
+                    fontSize = 11.sp,
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(Modifier.height(15.dp))
 
-        Text("SPECIMEN EXECUTION FEED (ILLUSTRATIVE FORMAT)", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(modifier = Modifier.height(8.dp))
+        SectionLabel("SPECIMEN EXECUTION FEED (ILLUSTRATIVE FORMAT)")
+        Spacer(Modifier.height(8.dp))
 
-        LazyColumn(modifier = Modifier.weight(1f)) {
-            items(recentTrades) { trade ->
-                Card(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("${trade.time} • ${trade.bundleId}", color = TextSecondary, fontSize = 11.sp)
-                            Text(
-                                "SPECIMEN",
-                                color = AccentIndigo,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text("${trade.buyVenue} ➔ ${trade.sellVenue}", color = TextPrimary, fontSize = 13.sp)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Est. Profit: ${trade.netProfitUsdc} (not realized)", color = TextSecondary, fontWeight = FontWeight.Medium)
-                            Text(trade.spreadBps, color = PrimaryCyan, fontSize = 12.sp)
-                        }
+        feed.forEach { trade ->
+            GlowCard(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 5.dp),
+                background = Aurora.CardAlt,
+                corner = 14.dp,
+                glow = if (trade.toxic) Aurora.Red.copy(alpha = 0.4f) else Aurora.Border,
+            ) {
+                Column(Modifier.padding(13.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(
+                            "${trade.time} • ${trade.bundleId}",
+                            color = Aurora.TextLow,
+                            fontSize = 10.5.sp,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                        SpecimenBadge()
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        trade.route,
+                        color = if (trade.toxic) Aurora.Red else Aurora.TextHi,
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(
+                            "Est. Profit: ${trade.profit}",
+                            color = if (trade.toxic) Aurora.TextLow else Aurora.TextMid,
+                            fontSize = 11.5.sp,
+                        )
+                        Text(trade.bps, color = Aurora.Cyan, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
                     }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(Modifier.height(15.dp))
 
-        // Dynamic risk controls (configuration persisted for the future LIVE path).
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("RISK CONTROLS (STAGED FOR LIVE MODE)", color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Min Spread Threshold", color = TextPrimary, fontSize = 13.sp)
-                    Text(String.format("%.1f bps", minSpreadBps), color = PrimaryCyan, fontSize = 13.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+        // ---- Risk controls with reference dotted slider ----
+        GlowCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(horizontal = 16.dp).padding(top = 16.dp, bottom = 6.dp)) {
+                SectionLabel("RISK CONTROLS (STAGED FOR LIVE MODE)")
+                Spacer(Modifier.height(10.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Min Spread Threshold", color = Aurora.TextMid, fontSize = 14.sp)
+                    Text(
+                        "%.1f bps".format(minSpreadBps),
+                        color = Aurora.Cyan,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                    )
                 }
-                Slider(
+                DotTickSlider(
                     value = minSpreadBps,
                     onValueChange = { minSpreadBps = it },
-                    valueRange = 5f..30f,
-                    steps = 24,
-                    colors = SliderDefaults.colors(
-                        thumbColor = PrimaryCyan,
-                        activeTrackColor = PrimaryCyan,
-                        inactiveTrackColor = SurfaceElevatedDark,
-                    )
+                    range = 5f..30f,
                 )
                 Text(
                     "Fail-closed policy: submission paths abort unless engine state is clear",
-                    color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace
+                    color = Color(0xFF58B7E8),
+                    fontSize = 10.5.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(bottom = 10.dp),
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(Modifier.height(13.dp))
 
-        // REAL emergency halt — persisted, fail-closed, also tripped by thermal guard.
-        val scope = rememberCoroutineScope()
-        val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
-        var holdProgress by remember { mutableStateOf(0f) }
-
+        // ---- Halted state / emergency button ----
         if (haltState.halted) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Critical.copy(alpha = 0.15f)),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
+            GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Red, corner = 14.dp, background = Aurora.Red.copy(alpha = 0.12f)) {
+                Column(Modifier.padding(13.dp)) {
                     Text(
                         "TRADING ENGINE HALTED — fail-closed, persisted across restarts",
-                        color = Critical, fontSize = 12.sp, fontWeight = FontWeight.Bold
+                        color = Aurora.Red, fontSize = 12.sp, fontWeight = FontWeight.Bold,
                     )
+                    Spacer(Modifier.height(4.dp))
                     Text(
-                        "Reason: ${haltState.reason.ifEmpty { "operator emergency stop" }} · ${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(haltState.haltedAtEpochMs))}",
-                        color = TextSecondary, fontSize = 11.sp
+                        "Reason: ${haltState.reason.ifEmpty { "operator emergency stop" }} · ${
+                            SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(haltState.haltedAtEpochMs))
+                        }",
+                        color = Aurora.TextLow, fontSize = 10.5.sp,
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(Modifier.height(10.dp))
         }
 
-        androidx.compose.material3.Surface(
-            shape = RoundedCornerShape(8.dp),
-            color = CriticalCrimson,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
-                .pointerInput(haltState.halted) {
-                    detectTapGestures(
-                        onPress = {
-                            if (!haltState.halted) {
-                                val job = scope.launch {
-                                    // 30 × 50ms = 1.5s hold with haptic ramp-up.
-                                    for (i in 1..30) {
-                                        delay(50)
-                                        holdProgress = i / 30f
-                                        haptics.performHapticFeedback(
-                                            androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress
-                                        )
-                                    }
-                                    TradingEngineController.halt(
-                                        context,
-                                        "Operator emergency stop (long-press hold)"
-                                    )
-                                    holdProgress = 0f
-                                }
-                                tryAwaitRelease()
-                                job.cancel()
-                                holdProgress = 0f
-                            }
-                        }
-                    )
-                }
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Text(
-                    when {
-                        holdProgress > 0f -> "HOLD TO HALT… ${(holdProgress * 100).toInt()}%"
-                        haltState.halted -> "RESUME ENGINE (TAP TO AUTHORIZE)"
-                        else -> "🛑 EMERGENCY HALT TRADING (HOLD 1.5s)"
-                    },
-                    color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp
-                )
-            }
-        }
-        if (holdProgress > 0f) {
-            LinearProgressIndicator(
-                progress = { holdProgress },
-                color = Color.White,
-                trackColor = CriticalCrimson.copy(alpha = 0.4f),
-                modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
-            )
-        }
+        HoldToConfirmButton(
+            text = "🛑  EMERGENCY HALT TRADING (HOLD 1.5s)",
+            holdingText = { p -> "HOLD TO HALT… ${(p * 100).toInt()}%" },
+            onConfirm = {
+                haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                TradingEngineController.halt(context, "Operator emergency stop (long-press hold)")
+            },
+            enabled = !haltState.halted,
+        )
+
         if (haltState.halted) {
+            Spacer(Modifier.height(8.dp))
             Text(
-                "Resume is an explicit operator authorization (audit prompt Phase 3 §Emergency Halt §7).",
-                color = TextSecondary, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp)
+                "Resume is an explicit operator authorization (tap to authorize) — the engine stays halted across restarts until then.",
+                color = Aurora.TextFaint, fontSize = 10.sp,
             )
+        }
+    }
+}
+
+@Composable
+private fun SpecimenBadge() {
+    Text(
+        "SPECIMEN",
+        color = Aurora.Periwinkle,
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 0.8.sp,
+        modifier = Modifier
+            .clip(RoundedCornerShape(5.dp))
+            .background(Aurora.Periwinkle.copy(alpha = 0.14f))
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+    )
+}
+
+@Composable
+private fun ModeCard(modeLabel: String, modeColor: Color, detail: String) {
+    GlowCard(Modifier.fillMaxWidth(), glow = modeColor.copy(alpha = 0.4f), corner = 14.dp) {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Warning, null, tint = modeColor, modifier = Modifier.size(13.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("MODE: ", color = Aurora.TextLow, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                Text(modeLabel, color = modeColor, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(detail, color = Aurora.TextMid, fontSize = 11.5.sp, lineHeight = 16.sp)
+        }
+    }
+}
+
+@Composable
+private fun ScreenTitle(title: String, subtitle: String) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column {
+            Text(title, color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text(subtitle, color = Aurora.TextFaint, fontSize = 11.sp)
+        }
+        Box(Modifier.size(34.dp).clip(RoundedCornerShape(11.dp)).background(Aurora.Card), contentAlignment = Alignment.Center) {
+            Icon(Icons.Filled.ShowChart, null, tint = Aurora.Cyan, modifier = Modifier.size(17.dp))
         }
     }
 }
