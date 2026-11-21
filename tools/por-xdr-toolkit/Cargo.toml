@@ -1,0 +1,22 @@
+[package]
+name = "por-xdr-toolkit"
+version = "1.0.0"
+edition = "2021"
+description = "Canonical Soroban storage-key encoder/decoder for FurlPay PoR audits: RFC 4506 Option<ScVec> presence-flag regression tests and LedgerKey round-trip guarantees."
+
+# Standalone audit tool — intentionally excluded from the mobilecloud-platform
+# workspace (same discipline as the frozen tools/xdrkey reference encoder).
+[workspace]
+
+[dependencies]
+# Pinned to the frozen audit toolchain (versions.txt, 2026-11-21 baseline).
+# Protocol 30 (stellar-xdr 30.x) alignment is a Phase 3 migration; the RFC
+# 4506 invariants tested here are version-independent.
+stellar-xdr = { version = "=22.1.0", default-features = false, features = ["curr", "std"] }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "por-xdr"
+path = "src/main.rs"

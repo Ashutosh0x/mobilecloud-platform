@@ -1,0 +1,39 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# Android / Gradle
+android-app/.gradle/
+android-app/build/
+android-app/local.properties
+android-app/.idea/
+android-app/.cxx/
+android-app/app/.cxx/
+android-app/app/build/
+android-app/build/
+android-app/captures/
+android-app/.externalNativeBuild/
+*.apk
+*.aab
+*.keystore
+
+# Node / Web CloudShell
+web-cloudshell/node_modules/
+web-cloudshell/dist/
+
+# Web build output (platform root)
+/dist
+
+# MobileCloud engine runtime state (never commit on-device data)
+.mobilecloud/
+deployments/
+sources/
+cache/
+*.db
+*.db-wal
+*.db-shm
+
+# OS noise
+.DS_Store
+Thumbs.db

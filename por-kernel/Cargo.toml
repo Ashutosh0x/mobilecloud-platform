@@ -1,0 +1,19 @@
+[package]
+name = "por-kernel"
+description = "FurlPay Deterministic Reconciliation Engine: checked 256-bit fixed-point math, RFC 8785 evidence envelopes, multi-source evidence parsers, and T+1 settlement accounting."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+ed25519-dalek = "2"
+rsa = { version = "0.9", features = ["sha2"] }
+
+[dev-dependencies]
+# RSA test anchors must meet the 512-bit minimum key size — generate real keys.
+rand = "0.8"

@@ -1,0 +1,7 @@
+AUDIT TOOLCHAIN VERSIONS (frozen 2026-11-21T12:38:21Z)
+rustc: rustc 1.100.0 (0ef1bc386 2026-11-09)
+stellar-xdr crate (decoder/reference encoder): 22.1.0 (pinned, offline build)
+reference encoder: tools/xdrkey (standalone crate, stellar-xdr =22.1.0)
+endpoint protocol: 30 (see endpoint/fingerprint.txt; rpc 30.0.1-6b6ec60c)
+Cargo.lock sha256: a3904d2db981fb4da121b9c297070c025fb0eeabb7187ee6086dc16ab773024d
+verifier: pure Python RFC 8032 (crypto/verify_baseline.py), python: Python 3.8.10

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Defense-in-depth (GitHub manifest pattern, decompilation report §17.3 #9):
+     cleartext is forbidden everywhere except the on-device loopback to the
+     mobilecloud-core supervisor daemon. Every WAN destination stays TLS-only. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

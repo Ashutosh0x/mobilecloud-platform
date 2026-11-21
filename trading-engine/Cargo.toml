@@ -1,0 +1,35 @@
+[package]
+name = "trading-engine"
+description = "FurlPay × MobileCloud edge trading engine: Solana cross-DEX/CLOB atomic arbitrage with Jito MEV bundles, Android edge runtime daemon (thermal + bypass charging supervision), and Stellar Soroban circuit-breaker client."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mobilecloud-trading"
+path = "src/main.rs"
+
+[dependencies]
+por-kernel = { path = "../por-kernel" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+
+# Solana + Jito stack behind a feature: solana-sdk 2.2+ transitively links
+# openssl-sys (solana-secp256r1-program), which has no place on a
+# passively-cooled ARM64 edge node. The arbitrage engine's type surface
+# (Pubkey / Instruction / Keypair / Transaction) is compiled against the SDK
+# only when `--features solana` is enabled; the default build keeps the
+# pure-Rust risk + circuit-breaker stack and the arithmetic test suite.
+solana-sdk = { version = "~2.1.0", optional = true }
+
+[features]
+solana = ["dep:solana-sdk"]

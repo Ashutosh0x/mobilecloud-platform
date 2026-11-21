@@ -1,0 +1,13 @@
+SOROBAN TESTNET RPC ENDPOINT FINGERPRINT (captured 2026-11-21)
+endpoint: https://soroban-testnet.stellar.org
+protocol_version: 30
+latest_ledger_seq: 5848195
+latest_ledger_close_time: 1795264616
+ledger_hash: d8a197de5bc929cd19dc40be09222421c90909c6fa912c93bd6b45e99d021c31
+network_passphrase: Test SDF Network ; September 2015
+friendbot: https://friendbot.stellar.org/
+rpc_version: 30.0.1-6b6ec60c8bde5a93984b6290065d3882d384b25d
+rpc_commit: None
+rpc_build_time: None
+core_version: None
+soroban_ext_version: None

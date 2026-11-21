@@ -1,0 +1,20 @@
+[package]
+name = "por-verifier"
+description = "Hardened Stellar Soroban Proof-of-Reserve contract: M-of-N Ed25519 threshold attestation with O(N) ascending-signer duplicate prevention, monotonic sequence replay defense, and independent on-chain ratio calculation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+soroban-sdk = "22"
+
+[dev-dependencies]
+soroban-sdk = { version = "22", features = ["testutils"] }
+ed25519-dalek = "2"
+
+# `cargo test` on the host uses the rlib target; `cargo build --target
+# wasm32-unknown-unknown` emits the deployable cdylib WASM blob.
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"

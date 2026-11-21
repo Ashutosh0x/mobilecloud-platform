@@ -1,0 +1,13 @@
+[package]
+name = "por-attestor"
+description = "Host-side attestor: runs the real por-kernel reconciliation, derives the contract-exact domain-separated digest, signs with the 5-device Ed25519 quorum, and emits CLI-ready JSON."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+por-kernel = { path = "../../por-kernel" }
+ed25519-dalek = "2"
+hex = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }

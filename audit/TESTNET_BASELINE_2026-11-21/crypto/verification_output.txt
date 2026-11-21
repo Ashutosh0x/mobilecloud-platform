@@ -1,0 +1,12 @@
+preimage (62B): 4655524c5041595f504f525f56310000000000000007000000006b01805b000000000000d3c21bcecceda1000000000000000000d3c21bcecceda1000000
+digest           : e825ef9dfd79611ff7458a236534b83ce427d3c73b2c46b0938c1a550da1ea77
+
+quorum: 3 signers | ascending: True
+  pk 06da5f1bd68470c2ce00b2f6015db12d91ef3c416a2cdfa36b1f8659640e7365  RFC8032: VALID
+  pk 35917340e8affe67aa36a6e8877e5abf07dc181bea8fb27fcf2aa2777cafd9dd  RFC8032: VALID
+  pk f5aabb24e5365df0267e67e64174ce7d1c0846824144e4fd5dfb447b9c972c1a  RFC8032: VALID
+
+quorum keys subset of on-chain Signers registry: True
+registry size: 5 | on-chain threshold: 3 | valid sigs: 3 >= threshold: True
+
+FROZEN BASELINE VERIFICATION: ALL CHECKS PASS

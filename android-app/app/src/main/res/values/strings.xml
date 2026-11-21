@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_edge_status_description">Live node health: SoC thermals, USB-PD bypass state and mesh peers.</string>
+    <string name="widget_por_solvency_description">FurlPay Proof-of-Reserve backing ratio with the five-tier governance badge.</string>
+</resources>

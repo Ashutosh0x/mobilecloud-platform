@@ -1,0 +1,14 @@
+[package]
+name = "por-submitter"
+description = "Native Soroban RPC submitter for the PoR contract: builds XDR envelopes with full 18-decimal u128 amounts, simulates for footprint/fees, signs, and submits — bypassing the stellar-cli JSON argument limitation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+soroban-sdk = { version = "22", default-features = false, features = ["alloc"] }
+stellar-rpc-client = "22"
+ed25519-dalek = "2"
+sha2 = { workspace = true }
+hex = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
