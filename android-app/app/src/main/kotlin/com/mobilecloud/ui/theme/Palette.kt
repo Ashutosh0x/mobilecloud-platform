@@ -3,51 +3,53 @@ package com.mobilecloud.ui.theme
 import androidx.compose.ui.graphics.Color
 
 /**
- * "Aurora Console" — the reference-design token set extracted from the eight
- * approved UI/UX screenshots (2026-11-21). Layered ON TOP of the CIDS tokens
- * in Theme.kt; existing imports keep compiling while new screens consume the
- * reference-exact surfaces below.
- *
- * Reference mapping:
- *   Background      #0A0E17 → #0D1117 range (near-black navy, OLED)
- *   SurfaceCard     #121926 / #141C2B (cards)   #10192B (alt rows)
- *   GlowGreen       #00E88A / #22E58C (identity glow, online, success)
- *   Cyan            #3FA9F5 / #4DA3FF (bps, links, sliders)
- *   Purple          #6C5CE7 pill / #5B4B9E deep (active nav)
- *   Amber           #E8A33D (SIMULATION mode, "NOT DETECTED")
- *   Red             #E5484D (DEGRADED, temp alert, halt button)
- *   Gold            #E8A33D (PoR "VERIFICATION STATUS" heading)
+ * MobileCloud Unified Design System tokens — 100% synchronized with the
+ * Next.js Web Console (`globals.css`):
+ *   --bg:       #000000 (Pure black, OLED 0W idle)
+ *   --header:   #000000
+ *   --card:     #111111 (Deep dark surface)
+ *   --elevated: #1a1a1a (Elevated surface / row hover)
+ *   --accent:   #0070f3 (Electric Azure Blue)
+ *   --text:     #ededed (Off-white high contrast)
+ *   --muted:    #888888 (Medium gray metadata)
+ *   --faint:    #555555 (Subtle captions / key hints)
+ *   --line:     #333333 (1px crisp borders)
+ *   --divider:  #222222 (List row dividers)
+ *   --green:    #00e599 (Electric Emerald active / live)
+ *   --amber:    #f5a623 (Warm Amber warning)
+ *   --red:      #ee0000 (Vibrant Red error / halted)
+ *   --radius:   8px / 12px
  */
 object Aurora {
-    val Bg = Color(0xFF0A0E17)            // page background
-    val BgDeep = Color(0xFF070A12)        // status-bar / deeper wells
-    val Card = Color(0xFF121A29)          // standard card surface
-    val CardAlt = Color(0xFF10192B)       // feed rows / alternate surfaces
-    val CardWell = Color(0xFF0D1524)      // inset wells (terminal, meters)
-    val Border = Color(0xFF1E293B)        // subtle card border
-    val BorderGlow = Color(0x4D00E88A)    // green glow border (~30% α)
+    val Bg = Color(0xFF000000)            // --bg: #000000 (pure black)
+    val BgDeep = Color(0xFF000000)        // --header: #000000
+    val Card = Color(0xFF111111)          // --card: #111111
+    val CardAlt = Color(0xFF1A1A1A)       // --elevated: #1a1a1a
+    val CardWell = Color(0xFF0A0A0A)      // inset terminal / meter wells
+    val Border = Color(0xFF333333)        // --line: #333333
+    val BorderGlow = Color(0x330070F3)    // subtle accent glow (~20% α)
 
-    val GlowGreen = Color(0xFF00E88A)     // primary identity green
-    val GreenSoft = Color(0xFF22E58C)     // online dot / footer text
-    val GreenDeep = Color(0xFF0E2E1E)     // online pill bg
-    val Cyan = Color(0xFF3FA9F5)          // metrics / slider fill
-    val Blue = Color(0xFF4DA3FF)          // battery, links, chips
-    val Purple = Color(0xFF6C5CE7)        // active nav icon accent
-    val PurpleDeep = Color(0xFF5B4B9E)    // active nav pill bg
-    val Amber = Color(0xFFE8A33D)         // simulation / warnings
-    val Red = Color(0xFFE5484D)           // degraded / halt / hot temp
-    val RedDeep = Color(0xFFC23329)       // halt icon well
-    val Gold = Color(0xFFE8A33D)          // PoR section heading
-    val Periwinkle = Color(0xFF7B8CFF)    // SPECIMEN badge
+    val GlowGreen = Color(0xFF00E599)     // --green: #00e599 (electric emerald)
+    val GreenSoft = Color(0xFF00E599)     // online dot / success indicator
+    val GreenDeep = Color(0xFF0B291B)     // online pill container
+    val Cyan = Color(0xFF0070F3)          // --accent: #0070f3 (electric azure)
+    val Blue = Color(0xFF0070F3)          // --accent: #0070f3
+    val Purple = Color(0xFF0070F3)        // active nav mapped to web accent
+    val PurpleDeep = Color(0xFF0B213E)    // active nav container
+    val Amber = Color(0xFFF5A623)         // --amber: #f5a623
+    val Red = Color(0xFFEE0000)           // --red: #ee0000
+    val RedDeep = Color(0xFF2E0909)       // halt icon container
+    val Gold = Color(0xFFF5A623)          // PoR section heading
+    val Periwinkle = Color(0xFF0070F3)    // SPECIMEN badge
 
-    val TextHi = Color(0xFFF2F6FF)        // primary text
-    val TextMid = Color(0xFFB8C4D6)       // body text
-    val TextLow = Color(0xFF8A93A6)       // labels / timestamps
-    val TextFaint = Color(0xFF6B7688)     // captions / footnotes
-    val ChipBg = Color(0xFF16223A)        // src-chip bg
-    val ChipText = Color(0xFF7FA8D9)      // src-chip text
-    val Track = Color(0xFF1B2537)         // progress track
-    val Divider = Color(0xFF1C2434)       // row dividers
+    val TextHi = Color(0xFFEDEDED)        // --text: #ededed
+    val TextMid = Color(0xFF888888)       // --muted: #888888
+    val TextLow = Color(0xFF555555)       // --faint: #555555
+    val TextFaint = Color(0xFF444444)     // subtle footnotes
+    val ChipBg = Color(0xFF1A1A1A)        // --elevated / hover
+    val ChipText = Color(0xFFEDEDED)      // --text
+    val Track = Color(0xFF222222)         // --divider
+    val Divider = Color(0xFF222222)       // --divider: #222222
 }
 
 /** Cross-fade surface aliases so screens read naturally. */

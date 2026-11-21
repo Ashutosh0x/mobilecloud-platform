@@ -31,17 +31,17 @@ import androidx.compose.ui.unit.sp
  * < 0.08 W display budget). A complete light scheme ships anyway so a future
  * high-brightness / accessibility mode needs no re-derivation.
  */
-val Background = Color(0xFF070A13) // deep OLED black baseline
-val Surface = Color(0xFF0F172A) // elevated cards, sheets, dialogs
-val SurfaceElevated = Color(0xFF1E293B) // inputs, selected chips, borders
-val Primary = Color(0xFF38BDF8) // cyan: active tabs, CTAs, network sync
-val Accent = Color(0xFF818CF8) // indigo: cryptographic proofs, Soroban
-val Success = Color(0xFF10B981) // emerald: >100% backing, bypass active, arb profit
-val Warning = Color(0xFFF59E0B) // amber: 99.50-99.99% reserve, thermal > 41 C
-val Critical = Color(0xFFEF4444) // crimson: deficit < 99.50%, kill switch
-val TextPrimary = Color(0xFFF8FAFC) // headers, critical values, tickers
-val TextSecondary = Color(0xFF94A3B8) // metadata, timestamps, units
-val MonospaceCode = Color(0xFF34D399) // terminal green: PTY output, hashes
+val Background = Color(0xFF000000) // --bg: #000000 (pure black OLED baseline)
+val Surface = Color(0xFF111111) // --card: #111111 (elevated cards, panels)
+val SurfaceElevated = Color(0xFF1A1A1A) // --elevated: #1a1a1a (inputs, chips, borders)
+val Primary = Color(0xFF0070F3) // --accent: #0070f3 (electric azure)
+val Accent = Color(0xFF0070F3) // --accent: #0070f3
+val Success = Color(0xFF00E599) // --green: #00e599 (electric emerald)
+val Warning = Color(0xFFF5A623) // --amber: #f5a623 (warm amber)
+val Critical = Color(0xFFEE0000) // --red: #ee0000 (vibrant crimson)
+val TextPrimary = Color(0xFFEDEDED) // --text: #ededed (high-contrast off-white)
+val TextSecondary = Color(0xFF888888) // --muted: #888888 (medium gray metadata)
+val MonospaceCode = Color(0xFF00E599) // --green: #00e599 (terminal output, hashes)
 
 // Screen-facing aliases (existing screens import these names).
 val BgDark = Background
@@ -206,26 +206,26 @@ val MotionLegacy = CubicBezierEasing(0.4f, 0f, 0.2f, 1f) // fallback standard
 // so data screens additionally use FontFamily.Monospace at call sites.
 // ---------------------------------------------------------------------------
 private val CidsTypography = Typography(
-    displayLarge = TextStyle(fontSize = 24.sp, fontWeight = FontWeight.Bold, lineHeight = 30.sp),
-    displayMedium = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold, lineHeight = 28.sp),
-    headlineSmall = TextStyle(fontSize = 20.sp, fontWeight = FontWeight.SemiBold, lineHeight = 26.sp),
-    titleLarge = TextStyle(fontSize = 20.sp, fontWeight = FontWeight.SemiBold, lineHeight = 26.sp),
-    titleMedium = TextStyle(fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 24.sp),
-    titleSmall = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.SemiBold, lineHeight = 22.sp),
-    bodyLarge = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Normal, lineHeight = 22.sp),
-    bodyMedium = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Normal, lineHeight = 20.sp),
-    bodySmall = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Normal, lineHeight = 18.sp),
-    labelLarge = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium),
-    labelMedium = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium),
-    labelSmall = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.8.sp),
+    displayLarge = TextStyle(fontSize = 24.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.8).sp, lineHeight = 30.sp),
+    displayMedium = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.8).sp, lineHeight = 28.sp),
+    headlineSmall = TextStyle(fontSize = 20.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.6).sp, lineHeight = 26.sp),
+    titleLarge = TextStyle(fontSize = 20.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.6).sp, lineHeight = 26.sp),
+    titleMedium = TextStyle(fontSize = 18.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.4).sp, lineHeight = 24.sp),
+    titleSmall = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Medium, letterSpacing = (-0.3).sp, lineHeight = 22.sp),
+    bodyLarge = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Normal, letterSpacing = (-0.15).sp, lineHeight = 22.sp),
+    bodyMedium = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Normal, letterSpacing = (-0.15).sp, lineHeight = 20.sp),
+    bodySmall = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Normal, letterSpacing = (-0.15).sp, lineHeight = 18.sp),
+    labelLarge = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium, letterSpacing = (-0.15).sp),
+    labelMedium = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium, letterSpacing = (-0.15).sp),
+    labelSmall = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.5.sp),
 )
 
 private val CidsShapes = Shapes(
-    extraSmall = RoundedCornerShape(6.dp),
-    small = RoundedCornerShape(8.dp),
-    medium = RoundedCornerShape(12.dp), // cards
-    large = RoundedCornerShape(16.dp),
-    extraLarge = RoundedCornerShape(24.dp), // bottom sheets
+    extraSmall = RoundedCornerShape(4.dp),
+    small = RoundedCornerShape(8.dp),   // --radius: 8px
+    medium = RoundedCornerShape(10.dp), // cards
+    large = RoundedCornerShape(12.dp),
+    extraLarge = RoundedCornerShape(16.dp), // bottom sheets
 )
 
 // Full dark ColorScheme — CIDS identity on the Primer container ladder.

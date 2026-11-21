@@ -73,7 +73,7 @@ fun SecurityScreen() {
             ) {
                 Text(
                     "← Security",
-                    color = Aurora.GlowGreen,
+                    color = Aurora.Cyan,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clickable { showMesh = false },
                 )
@@ -94,17 +94,17 @@ fun SecurityScreen() {
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column {
-                Text("Security", color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Text("StrongBox, app lock, mesh", color = Aurora.TextFaint, fontSize = 11.sp)
+                Text("Security", color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.4).sp)
+                Text("StrongBox, app lock, mesh", color = Aurora.TextMid, fontSize = 11.sp)
             }
-            IconBadge(Icons.Filled.Shield, Aurora.GlowGreen, size = 34.dp, iconSize = 18.dp)
+            IconBadge(Icons.Filled.Shield, Aurora.Cyan, size = 34.dp, iconSize = 18.dp)
         }
         Spacer(Modifier.height(14.dp))
 
-        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.GlowGreen, corner = 20.dp) {
+        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Cyan, corner = 12.dp) {
             Column(Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconBadge(Icons.Filled.VerifiedUser, Aurora.GlowGreen, size = 28.dp, iconSize = 16.dp)
+                    IconBadge(Icons.Filled.VerifiedUser, Aurora.Cyan, size = 28.dp, iconSize = 16.dp)
                     Spacer(Modifier.width(8.dp))
                     SectionLabel("DEVICE TRUST")
                 }
@@ -121,7 +121,7 @@ fun SecurityScreen() {
                     fontFamily = FontFamily.Monospace,
                 )
                 Spacer(Modifier.height(6.dp))
-                Text(keystore.detail, color = Aurora.TextFaint, fontSize = 11.sp, lineHeight = 15.sp)
+                Text(keystore.detail, color = Aurora.TextMid, fontSize = 11.sp, lineHeight = 15.sp)
                 Spacer(Modifier.height(8.dp))
                 RefSourceChip("AndroidKeyStore")
             }
@@ -129,10 +129,10 @@ fun SecurityScreen() {
 
         Spacer(Modifier.height(12.dp))
 
-        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Purple.copy(alpha = 0.45f)) {
+        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Border, corner = 12.dp) {
             Column(Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconBadge(Icons.Filled.Key, Aurora.Purple, size = 28.dp, iconSize = 15.dp)
+                    IconBadge(Icons.Filled.Key, Aurora.Cyan, size = 28.dp, iconSize = 15.dp)
                     Spacer(Modifier.width(8.dp))
                     SectionLabel("HARDWARE KEY")
                 }
@@ -140,23 +140,23 @@ fun SecurityScreen() {
                 Text("Algorithm  ${keystore.keyAlgorithm}", color = Aurora.TextMid, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                 Text(
                     "SHA-256  ${keystore.publicKeySha256.take(24)}…",
-                    color = Aurora.Periwinkle,
+                    color = Aurora.Cyan,
                     fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace,
                 )
                 Spacer(Modifier.height(12.dp))
                 Button(
                     onClick = { keystore = HardwareAttestation.rotateKey() },
-                    modifier = Modifier.fillMaxWidth().height(44.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Aurora.PurpleDeep),
-                    shape = RoundedCornerShape(12.dp),
-                ) { Text("Rotate hardware key", color = Color.White, fontWeight = FontWeight.SemiBold) }
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Aurora.CardAlt),
+                    shape = RoundedCornerShape(8.dp),
+                ) { Text("Rotate hardware key", color = Aurora.TextHi, fontWeight = FontWeight.SemiBold, fontSize = 13.sp) }
             }
         }
 
         Spacer(Modifier.height(12.dp))
 
-        GlowCard(Modifier.fillMaxWidth()) {
+        GlowCard(Modifier.fillMaxWidth(), corner = 12.dp) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconBadge(Icons.Filled.Fingerprint, Aurora.Cyan, size = 28.dp, iconSize = 16.dp)
                 Spacer(Modifier.width(10.dp))
@@ -164,7 +164,7 @@ fun SecurityScreen() {
                     Text("Biometric app lock", color = Aurora.TextHi, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                     Text(
                         if (lockOn) "Gate re-arms after the app is backgrounded" else "Lock is off on this device",
-                        color = Aurora.TextFaint,
+                        color = Aurora.TextMid,
                         fontSize = 11.sp,
                     )
                 }
@@ -174,13 +174,13 @@ fun SecurityScreen() {
 
         Spacer(Modifier.height(12.dp))
 
-        GlowCard(Modifier.fillMaxWidth().clickable { showMesh = true }, glow = Aurora.GlowGreen.copy(alpha = 0.35f)) {
+        GlowCard(Modifier.fillMaxWidth().clickable { showMesh = true }, glow = Aurora.Border, corner = 12.dp) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconBadge(Icons.Filled.Hub, Aurora.GlowGreen, size = 28.dp, iconSize = 16.dp)
+                IconBadge(Icons.Filled.Hub, Aurora.Cyan, size = 28.dp, iconSize = 16.dp)
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text("Mesh cluster", color = Aurora.TextHi, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                    Text("WireGuard overlay peers and path health", color = Aurora.TextFaint, fontSize = 11.sp)
+                    Text("WireGuard overlay peers and path health", color = Aurora.TextMid, fontSize = 11.sp)
                 }
                 Box(Modifier.size(8.dp).clip(CircleShape).background(Aurora.GlowGreen))
             }

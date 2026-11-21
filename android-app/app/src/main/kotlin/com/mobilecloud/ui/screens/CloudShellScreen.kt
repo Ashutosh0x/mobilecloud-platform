@@ -128,13 +128,14 @@ fun CloudShellScreen() {
 
         Spacer(Modifier.height(9.dp))
 
-        // ---- Terminal well (real PTY bytes) ----
+        // ---- Terminal well (matching web console .term container) ----
         Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
-                .background(Color(0xFF050A16))
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0xFF0D0D0D))
+                .border(1.dp, Aurora.Border, RoundedCornerShape(12.dp))
                 .padding(9.dp)
         ) {
             TerminalSurfaceView(
@@ -146,15 +147,15 @@ fun CloudShellScreen() {
 
         Spacer(Modifier.height(9.dp))
 
-        // ---- Command input (ref5 bordered bar + ⏎) ----
-        GlowCard(Modifier.fillMaxWidth(), corner = 13.dp, background = Aurora.CardAlt) {
+        // ---- Command input bar ----
+        GlowCard(Modifier.fillMaxWidth(), corner = 10.dp, background = Aurora.CardAlt) {
             OutlinedTextField(
                 value = inputBuffer,
                 onValueChange = { inputBuffer = it },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
-                placeholder = { Text("type a command…", color = Aurora.TextFaint, fontSize = 12.sp) },
+                placeholder = { Text("type a command…", color = Aurora.TextLow, fontSize = 12.sp) },
                 textStyle = TextStyle(
-                    color = Aurora.GlowGreen,
+                    color = Aurora.TextHi,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 13.sp,
                 ),
@@ -166,7 +167,7 @@ fun CloudShellScreen() {
                     }) { Text("⏎", color = Aurora.Cyan, fontWeight = FontWeight.Bold) }
                 },
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Aurora.Cyan.copy(alpha = 0.6f),
+                    focusedBorderColor = Aurora.Cyan,
                     unfocusedBorderColor = Aurora.Border,
                     cursorColor = Aurora.Cyan,
                 ),

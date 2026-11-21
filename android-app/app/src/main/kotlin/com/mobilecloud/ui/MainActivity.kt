@@ -128,11 +128,7 @@ private fun AppShell() {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Aurora.Bg, Aurora.Bg, Aurora.BgDeep)
-                )
-            )
+            .background(Aurora.Bg)
     ) {
         // Screen body with cross-fade/slide transition.
         AnimatedContent(
@@ -152,7 +148,7 @@ private fun AppShell() {
             }
         }
 
-        // Floating reference nav bar.
+        // Floating reference nav bar matching web console styling.
         AuroraNavBar(
             tabs = tabs,
             selected = selected,
@@ -166,8 +162,8 @@ private fun AppShell() {
 }
 
 /**
- * Reference bottom bar: dark capsule, green edge glow, four destinations.
- * The active item is a green pill (Dashboard / Security / CloudShell / Settings).
+ * Bottom navigation bar: pitch-black/card surface, 1px border (#333333),
+ * active tab highlighted with electric blue (#0070F3) pill matching web console.
  */
 @Composable
 private fun AuroraNavBar(
@@ -176,24 +172,14 @@ private fun AuroraNavBar(
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val shape = RoundedCornerShape(26.dp)
+    val shape = RoundedCornerShape(14.dp)
     Row(
         modifier = modifier
             .fillMaxWidth()
             .clip(shape)
-            .background(Aurora.Card.copy(alpha = 0.96f))
-            .border(
-                1.dp,
-                Brush.horizontalGradient(
-                    listOf(
-                        Aurora.GlowGreen.copy(alpha = 0.45f),
-                        Aurora.Purple.copy(alpha = 0.35f),
-                        Aurora.GlowGreen.copy(alpha = 0.45f),
-                    )
-                ),
-                shape,
-            )
-            .padding(horizontal = 8.dp, vertical = 8.dp),
+            .background(Aurora.Card.copy(alpha = 0.98f))
+            .border(1.dp, Aurora.Border, shape)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -202,42 +188,41 @@ private fun AuroraNavBar(
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(18.dp))
+                    .clip(RoundedCornerShape(8.dp))
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                     ) { onSelect(index) }
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
             ) {
                 Box(
                     modifier = Modifier
                         .then(
                             if (active) Modifier
                                 .background(
-                                    Brush.verticalGradient(
-                                        listOf(Color(0xFF163D2C), Color(0xFF0E2A1C))
-                                    ),
-                                    RoundedCornerShape(16.dp),
+                                    Color(0x220070F3),
+                                    RoundedCornerShape(8.dp),
                                 )
-                                .border(1.dp, Aurora.GlowGreen.copy(alpha = 0.65f), RoundedCornerShape(16.dp))
+                                .border(1.dp, Color(0x660070F3), RoundedCornerShape(8.dp))
                             else Modifier
                         )
-                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                        .padding(horizontal = 14.dp, vertical = 5.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
                         tab.icon,
                         contentDescription = tab.label,
-                        tint = if (active) Aurora.GlowGreen else Color(0xFF66738C),
-                        modifier = Modifier.size(20.dp),
+                        tint = if (active) Aurora.Cyan else Aurora.TextMid,
+                        modifier = Modifier.size(19.dp),
                     )
                 }
-                Spacer(Modifier.height(3.dp))
+                Spacer(Modifier.height(2.dp))
                 Text(
                     tab.label,
-                    fontSize = 10.sp,
-                    fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-                    color = if (active) Aurora.GlowGreen else Color(0xFF66738C),
+                    fontSize = 11.sp,
+                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (active) Aurora.Cyan else Aurora.TextMid,
+                    letterSpacing = (-0.2).sp,
                     maxLines = 1,
                 )
             }

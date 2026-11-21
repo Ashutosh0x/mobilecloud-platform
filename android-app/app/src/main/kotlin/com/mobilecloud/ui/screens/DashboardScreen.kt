@@ -99,51 +99,68 @@ fun DashboardScreen() {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(13.dp))
-                        .background(
-                            androidx.compose.ui.graphics.Brush.linearGradient(
-                                listOf(Color(0xFF2E5BFF), Color(0xFF8B5CF6))
-                            )
-                        ),
+                        .size(36.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Aurora.TextHi),
                     contentAlignment = Alignment.Center,
-                ) { Text("☁", color = Color.White, fontSize = 19.sp) }
-                Spacer(Modifier.width(9.dp))
+                ) {
+                    Text(
+                        "M",
+                        color = Aurora.Bg,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
                 Column {
-                    Text("MobileCloud", color = Aurora.TextHi, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    Text("Your Android. Your Cloud.", color = Aurora.TextFaint, fontSize = 9.5.sp)
+                    Text(
+                        "MobileCloud",
+                        color = Aurora.TextHi,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = (-0.4).sp,
+                    )
+                    Text(
+                        "Build. Ship. Scale.",
+                        color = Aurora.TextMid,
+                        fontSize = 11.sp,
+                        letterSpacing = (-0.1).sp,
+                    )
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 StatusPill("Online", color = Aurora.GreenSoft)
-                Spacer(Modifier.width(7.dp))
+                Spacer(Modifier.width(8.dp))
                 Box(
                     Modifier
-                        .size(32.dp)
-                        .clip(CircleShape)
-                        .background(Aurora.Card),
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Aurora.Card)
+                        .border(1.dp, Aurora.Border, RoundedCornerShape(8.dp)),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
                         Icons.Filled.Notifications, null,
-                        tint = Aurora.TextLow, modifier = Modifier.size(16.dp),
+                        tint = Aurora.TextMid, modifier = Modifier.size(16.dp),
                     )
                     Box(
                         Modifier
-                            .padding(top = 6.dp, end = 6.dp)
+                            .padding(top = 7.dp, end = 7.dp)
                             .size(5.dp)
                             .align(Alignment.TopEnd)
-                            .background(Aurora.Red, CircleShape)
+                            .background(Aurora.Cyan, CircleShape)
                     )
                 }
-                Spacer(Modifier.width(7.dp))
+                Spacer(Modifier.width(8.dp))
                 Box(
                     Modifier
-                        .size(32.dp)
+                        .size(34.dp)
                         .clip(CircleShape)
-                        .background(Color(0xFF3A4440)),
+                        .background(Aurora.CardAlt)
+                        .border(1.dp, Aurora.Border, CircleShape),
                     contentAlignment = Alignment.Center,
-                ) { Text("A", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                ) { Text("A", color = Aurora.TextHi, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
             }
         }
 
@@ -159,35 +176,36 @@ fun DashboardScreen() {
             return@Column
         }
 
-        // ---- Hero: device identity (ref8 glowing card + shield badge) ----
-        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.GlowGreen, corner = 20.dp) {
+        // ---- Hero: device identity card ----
+        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Cyan, corner = 12.dp) {
             Box {
                 Row(
                     Modifier.padding(16.dp).fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconBadge(Icons.Filled.Devices, Aurora.GlowGreen, size = 46.dp, iconSize = 24.dp)
-                    Spacer(Modifier.width(13.dp))
+                    IconBadge(Icons.Filled.Devices, Aurora.Cyan, size = 44.dp, iconSize = 22.dp)
+                    Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        SectionLabel("DEVICE IDENTITY")
+                        SectionLabel("DEVICE NODE", color = Aurora.TextLow)
                         Spacer(Modifier.height(3.dp))
                         Text(
                             t.deviceModel,
                             color = Aurora.TextHi,
-                            fontSize = 21.sp,
+                            fontSize = 20.sp,
                             fontWeight = FontWeight.Bold,
+                            letterSpacing = (-0.4).sp,
                         )
                         Text(
                             "${t.socModel ?: t.deviceBoard} · Android ${t.androidRelease} (SDK ${t.sdkInt}) · arm64-v8a",
-                            color = Aurora.TextLow,
-                            fontSize = 10.5.sp,
+                            color = Aurora.TextMid,
+                            fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
                         )
                     }
                 }
                 Icon(
                     Icons.Filled.VerifiedUser, null,
-                    tint = Aurora.GlowGreen,
+                    tint = Aurora.Cyan,
                     modifier = Modifier.align(Alignment.TopEnd).padding(14.dp).size(18.dp),
                 )
             }

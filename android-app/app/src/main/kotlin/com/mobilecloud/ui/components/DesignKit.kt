@@ -62,15 +62,15 @@ import kotlinx.coroutines.delay
  * =========================================================================
 
 /**
- * Signature surface: dark card with a soft glowing border (ref8 identity).
+ * Signature surface: dark card with a crisp border matching web console tokens.
  * [glow] picks the border hue; pass [Aurora.Border] for a flat subtle card.
  */
 @Composable
 fun GlowCard(
     modifier: Modifier = Modifier,
     glow: Color = Aurora.Border,
-    glowRadius: Dp = 10.dp,
-    corner: Dp = 18.dp,
+    glowRadius: Dp = 8.dp,
+    corner: Dp = 12.dp,
     background: Color = Aurora.Card,
     content: @Composable () -> Unit,
 ) {
@@ -81,18 +81,18 @@ fun GlowCard(
                 if (glow != Aurora.Border) {
                     // Soft outer halo behind the card.
                     drawRoundRect(
-                        color = glow.copy(alpha = 0.14f),
+                        color = glow.copy(alpha = 0.12f),
                         cornerRadius = CornerRadius(corner.toPx(), corner.toPx()),
-                        topLeft = Offset(-glowRadius.toPx() * 0.4f, -glowRadius.toPx() * 0.4f),
-                        size = Size(size.width + glowRadius.toPx() * 0.8f, size.height + glowRadius.toPx() * 0.8f),
+                        topLeft = Offset(-glowRadius.toPx() * 0.3f, -glowRadius.toPx() * 0.3f),
+                        size = Size(size.width + glowRadius.toPx() * 0.6f, size.height + glowRadius.toPx() * 0.6f),
                     )
                 }
             }
             .clip(shape)
             .background(
-                Brush.verticalGradient(listOf(background, background.copy(alpha = 0.92f)))
+                Brush.verticalGradient(listOf(background, background.copy(alpha = 0.95f)))
             )
-            .border(1.dp, glow.copy(alpha = if (glow == Aurora.Border) 0.9f else 0.42f), shape)
+            .border(1.dp, glow.copy(alpha = if (glow == Aurora.Border) 1f else 0.55f), shape)
             .padding(0.dp)
     ) { content() }
 }
@@ -109,7 +109,7 @@ fun SectionLabel(
         color = color,
         fontSize = 11.sp,
         fontWeight = FontWeight.SemiBold,
-        letterSpacing = 1.4.sp,
+        letterSpacing = 1.1.sp,
         modifier = modifier,
     )
 }
@@ -119,7 +119,7 @@ fun SectionLabel(
 fun StatusPill(
     text: String,
     color: Color = Aurora.GreenSoft,
-    bg: Color = color.copy(alpha = 0.14f),
+    bg: Color = color.copy(alpha = 0.12f),
     modifier: Modifier = Modifier,
     bold: Boolean = true,
 ) {
@@ -128,21 +128,21 @@ fun StatusPill(
             .clip(RoundedCornerShape(999.dp))
             .background(bg)
             .border(1.dp, color.copy(alpha = 0.35f), RoundedCornerShape(999.dp))
-            .padding(horizontal = 10.dp, vertical = 4.dp),
+            .padding(horizontal = 9.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             Modifier
-                .size(5.dp)
+                .size(6.dp)
                 .background(color, CircleShape)
         )
         Spacer(Modifier.width(6.dp))
         Text(
             text,
             color = color,
-            fontSize = 10.sp,
+            fontSize = 11.sp,
             fontWeight = if (bold) FontWeight.Bold else FontWeight.Medium,
-            letterSpacing = 0.4.sp,
+            letterSpacing = 0.2.sp,
         )
     }
 }
@@ -152,14 +152,14 @@ fun StatusPill(
 fun IconBadge(
     icon: ImageVector,
     tint: Color,
-    bg: Color = tint.copy(alpha = 0.14f),
+    bg: Color = tint.copy(alpha = 0.12f),
     size: Dp = 34.dp,
     iconSize: Dp = 18.dp,
 ) {
     Box(
         modifier = Modifier
             .size(size)
-            .clip(RoundedCornerShape(size / 3))
+            .clip(RoundedCornerShape(8.dp))
             .background(bg),
         contentAlignment = Alignment.Center,
     ) {
@@ -167,23 +167,23 @@ fun IconBadge(
     }
 }
 
-/** Reference "src: xxx" provenance chip (blue-bordered mono pill). */
+/** Reference "src: xxx" provenance chip (mono pill). */
 @Composable
 fun RefSourceChip(source: String, modifier: Modifier = Modifier) {
     Text(
         "src: $source",
         color = Aurora.ChipText,
-        fontSize = 9.sp,
+        fontSize = 10.sp,
         fontFamily = FontFamily.Monospace,
         modifier = modifier
             .clip(RoundedCornerShape(6.dp))
-            .border(1.dp, Aurora.ChipText.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
-            .background(Aurora.ChipBg.copy(alpha = 0.55f))
+            .border(1.dp, Aurora.Border, RoundedCornerShape(6.dp))
+            .background(Aurora.ChipBg)
             .padding(horizontal = 7.dp, vertical = 2.dp),
     )
 }
 
-/** Compact stat card: icon + label + big value + optional chip (ref8 trio). */
+/** Compact stat card: icon + label + big value + optional chip (matching web console card). */
 @Composable
 fun MetricCard(
     label: String,
@@ -194,27 +194,28 @@ fun MetricCard(
     modifier: Modifier = Modifier,
     meter: Float? = null, // optional 0..1 progress bar under the value
 ) {
-    GlowCard(modifier = modifier, corner = 16.dp) {
-        Column(Modifier.padding(12.dp)) {
+    GlowCard(modifier = modifier, corner = 12.dp) {
+        Column(Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconBadge(icon, accent, size = 26.dp, iconSize = 15.dp)
-                Spacer(Modifier.width(7.dp))
+                Spacer(Modifier.width(8.dp))
                 SectionLabel(label, color = Aurora.TextLow)
             }
             Spacer(Modifier.height(8.dp))
             Text(
                 value,
                 color = Aurora.TextHi,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.Bold,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
                 fontFamily = FontFamily.Monospace,
+                letterSpacing = (-0.5).sp,
             )
             if (meter != null) {
-                Spacer(Modifier.height(7.dp))
+                Spacer(Modifier.height(8.dp))
                 LinearMeter(progress = meter, color = accent)
             }
             if (chip != null) {
-                Spacer(Modifier.height(7.dp))
+                Spacer(Modifier.height(8.dp))
                 chip()
             }
         }
@@ -491,8 +492,8 @@ fun HoldToConfirmButton(
     Box(
         modifier
             .fillMaxWidth()
-            .height(56.dp)
-            .clip(RoundedCornerShape(16.dp))
+            .height(52.dp)
+            .clip(RoundedCornerShape(10.dp))
             .background(container)
             .pointerInput(enabled) {
                 androidx.compose.foundation.gestures.detectTapGestures(
@@ -515,20 +516,20 @@ fun HoldToConfirmButton(
             if (progress > 0f) holdingText(progress) else text,
             color = Color.White,
             fontWeight = FontWeight.Bold,
-            fontSize = 15.sp,
-            letterSpacing = 0.8.sp,
+            fontSize = 14.sp,
+            letterSpacing = 0.4.sp,
         )
     }
 }
 
-/** Bottom tagline (ref8): "MobileCloud • Secure • Independent". */
+/** Bottom tagline matching web console branding: "MobileCloud • Build. Ship. Scale." */
 @Composable
 fun FooterTagline(modifier: Modifier = Modifier) {
     Text(
-        "MobileCloud • Secure • Independent",
-        color = Aurora.GreenSoft.copy(alpha = 0.8f),
+        "MobileCloud • Build. Ship. Scale.",
+        color = Aurora.TextLow,
         fontSize = 12.sp,
-        letterSpacing = 0.6.sp,
+        letterSpacing = 0.4.sp,
         modifier = modifier,
     )
 }

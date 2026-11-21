@@ -90,10 +90,10 @@ fun HardwareSettingsScreen() {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column {
-                Text("Settings", color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Text("Power, thermals & hardware shield", color = Aurora.TextFaint, fontSize = 11.sp)
+                Text("Settings", color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.4).sp)
+                Text("Power, thermals & hardware shield", color = Aurora.TextMid, fontSize = 11.sp)
             }
-            IconBadge(Icons.Filled.Shield, Aurora.GlowGreen, size = 32.dp, iconSize = 16.dp)
+            IconBadge(Icons.Filled.Shield, Aurora.Cyan, size = 32.dp, iconSize = 16.dp)
         }
 
         Spacer(Modifier.height(14.dp))
@@ -101,7 +101,7 @@ fun HardwareSettingsScreen() {
         val t = telemetry
 
         // ---- Battery lifespan shield ----
-        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.GlowGreen.copy(alpha = 0.5f)) {
+        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Border, corner = 12.dp) {
             Column(Modifier.padding(16.dp)) {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -109,7 +109,7 @@ fun HardwareSettingsScreen() {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconBadge(Icons.Filled.BatteryChargingFull, Aurora.GlowGreen, size = 28.dp, iconSize = 15.dp)
+                        IconBadge(Icons.Filled.BatteryChargingFull, Aurora.Cyan, size = 28.dp, iconSize = 15.dp)
                         Spacer(Modifier.width(8.dp))
                         SectionLabel("BATTERY LIFESPAN SHIELD")
                     }
@@ -143,10 +143,10 @@ fun HardwareSettingsScreen() {
         Spacer(Modifier.height(13.dp))
 
         // ---- Hardware keystore (evidence-backed) ----
-        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Purple.copy(alpha = 0.5f)) {
+        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Border, corner = 12.dp) {
             Column(Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconBadge(Icons.Filled.Key, Aurora.Purple, size = 28.dp, iconSize = 15.dp)
+                    IconBadge(Icons.Filled.Key, Aurora.Cyan, size = 28.dp, iconSize = 15.dp)
                     Spacer(Modifier.width(8.dp))
                     SectionLabel("HARDWARE KEYSTORE (EVIDENCE-BACKED)")
                 }
@@ -162,16 +162,16 @@ fun HardwareSettingsScreen() {
                 )
                 Spacer(Modifier.height(4.dp))
                 KVRow("Algorithm", keystore.keyAlgorithm)
-                KVRow("PubKey SHA-256", keystore.publicKeySha256.take(18) + "…", valueColor = Aurora.Periwinkle)
-                Text(keystore.detail, color = Aurora.TextFaint, fontSize = 10.5.sp, lineHeight = 14.sp)
+                KVRow("PubKey SHA-256", keystore.publicKeySha256.take(18) + "…", valueColor = Aurora.Cyan)
+                Text(keystore.detail, color = Aurora.TextMid, fontSize = 10.5.sp, lineHeight = 14.sp)
                 Spacer(Modifier.height(12.dp))
                 Button(
                     onClick = { keystore = HardwareAttestation.rotateKey() },
-                    modifier = Modifier.fillMaxWidth().height(44.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Aurora.PurpleDeep),
-                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Aurora.CardAlt),
+                    shape = RoundedCornerShape(8.dp),
                 ) {
-                    Text("Rotate Key (real)", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Rotate Key (real)", color = Aurora.TextHi, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -179,7 +179,7 @@ fun HardwareSettingsScreen() {
         Spacer(Modifier.height(13.dp))
 
         // ---- Emergency failover (wired to persisted controller) ----
-        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Red.copy(alpha = 0.45f)) {
+        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Red.copy(alpha = 0.35f), corner = 12.dp) {
             Column(Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconBadge(Icons.Filled.AcUnit, Aurora.Red, size = 28.dp, iconSize = 15.dp)

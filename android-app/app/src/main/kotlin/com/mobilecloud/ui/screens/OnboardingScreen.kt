@@ -77,18 +77,21 @@ fun OnboardingScreen(onComplete: () -> Unit) {
             .padding(horizontal = 22.dp, vertical = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        // ---- Hero ----
+        // ---- Hero Brand Logo ----
         Box(
             modifier = Modifier
-                .size(84.dp)
-                .clip(RoundedCornerShape(26.dp))
-                .background(
-                    Brush.linearGradient(listOf(Color(0xFF2E5BFF), Color(0xFF8B5CF6)))
-                )
-                .border(1.dp, Aurora.GlowGreen.copy(alpha = 0.5f), RoundedCornerShape(26.dp)),
+                .size(72.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Aurora.TextHi),
             contentAlignment = Alignment.Center,
         ) {
-            Text("☁", color = Color.White, fontSize = 38.sp)
+            Text(
+                "M",
+                color = Aurora.Bg,
+                fontSize = 36.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+            )
         }
         Spacer(Modifier.height(14.dp))
         Text(
@@ -96,12 +99,13 @@ fun OnboardingScreen(onComplete: () -> Unit) {
             color = Aurora.TextHi,
             fontSize = 24.sp,
             fontWeight = FontWeight.Bold,
+            letterSpacing = (-0.5).sp,
         )
         Text(
-            "Your Android. Your Cloud.",
-            color = Aurora.TextLow,
+            "Build. Ship. Scale. Autonomous on-device edge cloud runtime.",
+            color = Aurora.TextMid,
             fontSize = 12.sp,
-            letterSpacing = 0.5.sp,
+            letterSpacing = (-0.1).sp,
         )
 
         Spacer(Modifier.height(26.dp))
@@ -208,29 +212,25 @@ fun OnboardingScreen(onComplete: () -> Unit) {
 
         Spacer(Modifier.height(20.dp))
 
-        // CTA — glowing green when armed; disabled slab while provisioning.
+        // CTA — Electric blue accent when armed; disabled slab while provisioning.
         val armed = step >= 4
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(56.dp)
-                .clip(RoundedCornerShape(16.dp))
+                .height(52.dp)
+                .clip(RoundedCornerShape(10.dp))
                 .background(
-                    if (armed) Brush.horizontalGradient(
-                        listOf(Aurora.GlowGreen, Color(0xFF19D67A))
-                    ) else Brush.horizontalGradient(
-                        listOf(Aurora.Track, Aurora.Track)
-                    )
+                    if (armed) Aurora.Cyan else Aurora.Track
                 )
                 .clickable(enabled = armed) { onComplete() },
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 if (armed) "INITIALIZE & JOIN GLOBAL MESH" else "PROVISIONING… ${(progress * 100).toInt()}%",
-                color = if (armed) Aurora.BgDeep else Aurora.TextFaint,
-                fontWeight = FontWeight.Bold,
-                fontSize = 14.sp,
-                letterSpacing = 1.2.sp,
+                color = if (armed) Color.White else Aurora.TextLow,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp,
+                letterSpacing = 0.6.sp,
             )
         }
 

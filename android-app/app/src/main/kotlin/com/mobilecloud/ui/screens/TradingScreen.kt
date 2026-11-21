@@ -282,10 +282,17 @@ private fun ScreenTitle(title: String, subtitle: String) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column {
-            Text(title, color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text(subtitle, color = Aurora.TextFaint, fontSize = 11.sp)
+            Text(title, color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.4).sp)
+            Text(subtitle, color = Aurora.TextMid, fontSize = 11.sp)
         }
-        Box(Modifier.size(34.dp).clip(RoundedCornerShape(11.dp)).background(Aurora.Card), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier
+                .size(34.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Aurora.Card)
+                .border(androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), RoundedCornerShape(8.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
             Icon(Icons.Filled.ShowChart, null, tint = Aurora.Cyan, modifier = Modifier.size(17.dp))
         }
     }

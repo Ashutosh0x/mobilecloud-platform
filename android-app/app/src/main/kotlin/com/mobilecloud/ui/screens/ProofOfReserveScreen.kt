@@ -228,8 +228,8 @@ private fun ScreenHeader(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column {
-            Text(title, color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text(subtitle, color = Aurora.TextFaint, fontSize = 11.sp)
+            Text(title, color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.4).sp)
+            Text(subtitle, color = Aurora.TextMid, fontSize = 11.sp)
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -237,10 +237,10 @@ private fun ScreenHeader(
                 color = badgeColor,
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
-                letterSpacing = 0.8.sp,
+                letterSpacing = 0.6.sp,
                 modifier = Modifier
-                    .background(badgeColor.copy(alpha = 0.14f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                    .background(badgeColor.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
             )
             Spacer(Modifier.width(8.dp))
             IconBadge(icon, badgeColor, size = 32.dp, iconSize = 16.dp)

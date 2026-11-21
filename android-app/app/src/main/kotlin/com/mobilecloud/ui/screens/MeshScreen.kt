@@ -63,19 +63,19 @@ fun MeshScreen() {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column {
-                Text("Mesh", color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Text("Global P2P topology", color = Aurora.TextFaint, fontSize = 11.sp)
+                Text("Mesh", color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.4).sp)
+                Text("Global P2P topology", color = Aurora.TextMid, fontSize = 11.sp)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 StatusPill("SIMULATED", color = Aurora.Amber)
                 Spacer(Modifier.width(8.dp))
-                IconBadge(Icons.Filled.Hub, Aurora.Purple, size = 32.dp, iconSize = 16.dp)
+                IconBadge(Icons.Filled.Hub, Aurora.Cyan, size = 32.dp, iconSize = 16.dp)
             }
         }
 
         Spacer(Modifier.height(12.dp))
 
-        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Amber.copy(alpha = 0.4f), corner = 14.dp) {
+        GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Border, corner = 12.dp) {
             Column(Modifier.padding(14.dp)) {
                 Row {
                     Text("MODE: ", color = Aurora.TextLow, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
@@ -92,7 +92,7 @@ fun MeshScreen() {
         Spacer(Modifier.height(13.dp))
 
         // ---- Animated topology (ref6) ----
-        GlowCard(Modifier.fillMaxWidth(), corner = 16.dp) {
+        GlowCard(Modifier.fillMaxWidth(), corner = 12.dp) {
             Column(Modifier.padding(10.dp)) {
                 MeshTopology(
                     modifier = Modifier.fillMaxWidth().height(210.dp),
