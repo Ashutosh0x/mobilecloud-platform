@@ -124,7 +124,13 @@ MobileCloud combines two decoupled, high-performance engines within one monorepo
   * **Device Hardware Telemetry**: Live battery bypass verification, SoC frequency, thermals.
   * **Billing & Token Economics**: Computational earnings, bandwidth billing, staking rewards.
 
-### 6. Engine 2: FurlPay Proof-of-Reserve Protocol
+### 6. Agentic Direct Deployment & Distributed Cache Revalidation Engine
+* **Direct Agent API Ingress (`POST /api/v1/deploy/agent`)**: Programmatic endpoint enabling AI coding agents (Cursor, Claude Code, Copilot Workspace, v0.dev, Devin) to trigger builds directly with token authentication and custom agent IDs.
+* **Instant Sub-15ms Atomic Rollback API (`POST /api/v1/deploy/rollback`)**: Allows instant pointer promotion back to any prior immutable deployment with zero downtime and zero recompilation.
+* **Distributed Tag & Path Cache Revalidation (`POST /api/v1/cache/revalidate`)**: Instant distributed cache invalidation supporting `revalidateTag()` and `revalidatePath()`, purging edge caches across the cluster in under 15ms.
+* **Deployment Audit & History API (`GET /api/v1/deployments/:project`)**: Query full historical deployment metadata, tracking the exact trigger source (`agent:cursor`, `agent:claude-code`, `git:push`, etc.).
+
+### 7. Engine 2: FurlPay Proof-of-Reserve Protocol
 * **Checked 256-Bit Mathematical Kernel (`por-kernel`)**: All accounting operations execute over checked fixed-point `U256` arithmetic with 18 decimal places of precision (`SHARE = 10^18`), provably eliminating mathematical overflow.
 * **RFC 8785 Canonical JSON & Domain Separation**: Evidence envelopes are normalized strictly per RFC 8785 with domain-separated SHA-256 preimages (`"FURLPAY_POR_V1" ‖ seq ‖ epoch ‖ reserves ‖ supply`).
 * **Multi-Format Institutional Ingestion Parsers**:
@@ -133,7 +139,7 @@ MobileCloud combines two decoupled, high-performance engines within one monorepo
   * **Dinari Transfer Agent Parser**: Direct cryptographic reconciliation of tokenized equity holdings.
 * **Strict T+1 Settlement & Zero-Rehypothecation**: DTCC/NSCC transit balances are strictly validated against active settlement windows. Assets with `shares_on_loan > 0` are rejected instantly.
 
-### 7. Hardened Stellar Soroban Smart Contract (`por-verifier`)
+### 8. Hardened Stellar Soroban Smart Contract (`por-verifier`)
 * **Stellar Protocol 30 Compatibility**: High-performance smart contract running natively on the Stellar Soroban WASM runtime.
 * **Ascending-Key O(N) Quorum Validation**: M-of-N threshold verification requires signers to be passed in strictly ascending lexicographical order of their Ed25519 public keys, making duplicate-signer and Sybil attacks structurally impossible.
 * **Independent On-Chain Solvency Calculation**: The contract independently re-computes reserve ratios on-chain before updating state, preventing off-chain oracle manipulation.
@@ -144,7 +150,7 @@ MobileCloud combines two decoupled, high-performance engines within one monorepo
   * `EMERGENCY` (80% ≤ Ratio < 90%): Circuit breakers trip across connected trading daemons.
   * `INSOLVENT` (Ratio < 80%): On-chain asset freeze; redemption queuing initiated.
 
-### 8. Edge Trading Engine & Solana Arbitrage (`trading-engine`)
+### 9. Edge Trading Engine & Solana Arbitrage (`trading-engine`)
 * **Sub-Millisecond Execution**: Asynchronous cross-DEX and CLOB atomic arbitrage engine running at the mobile edge.
 * **Jito MEV Bundles**: Direct integration with Jito block builders with integer-exact tip and slippage modeling.
 * **4 Non-Negotiable Invariants**:

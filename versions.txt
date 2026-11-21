@@ -13,8 +13,8 @@ toolchain (matches audit/TESTNET_BASELINE_2026-11-21/versions.txt):
   soroban-sdk 22.0.11
   endpoint protocol 30 (rpc 30.0.1-6b6ec60c)
 
-workspace test totals (recounted 2026-11-21):
-  107 green tests = 16 core-engine + 23 por-verifier + 58 por-kernel + 10 trading-engine
+workspace test totals (recounted 2026-11-22):
+  110 green tests = 19 core-engine + 23 por-verifier + 58 por-kernel + 10 trading-engine
   + 4 tests in tools/por-xdr-toolkit (standalone crate)
   snapshots: 26 = 17 baseline (byte-identical) + 9 Gate 7
 
