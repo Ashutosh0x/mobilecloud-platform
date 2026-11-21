@@ -7,7 +7,7 @@
 ### **The Autonomous Smartphone Edge Cloud & Institutional Proof-of-Reserve Protocol**
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-107%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-110%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 [![Rust](https://img.shields.io/badge/Rust-1.80%2B-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![Android](https://img.shields.io/badge/Android-API%2026--35-3ddc84?style=for-the-badge&logo=android&logoColor=white)](android-app)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7f52ff?style=for-the-badge&logo=kotlin&logoColor=white)](android-app)
@@ -276,13 +276,13 @@ graph TD
 
 ## Automated Test Matrix
 
-The repository enforces strict invariants across **107 continuous integration tests**:
+The repository enforces strict invariants across **110 continuous integration tests**:
 
 | Subsystem | Test Suite | Invariant Enforced |
 | :--- | :--- | :--- |
 | **`por-kernel`** | 58 tests | `U256` checked arithmetic, zero overflows across 10,000 edge cases, strict T+1 DTCC clearing window, zero-rehypothecation (`shares_on_loan == 0`). |
 | **`por-verifier`** | 23 tests | Monotonic sequence replay defense, TTL freshness expiration, O(N) ascending-key validation, duplicate signer rejection, 5-tier solvency state transitions. |
-| **`core-engine`** | 16 tests | Build Output v3 routing, fallback handlers, atomic symlink rollback (< 15 ms), PTY session allocation, compression pipelines. |
+| **`core-engine`** | 19 tests | Build Output v3 routing, agentic deployment ingress, cache tag revalidation, atomic symlink rollback (< 15 ms), PTY session allocation. |
 | **`trading-engine`** | 10 tests | Solana arbitrage profitability checks, integer-exact fee calculations, 4 risk invariants (atomic reverts, 2.5% max exposure, 15 bps slippage, 20% T+1 buffer). |
 | **`por-xdr-toolkit`** | 4 tests | Protocol 30 XDR encoding/decoding, RFC 4506 `Option<ScVec>` presence-flag alignment. |
 

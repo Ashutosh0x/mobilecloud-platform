@@ -73,6 +73,7 @@ pub fn promote(
             .map(|d| d.as_secs())
             .unwrap_or(0),
         ttfb_hint_ms: None,
+        trigger_source: None,
     });
     Ok(deploy_id)
 }

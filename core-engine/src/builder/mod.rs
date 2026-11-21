@@ -14,7 +14,7 @@ use crate::proxy::router::WorkerPool;
 
 /// One immutable deployment (content-addressed; retained for instant
 /// sub-15ms rollbacks).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DeployRecord {
     pub project: String,
     pub deploy_id: String,
@@ -23,6 +23,8 @@ pub struct DeployRecord {
     pub framework: String,
     pub built_at: u64,
     pub ttfb_hint_ms: Option<u32>,
+    #[serde(default)]
+    pub trigger_source: Option<String>,
 }
 
 /// Content-addressed deployment store with live-pointer bookkeeping.
