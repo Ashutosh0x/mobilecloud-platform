@@ -20,7 +20,7 @@
 
 **MobileCloud** turns off-the-shelf Android smartphones into decentralized, enterprise-grade edge servers with zero-millisecond hardware UPS failover, sub-2W energy consumption, an inbuilt tri-modal terminal gateway, and cryptographic Proof-of-Reserve attestation powered by Stellar Soroban and Acurast TEE hardware quorums.
 
-[Architecture](#system-architecture) • [Features](#detailed-platform-features) • [Tech Stack](#technology-stack) • [Repository Layout](#repository-layout) • [Quick Start](#quick-start) • [Audit Baseline](#cryptographic-audit--integrity)
+[Architecture](#system-architecture) • [Features](#detailed-platform-features) • [Tech Stack](#technology-stack) • [Crate Architecture](#monorepo-crate--subsystem-architecture) • [Quick Start](#quick-start) • [Audit Baseline](#cryptographic-audit--integrity)
 
 </div>
 
