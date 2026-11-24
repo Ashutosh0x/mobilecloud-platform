@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS projects (
   name TEXT NOT NULL,
   framework TEXT NOT NULL,
   target TEXT NOT NULL,
+  repo_url TEXT,
   created_at INTEGER NOT NULL,
   UNIQUE(owner_id, name)
 );
@@ -185,6 +186,53 @@ CREATE TABLE IF NOT EXISTS device_codes (
   status TEXT NOT NULL,
   expires_at INTEGER NOT NULL
 );
+-- Short-lived, single-use QR pairing sessions. A signed-in browser creates one
+-- and renders its secrets as a QR code; an Android device scans it and
+-- explicitly approves. Only the SHA-256 hash of the pairing secret is stored,
+-- and the row is consumed exactly once (see lib/server/pairing.ts).
+CREATE TABLE IF NOT EXISTS pairing_sessions (
+  id TEXT PRIMARY KEY,
+  secret_hash TEXT UNIQUE NOT NULL,
+  user_code TEXT NOT NULL,
+  owner_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  method TEXT NOT NULL DEFAULT 'qr',
+  browser_name TEXT,
+  browser_platform TEXT,
+  browser_user_agent TEXT,
+  browser_ip TEXT,
+  scan_device_name TEXT,
+  scan_device_platform TEXT,
+  scan_app_version TEXT,
+  fail_reason TEXT,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  scanned_at INTEGER,
+  approved_at INTEGER,
+  connected_at INTEGER,
+  device_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pairing_owner ON pairing_sessions (owner_id, created_at);
+-- Devices that have been linked through QR pairing. Each row references the
+-- durable access token that was issued at approval time, so bearer
+-- authentication continues to flow through the existing access_tokens table.
+CREATE TABLE IF NOT EXISTS connected_devices (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL,
+  token_id TEXT,
+  pairing_id TEXT,
+  name TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  app_version TEXT,
+  method TEXT NOT NULL DEFAULT 'qr',
+  created_at INTEGER NOT NULL,
+  paired_at INTEGER NOT NULL,
+  last_active INTEGER,
+  last_ip TEXT,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  revoked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_devices_owner ON connected_devices (owner_id, revoked);
 CREATE TABLE IF NOT EXISTS notifications (
   id TEXT PRIMARY KEY,
   owner_id TEXT NOT NULL,
@@ -237,22 +285,29 @@ export function openDb(file?: string): DatabaseSync {
   const target = file ?? process.env.MOBILECLOUD_DB ?? join(process.cwd(), "data", "mobilecloud.db");
   mkdirSync(dirname(target), { recursive: true });
   const db = new DatabaseSync(target);
+  // Every connection — the per-request singleton and each `openDb(file)` handle
+  // (tests, background work) — gets the same durable, concurrency-friendly
+  // pragmas. In WAL mode `synchronous = NORMAL` is safe and avoids an fsync on
+  // every commit, which is what let parallel writers pile up behind the lock.
   db.exec("PRAGMA journal_mode = WAL;");
   // The realtime gateway is a second process writing to the same file (its
   // event cursor), so writers must wait rather than fail with SQLITE_BUSY.
   db.exec("PRAGMA busy_timeout = 4000;");
   db.exec("PRAGMA foreign_keys = ON;");
+  db.exec("PRAGMA synchronous = NORMAL;");
   db.exec(SCHEMA);
   for (const sql of [
     "ALTER TABLE sessions ADD COLUMN id TEXT",
     "ALTER TABLE sessions ADD COLUMN user_agent TEXT",
     "ALTER TABLE sessions ADD COLUMN created_at INTEGER",
+    "ALTER TABLE sessions ADD COLUMN csrf TEXT",
     "ALTER TABLE requests ADD COLUMN user_agent TEXT",
     "ALTER TABLE requests ADD COLUMN host TEXT",
     "ALTER TABLE requests ADD COLUMN ja4 TEXT",
     "ALTER TABLE firewall_events ADD COLUMN user_agent TEXT",
     "ALTER TABLE firewall_events ADD COLUMN host TEXT",
     "ALTER TABLE firewall_events ADD COLUMN ja4 TEXT",
+    "ALTER TABLE projects ADD COLUMN repo_url TEXT",
   ]) {
     try { db.exec(sql); } catch { /* column already exists */ }
   }
@@ -263,14 +318,52 @@ export function openDb(file?: string): DatabaseSync {
   return db;
 }
 
+/**
+ * First-run bootstrap of the node owner account.
+ *
+ * There are deliberately NO hardcoded credentials here: any deployment that
+ * shipped a fixed administrator password would let anyone who reads the source
+ * (or the APK) authenticate as the cluster owner.
+ *
+ * * If the `users` table is already populated, this is a no-op.
+ * * Otherwise the owner is created from `MOBILECLOUD_BOOTSTRAP_EMAIL` /
+ *   `MOBILECLOUD_BOOTSTRAP_PASSWORD` when provided (unattended installs, CI),
+ *   and the password is never logged.
+ * * With no env override a cryptographically random one-time password is
+ *   generated and printed **once** to the process console so the operator can
+ *   complete onboarding and change it.
+ */
 function ensureDefaultUser(db: DatabaseSync) {
-  const email = "ashutosh@gmail.com";
-  const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
+  const existing = db.prepare("SELECT id FROM users LIMIT 1").get();
   if (existing) return;
-  const count = db.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number };
+
+  const email = process.env.MOBILECLOUD_BOOTSTRAP_EMAIL?.trim() || "owner@mobilecloud.local";
+  const configured = process.env.MOBILECLOUD_BOOTSTRAP_PASSWORD?.trim();
+  // 24 bytes → 192 bits of entropy for the generated one-time password.
+  const password = configured || randomBytes(24).toString("base64url");
+
   db.prepare(
-    "INSERT INTO users (id, email, name, password_hash, role, plan, created_at) VALUES (?, ?, 'Ashutosh', ?, ?, 'community', ?)",
-  ).run(newId(), email, hashPassword("ashutosh@123456@1"), count.n === 0 ? "owner" : "member", Date.now());
+    "INSERT INTO users (id, email, name, password_hash, role, plan, created_at) VALUES (?, ?, 'Owner', ?, 'owner', 'community', ?)",
+  ).run(newId(), email, hashPassword(password), Date.now());
+
+  if (!configured) {
+    // Printed exactly once, at first boot, and never persisted in plaintext.
+    console.warn(
+      [
+        "",
+        "  ┌──────────────────────────────────────────────────────────────┐",
+        "  │ MobileCloud node bootstrap: owner account created            │",
+        "  ├──────────────────────────────────────────────────────────────┤",
+        `  │ email:    ${email.padEnd(50)}│`,
+        `  │ password: ${password.padEnd(50)}│`,
+        "  │                                                              │",
+        "  │ Store this now — it is shown once and cannot be recovered.   │",
+        "  │ Set MOBILECLOUD_BOOTSTRAP_EMAIL/PASSWORD to control it.      │",
+        "  └──────────────────────────────────────────────────────────────┘",
+        "",
+      ].join("\n"),
+    );
+  }
 }
 
 export function hashPassword(password: string): string {

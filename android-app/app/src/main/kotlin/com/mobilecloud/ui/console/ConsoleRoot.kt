@@ -69,9 +69,9 @@ fun ConsoleLogin(store: ConsoleStore) {
     val scope = rememberCoroutineScope()
     var mode by remember { mutableStateOf("login") }
     var url by remember { mutableStateOf(store.baseUrl) }
-    var name by remember { mutableStateOf("Ashutosh") }
-    var email by remember { mutableStateOf("ashutosh@gmail.com") }
-    var password by remember { mutableStateOf("ashutosh@123456@1") }
+    var name by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
     var showPassword by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var pending by remember { mutableStateOf(false) }
@@ -141,12 +141,12 @@ fun ConsoleLogin(store: ConsoleStore) {
             }
             Spacer(Modifier.height(10.dp))
             if (mode == "signup") {
-                CField("Name", name, { name = it })
+                CField("Name", name, { name = it }, placeholder = "Your name")
                 Spacer(Modifier.height(10.dp))
             }
             CField("Email", email, { email = it }, placeholder = "you@example.com")
             Spacer(Modifier.height(10.dp))
-            CField("Password", password, { password = it }, password = !showPassword)
+            CField("Password", password, { password = it }, placeholder = "••••••••", password = !showPassword)
             Spacer(Modifier.height(4.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 Text(

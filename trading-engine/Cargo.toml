@@ -23,6 +23,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 
+# Jupiter Swap API v6 client (see src/jupiter_swap_api.rs). These are the same
+# HTTP/async crates core-engine already links, so no heavyweight client (e.g.
+# reqwest) is pulled in. Note: `HyperJsonTransport` speaks plain HTTP/1.1 only;
+# HTTPS in production requires a TLS-terminating proxy or a TLS connector.
+base64 = "0.22"
+async-trait = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+
 # Solana + Jito stack behind a feature: solana-sdk 2.2+ transitively links
 # openssl-sys (solana-secp256r1-program), which has no place on a
 # passively-cooled ARM64 edge node. The arbitrage engine's type surface

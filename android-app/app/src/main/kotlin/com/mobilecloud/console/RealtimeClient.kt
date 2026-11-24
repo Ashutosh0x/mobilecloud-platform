@@ -263,6 +263,7 @@ class RealtimeClient(
                         via = message.optString("via").ifBlank { null },
                         attempts = 0,
                         lastError = null,
+                        pending = 0,
                         lastSyncAt = System.currentTimeMillis(),
                     )
                 }
@@ -282,7 +283,16 @@ class RealtimeClient(
             "delivered" -> Unit
             "pong" -> Unit
             "ping" -> {
-                socket?.let { s -> runCatching { send(s, JSONObject().put("type", "ping")) } }
+                // Gateway application heartbeat. Protocol expectation: an
+                // inbound {"type":"ping"} MUST be answered with
+                // {"type":"pong"} (echoing the correlation id when present).
+                // Replying with another "ping" never satisfies the server, so
+                // it drops the socket after CLIENT_TIMEOUT_MS. This is distinct
+                // from our own outbound keepalive, which sends "ping" and gets
+                // a "pong" back (see the heartbeat job in pump()).
+                val pong = JSONObject().put("type", "pong")
+                message.opt("id")?.let { pong.put("id", it) }
+                socket?.let { s -> runCatching { send(s, pong) } }
             }
             "error" -> {
                 val code = message.optString("code")
@@ -321,7 +331,15 @@ class RealtimeClient(
         if (cursor > 0 && event.sequence > cursor + 1) recover()
 
         if (event.sequence > cursor) cursor = event.sequence
-        _state.update { it.copy(pending = it.pending + 1, lastSyncAt = System.currentTimeMillis()) }
+        // `pending` counts backlog being drained during a sync/replay only.
+        // Incrementing it for every live event would grow it without bound,
+        // since live frames are acked as they arrive.
+        _state.update {
+            it.copy(
+                pending = if (it.status == RealtimeStatus.SYNCING) it.pending + 1 else it.pending,
+                lastSyncAt = System.currentTimeMillis(),
+            )
+        }
 
         _events.tryEmit(event)
         socket?.let { s -> runCatching { send(s, JSONObject().put("type", "ack").put("sequence", event.sequence)) } }

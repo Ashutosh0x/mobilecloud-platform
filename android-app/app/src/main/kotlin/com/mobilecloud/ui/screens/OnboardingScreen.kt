@@ -1,5 +1,7 @@
 package com.mobilecloud.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -7,9 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,7 +28,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -36,37 +36,72 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
-import com.mobilecloud.ui.theme.AppFonts
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import com.mobilecloud.security.HardwareAttestation
+import com.mobilecloud.service.BatteryBypassDetector
 import com.mobilecloud.ui.components.GlowCard
 import com.mobilecloud.ui.components.LinearMeter
+import com.mobilecloud.ui.theme.AppFonts
 import com.mobilecloud.ui.theme.Aurora
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /**
- * Onboarding — hardware provisioning wizard (reference 2, upgraded):
- * animated sequential checks populated with REAL values from this device
- * (SoC model, cores, SDK, keystore class). The check marks advance as each
- * probe completes; the mesh-join CTA unlocks when all four are green.
+ * Onboarding — hardware provisioning wizard. Each step runs a REAL probe on
+ * this device and shows the value it read back:
+ *
+ *  1. SoC identity + core count (Build.SOC_MODEL / HARDWARE)
+ *  2. Battery / charge path (BatteryManager via BatteryBypassDetector)
+ *  3. Notification permission, the prerequisite for the foreground supervisors
+ *  4. AndroidKeyStore identity key (StrongBox → TEE), with the true level
+ *
+ * Nothing is advanced by a timer; a step is only green once its probe returned.
  */
 @Composable
 fun OnboardingScreen(onComplete: () -> Unit) {
-    // Real identity facts for the provisioning cards.
-    val soc = if (Build.VERSION.SDK_INT >= 31) Build.SOC_MODEL else Build.HARDWARE
-    val cores = Runtime.getRuntime().availableProcessors()
-    val androidLine = "Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) · arm64-v8a"
+    val context = LocalContext.current
 
-    var step by remember { mutableIntStateOf(0) } // 0..4 completed checks
+    var details by remember { mutableStateOf<List<String>>(emptyList()) }
+
     LaunchedEffect(Unit) {
-        repeat(4) {
-            delay(850)
-            step++
-        }
+        val collected = mutableListOf<String>()
+
+        val soc = if (Build.VERSION.SDK_INT >= 31) Build.SOC_MODEL else Build.HARDWARE
+        val cores = Runtime.getRuntime().availableProcessors()
+        collected += "$soc · $cores cores detected"
+        details = collected.toList()
+        delay(600)
+
+        val power = withContext(Dispatchers.IO) { BatteryBypassDetector.probe(context) }
+        collected += "BatteryManager · ${power.batteryStatus} · ${power.batteryPercent}% · " +
+            "${power.batteryCurrentMicroAmps / 1000} mA"
+        details = collected.toList()
+        delay(600)
+
+        val granted = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(
+            context, Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        collected += if (granted)
+            "Notification permission granted — supervisors can post status"
+        else
+            "Notification permission not granted — supervisor notices stay silent"
+        details = collected.toList()
+        delay(600)
+
+        val key = withContext(Dispatchers.IO) { HardwareAttestation.ensureIdentityKey() }
+        collected += if (key.securityLevel == "ERROR")
+            "AndroidKeyStore unavailable — ${key.detail}"
+        else
+            "AndroidKeyStore ${key.securityLevel} · ${key.keyAlgorithm} · ${key.publicKeySha256}"
+        details = collected.toList()
     }
-    val progress by animateFloatAsState(step / 4f, tween(500), label = "prov")
+
+    val progress by animateFloatAsState(details.size / 4f, tween(500), label = "prov")
 
     Column(
         modifier = Modifier
@@ -123,31 +158,21 @@ fun OnboardingScreen(onComplete: () -> Unit) {
         LinearMeter(progress = progress, color = Aurora.GlowGreen, height = 5.dp)
         Spacer(Modifier.height(18.dp))
 
-        val checks = listOf(
-            ProvisionCheck(
-                title = "SoC Verified",
-                doneDetail = "$soc · $cores cores detected",
-                pendingDetail = "reading Build.SOC_MODEL…",
-            ),
-            ProvisionCheck(
-                title = "USB-PD PPS Bypass Charging Handshake",
-                doneDetail = "Power path probed · battery current sampled live",
-                pendingDetail = "probing BatteryManager…",
-            ),
-            ProvisionCheck(
-                title = "Android Special-Use Foreground Service",
-                doneDetail = "Wake lock granted · Doze mode whitelisted",
-                pendingDetail = "starting CloudSupervisorService…",
-            ),
-            ProvisionCheck(
-                title = "Titan M2 / StrongBox Hardware Keystore",
-                doneDetail = "DID: did:stellar:GA72…K901 (Ed25519 node identity)",
-                pendingDetail = "generating key attestation…",
-            ),
+        val titles = listOf(
+            "SoC Identity",
+            "Battery & Charge Path",
+            "Foreground Service Permission",
+            "Hardware-Backed Keystore (StrongBox / TEE)",
+        )
+        val pendingDetails = listOf(
+            "reading Build.SOC_MODEL…",
+            "probing BatteryManager…",
+            "checking notification permission…",
+            "generating key attestation…",
         )
 
-        checks.forEachIndexed { i, check ->
-            val done = step > i
+        titles.forEachIndexed { i, title ->
+            val done = details.size > i
             AnimatedVisibility(
                 visible = true,
                 enter = slideInVertically(tween(300)) { it / 3 } + fadeIn(tween(300)),
@@ -184,14 +209,14 @@ fun OnboardingScreen(onComplete: () -> Unit) {
                         Spacer(Modifier.width(13.dp))
                         Column(Modifier.weight(1f)) {
                             Text(
-                                check.title,
+                                title,
                                 color = Aurora.TextHi,
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold,
                             )
                             Spacer(Modifier.height(3.dp))
                             Text(
-                                if (done) check.doneDetail else check.pendingDetail,
+                                if (done) details[i] else pendingDetails[i],
                                 color = if (done) Aurora.GreenSoft else Aurora.TextLow,
                                 fontSize = 11.sp,
                                 fontFamily = AppFonts.Mono,
@@ -205,7 +230,7 @@ fun OnboardingScreen(onComplete: () -> Unit) {
 
         Spacer(Modifier.height(10.dp))
         Text(
-            androidLine,
+            "Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) · arm64-v8a",
             color = Aurora.TextFaint,
             fontSize = 10.sp,
             fontFamily = AppFonts.Mono,
@@ -214,7 +239,7 @@ fun OnboardingScreen(onComplete: () -> Unit) {
         Spacer(Modifier.height(20.dp))
 
         // CTA — Electric blue accent when armed; disabled slab while provisioning.
-        val armed = step >= 4
+        val armed = details.size >= 4
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -227,7 +252,7 @@ fun OnboardingScreen(onComplete: () -> Unit) {
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                if (armed) "INITIALIZE & JOIN GLOBAL MESH" else "PROVISIONING… ${(progress * 100).toInt()}%",
+                if (armed) "INITIALIZE NODE" else "PROVISIONING… ${(progress * 100).toInt()}%",
                 color = if (armed) Color.White else Aurora.TextLow,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 13.sp,
@@ -237,15 +262,9 @@ fun OnboardingScreen(onComplete: () -> Unit) {
 
         Spacer(Modifier.height(14.dp))
         Text(
-            "Checks read live hardware interfaces — nothing is simulated.",
+            "Values above are read live from this device — none are simulated.",
             color = Aurora.TextFaint,
             fontSize = 10.sp,
         )
     }
 }
-
-private data class ProvisionCheck(
-    val title: String,
-    val doneDetail: String,
-    val pendingDetail: String,
-)

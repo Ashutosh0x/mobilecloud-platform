@@ -1,7 +1,10 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
+import { CSRF_COOKIE, CSRF_HEADER } from "../csrf.ts";
 import type { RangeKey, User } from "../types.ts";
+import { builderEnabled, dispatchDeploy, dispatchRollback, fetchEngineDeployments, probeBuilder } from "./builder.ts";
 import { dataRoot, hashPassword, newId, openDb, tokenHash, verifyPassword } from "./db.ts";
 import { collectAnalytics, collectHost, collectMetrics } from "./metrics.ts";
 import { capabilities, collectObservability, inspectRequest, listBuilds, listDrives, listFirewallEvents, listRules, listWorkflows, observedJa4, summarizeVitals, trafficSummary } from "./platform.ts";
@@ -35,6 +38,54 @@ function readCookie(req: Request): string | null {
   const raw = req.headers.get("cookie") ?? "";
   const hit = raw.split(";").map((p) => p.trim()).find((p) => p.startsWith(`${COOKIE}=`));
   return hit ? decodeURIComponent(hit.slice(COOKIE.length + 1)) : null;
+}
+
+/** Sets the non-httpOnly CSRF cookie so browser JavaScript can echo it back. */
+function csrfCookieHeader(token: string, maxAge: number) {
+  return `${CSRF_COOKIE}=${token}; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
+}
+
+/** Reads the CSRF token from the raw cookie header, mirroring `readCookie`. */
+function csrfCookie(req: Request): string | null {
+  const raw = req.headers.get("cookie") ?? "";
+  const hit = raw.split(";").map((p) => p.trim()).find((p) => p.startsWith(`${CSRF_COOKIE}=`));
+  return hit ? decodeURIComponent(hit.slice(CSRF_COOKIE.length + 1)) : null;
+}
+
+/** Constant-time string comparison over equal-length byte arrays. */
+function timingSafeEq(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
+}
+
+/**
+ * Origin-gated double-submit CSRF check. A cookie-authenticated state-changing
+ * request that carries an `Origin` header came from a browser and must echo a
+ * token matching both the `mc_csrf` cookie and the value stored on its session
+ * row. Native clients (no `Origin`) and bearer-authenticated requests are exempt.
+ */
+function requireCsrf(req: Request, db: DatabaseSync): void {
+  const method = req.method.toUpperCase();
+  if (method !== "POST" && method !== "PUT" && method !== "PATCH" && method !== "DELETE") return;
+  // Bearer tokens are never attached automatically by a browser: not CSRF-susceptible.
+  if (req.headers.get("authorization")) return;
+  // No Origin header: native clients, curl, and the test suite are exempt.
+  if (!req.headers.get("origin")) return;
+
+  const token = readCookie(req);
+  const header = req.headers.get(CSRF_HEADER);
+  const cookie = csrfCookie(req);
+  const stored = token
+    ? (db.prepare("SELECT csrf FROM sessions WHERE token_hash = ?").get(tokenHash(token)) as { csrf: string | null } | undefined)?.csrf ?? null
+    : null;
+
+  if (header && cookie && stored && timingSafeEq(header, cookie) && timingSafeEq(header, stored)) return;
+
+  const error = new Error("Cross-site request blocked: the CSRF token is missing or invalid.");
+  (error as Error & { status: number }).status = 403;
+  throw error;
 }
 
 function userFromRequest(req: Request): User | null {
@@ -120,6 +171,69 @@ async function body(req: Request): Promise<Record<string, unknown>> {
 
 function str(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+/** A repository URL must look like a git remote the builder can clone. */
+function isGitUrl(value: string) {
+  return /^(https:\/\/|http:\/\/|git@|ssh:\/\/)/.test(value);
+}
+
+const NO_REPO_NOTE = "Add a Git repository URL to this project before it can be built.";
+
+/** Records a deployment row and publishes `deployment.updated` atomically. */
+function recordDeployment(
+  db: DatabaseSync,
+  owner: string,
+  project: { id: string; name: string },
+  status: string,
+  note: string,
+) {
+  const id = newId();
+  tx(db, () => {
+    db.prepare(
+      "INSERT INTO deployments (id, owner_id, project_id, status, note, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(id, owner, project.id, status, note, Date.now());
+    publish(db, owner, "deployment.updated", id, { id, projectId: project.id, project: project.name, status, note });
+  });
+  return id;
+}
+
+/**
+ * Sends a web deployment to the core engine and reports the honest outcome:
+ * `queued` when the engine accepted it (HTTP 202), `blocked` with the engine's
+ * own error text otherwise.
+ */
+async function runWebDeploy(
+  project: { id: string; name: string },
+  repoUrl: string,
+): Promise<{ status: "queued" | "blocked"; note: string }> {
+  const result = await dispatchDeploy({ project: project.name, cloneUrl: repoUrl, agentId: "web-dashboard" });
+  if (result.ok) {
+    return {
+      status: "queued",
+      note: `Queued on the core engine (${result.detail}); build logs stream from /logs/${project.name}.`,
+    };
+  }
+  return { status: "blocked", note: result.detail };
+}
+
+/** Records a build row and publishes `build.updated` atomically. */
+function recordBuild(
+  db: DatabaseSync,
+  owner: string,
+  project: { id: string; name: string },
+  target: string,
+  status: string,
+  note: string,
+) {
+  const id = newId();
+  tx(db, () => {
+    db.prepare(
+      "INSERT INTO builds (id, owner_id, project_id, target, status, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run(id, owner, project.id, target, status, note, Date.now());
+    publish(db, owner, "build.updated", id, { id, projectId: project.id, project: project.name, target, status, note });
+  });
+  return id;
 }
 
 export async function handle(req: Request, parts: string[]): Promise<Response> {
@@ -238,6 +352,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
 
   const user = requireUser(req);
   const owner = user.id;
+  requireCsrf(req, db);
   const blocked = inspectRequest(db, owner, req, parts.join("/"));
   if (blocked) {
     notify(db, owner, "firewall.denied", "Request blocked", blocked.error);
@@ -315,15 +430,19 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     if (!["Next.js", "Vite", "Astro", "Nuxt", "Remix", "React"].includes(framework)) {
       return { response: json({ error: "Unknown framework" }, 400), status: 400, owner };
     }
+    const repoUrl = str(input.repoUrl);
+    if (repoUrl && !isGitUrl(repoUrl)) {
+      return { response: json({ error: "Repository URL must start with https://, http://, git@, or ssh://" }, 400), status: 400, owner };
+    }
     const id = newId();
     tx(db, () => {
       db.prepare(
-        "INSERT INTO projects (id, owner_id, name, framework, target, created_at) VALUES (?, ?, ?, ?, 'production', ?)",
-      ).run(id, owner, name, framework, Date.now());
-      publish(db, owner, "project.created", id, { id, name, framework, target: "production" });
+        "INSERT INTO projects (id, owner_id, name, framework, target, repo_url, created_at) VALUES (?, ?, ?, ?, 'production', ?, ?)",
+      ).run(id, owner, name, framework, repoUrl || null, Date.now());
+      publish(db, owner, "project.created", id, { id, name, framework, target: "production", repoUrl: repoUrl || null });
     });
     log(owner, "info", "projects", `created ${name}`);
-    return { response: json({ ok: true, id }), status: 201, owner };
+    return { response: json({ ok: true, id, repoUrl: repoUrl || null }), status: 201, owner };
   }
   if (method === "DELETE" && parts[0] === "projects" && parts[1]) {
     const existing = db.prepare("SELECT name FROM projects WHERE owner_id = ? AND id = ?").get(owner, parts[1]) as
@@ -342,24 +461,77 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
 
   if (key === "POST deployments") {
     const input = await body(req);
-    const project = db.prepare("SELECT id, name FROM projects WHERE owner_id = ? AND id = ?").get(owner, str(input.projectId)) as { id: string; name: string } | undefined;
+    const project = db.prepare("SELECT id, name, repo_url AS repoUrl FROM projects WHERE owner_id = ? AND id = ?")
+      .get(owner, str(input.projectId)) as { id: string; name: string; repoUrl: string | null } | undefined;
     if (!project) return { response: json({ error: "Project not found" }, 404), status: 404, owner };
-    const builder = process.env.MOBILECLOUD_BUILDER_URL;
-    const note = builder
-      ? "A builder URL is set, but this server does not dispatch builds yet."
-      : "No build runner is configured. Set MOBILECLOUD_BUILDER_URL to a reachable builder.";
-    const id = newId();
-    tx(db, () => {
-      db.prepare(
-        "INSERT INTO deployments (id, owner_id, project_id, status, note, created_at) VALUES (?, ?, ?, 'blocked', ?, ?)",
-      ).run(id, owner, project.id, note, Date.now());
-      publish(db, owner, "deployment.updated", id, {
-        id, projectId: project.id, project: project.name, status: "blocked", note,
+
+    const override = str(input.repoUrl);
+    if (override && !isGitUrl(override)) {
+      return { response: json({ error: "Repository URL must start with https://, http://, git@, or ssh://" }, 400), status: 400, owner };
+    }
+    if (override && override !== project.repoUrl) {
+      tx(db, () => {
+        db.prepare("UPDATE projects SET repo_url = ? WHERE owner_id = ? AND id = ?").run(override, owner, project.id);
+        publish(db, owner, "project.updated", project.id, { id: project.id, name: project.name, repoUrl: override });
       });
-    });
-    log(owner, "warn", "builder", `${project.name}: ${note}`);
-    notify(db, owner, "deployment.blocked", "Deployment not built", `${project.name}: ${note}`);
-    return { response: json({ ok: true, status: "blocked", note }), status: 201, owner };
+    }
+    const repoUrl = override || project.repoUrl || "";
+
+    if (!repoUrl) {
+      recordDeployment(db, owner, project, "blocked", NO_REPO_NOTE);
+      log(owner, "warn", "builder", `${project.name}: ${NO_REPO_NOTE}`);
+      notify(db, owner, "deployment.blocked", "Deployment not built", `${project.name}: ${NO_REPO_NOTE}`);
+      return { response: json({ ok: true, status: "blocked", note: NO_REPO_NOTE }), status: 201, owner };
+    }
+
+    if (!builderEnabled()) {
+      const note = "No build runner is configured. Set MOBILECLOUD_BUILDER_URL to a reachable builder.";
+      recordDeployment(db, owner, project, "blocked", note);
+      log(owner, "warn", "builder", `${project.name}: ${note}`);
+      notify(db, owner, "deployment.blocked", "Deployment not built", `${project.name}: ${note}`);
+      return { response: json({ ok: true, status: "blocked", note }), status: 201, owner };
+    }
+
+    const outcome = await runWebDeploy(project, repoUrl);
+    recordDeployment(db, owner, project, outcome.status, outcome.note);
+    log(owner, outcome.status === "queued" ? "info" : "error", "builder", `${project.name}: ${outcome.note}`);
+    if (outcome.status === "blocked") notify(db, owner, "deployment.blocked", "Deployment not built", `${project.name}: ${outcome.note}`);
+    return { response: json({ ok: true, status: outcome.status, note: outcome.note }), status: 201, owner };
+  }
+
+  if (method === "POST" && parts[0] === "deployments" && parts[2] === "rollback") {
+    const deployment = db.prepare(
+      `SELECT d.id, d.project_id AS projectId, p.name AS project
+       FROM deployments d JOIN projects p ON p.id = d.project_id
+       WHERE d.owner_id = ? AND d.id = ?`,
+    ).get(owner, parts[1]) as { id: string; projectId: string; project: string } | undefined;
+    if (!deployment) return { response: json({ error: "Deployment not found" }, 404), status: 404, owner };
+    const deployId = str((await body(req)).deployId);
+    if (!deployId) return { response: json({ error: "deployId is required" }, 400), status: 400, owner };
+
+    const result = await dispatchRollback({ project: deployment.project, deployId });
+    const note = result.ok ? `Rolled back to ${deployId} on the core engine.` : result.detail;
+    const outcome = result.ok ? "rolled_back" : "failed";
+    recordDeployment(db, owner, { id: deployment.projectId, name: deployment.project }, outcome, note);
+    log(owner, result.ok ? "info" : "error", "builder", `${deployment.project}: ${note}`);
+    return { response: json({ ok: result.ok, status: outcome, note }), status: result.ok ? 200 : 502, owner };
+  }
+
+  if (key === "GET builder") {
+    const probe = await probeBuilder();
+    return {
+      response: json({ enabled: builderEnabled(), baseUrl: probe.baseUrl, reachable: probe.reachable, detail: probe.detail }),
+      status: 200,
+      owner,
+    };
+  }
+  if (method === "GET" && parts[0] === "builder" && parts[1] === "deployments" && parts[2]) {
+    const project = db.prepare("SELECT id, name FROM projects WHERE owner_id = ? AND (id = ? OR name = ?)")
+      .get(owner, parts[2], parts[2]) as { id: string; name: string } | undefined;
+    if (!project) return { response: json({ error: "Project not found" }, 404), status: 404, owner };
+    const result = await fetchEngineDeployments(project.name);
+    if (!result.ok) return { response: json({ error: result.detail }, 502), status: 502, owner };
+    return { response: json(result.body), status: 200, owner };
   }
 
   if (key === "POST domains") {
@@ -661,20 +833,33 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const input = await body(req);
     const target = str(input.target);
     if (!["android", "web"].includes(target)) return { response: json({ error: "Target must be android or web" }, 400), status: 400, owner };
-    const project = db.prepare("SELECT id, name FROM projects WHERE owner_id = ? AND id = ?").get(owner, str(input.projectId)) as { id: string; name: string } | undefined;
+    const project = db.prepare("SELECT id, name, repo_url AS repoUrl FROM projects WHERE owner_id = ? AND id = ?")
+      .get(owner, str(input.projectId)) as { id: string; name: string; repoUrl: string | null } | undefined;
     if (!project) return { response: json({ error: "Project not found" }, 404), status: 404, owner };
-    const note = target === "android"
-      ? "No bare-metal ARM64 runner, Gradle snapshot, or Android SDK is configured. The build was not started."
-      : "No web build runner is configured. The build was not started.";
-    const id = newId();
-    tx(db, () => {
-      db.prepare(
-        "INSERT INTO builds (id, owner_id, project_id, target, status, note, created_at) VALUES (?, ?, ?, ?, 'blocked', ?, ?)",
-      ).run(id, owner, project.id, target, note, Date.now());
-      publish(db, owner, "build.updated", id, { id, projectId: project.id, project: project.name, target, status: "blocked", note });
-    });
-    log(owner, "warn", "builds", `${project.name} ${target}: ${note}`);
-    return { response: json({ ok: true, status: "blocked", note }), status: 201, owner };
+
+    if (target === "android") {
+      const note = "No bare-metal ARM64 runner, Gradle snapshot, or Android SDK is configured. The build was not started.";
+      recordBuild(db, owner, project, target, "blocked", note);
+      log(owner, "warn", "builds", `${project.name} ${target}: ${note}`);
+      return { response: json({ ok: true, status: "blocked", note }), status: 201, owner };
+    }
+
+    const repoUrl = project.repoUrl || "";
+    if (!repoUrl || !builderEnabled()) {
+      const note = repoUrl
+        ? "No build runner is configured. Set MOBILECLOUD_BUILDER_URL to a reachable builder."
+        : NO_REPO_NOTE;
+      recordBuild(db, owner, project, target, "blocked", note);
+      log(owner, "warn", "builds", `${project.name} ${target}: ${note}`);
+      return { response: json({ ok: true, status: "blocked", note }), status: 201, owner };
+    }
+
+    const outcome = await runWebDeploy(project, repoUrl);
+    recordBuild(db, owner, project, target, outcome.status, outcome.note);
+    recordDeployment(db, owner, project, outcome.status, outcome.note);
+    log(owner, outcome.status === "queued" ? "info" : "error", "builds", `${project.name} ${target}: ${outcome.note}`);
+    if (outcome.status === "blocked") notify(db, owner, "deployment.blocked", "Deployment not built", `${project.name}: ${outcome.note}`);
+    return { response: json({ ok: true, status: outcome.status, note: outcome.note }), status: 201, owner };
   }
 
   if (key === "POST workflows") {
@@ -741,26 +926,28 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
 
 function issueSession(userId: string, req: Request) {
   const token = randomBytes(32).toString("hex");
+  const csrf = randomBytes(32).toString("hex");
   const agent = (req.headers.get("user-agent") ?? "unknown").slice(0, 180);
   const sessionId = newId();
   const db = openDb();
   tx(db, () => {
     db.prepare(
-      "INSERT INTO sessions (id, token_hash, user_id, expires_at, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(sessionId, tokenHash(token), userId, Date.now() + WEEK, agent, Date.now());
+      "INSERT INTO sessions (id, token_hash, user_id, expires_at, user_agent, created_at, csrf) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run(sessionId, tokenHash(token), userId, Date.now() + WEEK, agent, Date.now(), csrf);
     // Other signed-in devices learn about the new session in real time.
     publish(db, userId, "session.created", sessionId, { sessionId, userAgent: agent });
   });
   notify(db, userId, "auth.session", "New session", agent);
   const headers = new Headers();
   headers.append("set-cookie", cookieHeader(token, WEEK / 1000));
+  headers.append("set-cookie", csrfCookieHeader(csrf, WEEK / 1000));
   const user = db.prepare("SELECT id, email, name, role, plan FROM users WHERE id = ?").get(userId);
   return { response: json({ user }, 200, headers), status: 200, owner: userId };
 }
 
 function listProjects(owner: string) {
   return openDb().prepare(
-    "SELECT id, name, framework, target, created_at AS createdAt FROM projects WHERE owner_id = ? ORDER BY created_at DESC",
+    "SELECT id, name, framework, target, repo_url AS repoUrl, created_at AS createdAt FROM projects WHERE owner_id = ? ORDER BY created_at DESC",
   ).all(owner);
 }
 

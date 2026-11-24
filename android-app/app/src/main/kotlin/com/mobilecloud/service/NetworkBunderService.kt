@@ -10,22 +10,32 @@ import android.net.NetworkRequest
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.mobilecloud.MobileCloudApp
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Dual-WAN Wi-Fi 7 + 5G SA failover service (master blueprint; research
- * report section 13 mitigation matrix).
+ * Dual-path transport monitor (Wi-Fi + cellular).
  *
- * Requests both transports simultaneously and keeps the serving network
- * pointer on the lowest-latency available path. On Wi-Fi loss the cellular
- * network is already validated (zero-glitch handoff); outbound tunnels
- * (cloudflared) reconnect over the surviving path in < 1s.
+ * Requests both transports simultaneously — Android allows only one transport
+ * per [NetworkRequest], so Wi-Fi and cellular get distinct requests and
+ * distinct callbacks. Each transport keeps its own live [Network] reference,
+ * so when the serving path is lost the other path's already-registered callback
+ * is used to fail over immediately (no null window, no re-request round trip).
+ *
+ * This service only observes and selects the serving [Network]; it does not
+ * create tunnels, and it reports no invented latency figure — Android exposes
+ * no per-network RTT to apps, so none is shown.
  */
 class NetworkBunderService : Service() {
 
-    private val activeNetwork = AtomicReference<Network?>(null)
-    private val latencyEstimateMs = AtomicReference(0L)
+    private val wifiNetwork = AtomicReference<Network?>(null)
+    private val cellularNetwork = AtomicReference<Network?>(null)
+    private val wifiValidated = AtomicBoolean(false)
+    private val cellularValidated = AtomicBoolean(false)
+
     private lateinit var connectivity: ConnectivityManager
+    private var wifiCallback: ConnectivityManager.NetworkCallback? = null
+    private var cellularCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -40,7 +50,7 @@ class NetworkBunderService : Service() {
         startForeground(
             NOTIFICATION_ID,
             NotificationCompat.Builder(this, MobileCloudApp.CHANNEL_ID)
-                .setContentTitle("Dual-WAN mesh transport active")
+                .setContentTitle("Network path monitor active")
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
                 .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_MIN)
@@ -50,76 +60,92 @@ class NetworkBunderService : Service() {
 
     private fun requestDualWan() {
         // Wi-Fi first: validated, low-latency bias.
-        connectivity.requestNetwork(
+        val wifi = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                wifiNetwork.set(network)
+                android.util.Log.i(TAG, "Wi-Fi path available: $network")
+            }
+
+            override fun onLost(network: Network) {
+                wifiNetwork.compareAndSet(network, null)
+                wifiValidated.set(false)
+                android.util.Log.w(TAG, "Wi-Fi lost — serving path fails over to ${servingNetwork()}")
+            }
+
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                wifiValidated.set(caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
+            }
+        }
+        wifiCallback = wifi
+        register(
             NetworkRequest.Builder()
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
                 .build(),
-            object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    activeNetwork.compareAndSet(null, network)
-                    android.util.Log.i(TAG, "Wi-Fi path available: $network")
-                }
-
-                override fun onLost(network: Network) {
-                    // Failover: cellular callback keeps the serving pointer hot.
-                    if (activeNetwork.compareAndSet(network, null)) {
-                        android.util.Log.w(TAG, "Wi-Fi lost — failing over to 5G SA")
-                    }
-                }
-
-                override fun onCapabilitiesChanged(
-                    network: Network,
-                    capabilities: NetworkCapabilities,
-                ) {
-                    if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
-                        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                    ) {
-                        latencyEstimateMs.set(12L)
-                    }
-                }
-            }
+            wifi,
         )
 
-        // Cellular second: 5G SA standing validation (the hot spare).
-        connectivity.requestNetwork(
+        // Cellular second: standing validation (the hot spare).
+        val cellular = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                cellularNetwork.set(network)
+                android.util.Log.i(TAG, "Cellular path available: $network")
+            }
+
+            override fun onLost(network: Network) {
+                cellularNetwork.compareAndSet(network, null)
+                cellularValidated.set(false)
+                android.util.Log.w(TAG, "Cellular lost — serving path is ${servingNetwork()}")
+            }
+
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                cellularValidated.set(caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
+            }
+        }
+        cellularCallback = cellular
+        register(
             NetworkRequest.Builder()
                 .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .build(),
-            object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    if (activeNetwork.get() == null) {
-                        activeNetwork.set(network)
-                        android.util.Log.i(TAG, "5G SA path active: $network")
-                    }
-                }
-
-                override fun onCapabilitiesChanged(
-                    network: Network,
-                    capabilities: NetworkCapabilities,
-                ) {
-                    if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
-                        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
-                    ) {
-                        latencyEstimateMs.set(45L)
-                    }
-                }
-
-                override fun onLost(network: Network) {
-                    if (activeNetwork.compareAndSet(network, null)) {
-                        android.util.Log.w(TAG, "5G path lost — Wi-Fi remains")
-                    }
-                }
-            }
+            cellular,
         )
     }
 
-    /** The network the tunnels should bind to (Wi-Fi preferred, 5G spare). */
-    fun servingNetwork(): Network? = activeNetwork.get()
+    private fun register(request: NetworkRequest, callback: ConnectivityManager.NetworkCallback) {
+        runCatching { connectivity.requestNetwork(request, callback) }
+            .onFailure { android.util.Log.w(TAG, "could not register dual-WAN callback", it) }
+    }
 
-    fun estimatedLatencyMs(): Long = latencyEstimateMs.get()
+    /**
+     * The network the caller should prefer: a validated Wi-Fi path, else a
+     * validated cellular path, else whichever transport is merely available,
+     * else the system's current default. Non-null whenever any transport is
+     * usable — it never strands callers on a stale null pointer.
+     */
+    fun servingNetwork(): Network? {
+        val wifi = wifiNetwork.get()
+        val cellular = cellularNetwork.get()
+        return when {
+            wifi != null && wifiValidated.get() -> wifi
+            cellular != null && cellularValidated.get() -> cellular
+            wifi != null -> wifi
+            cellular != null -> cellular
+            else -> runCatching { connectivity.activeNetwork }.getOrNull()
+        }
+    }
+
+    override fun onDestroy() {
+        wifiCallback?.let { runCatching { connectivity.unregisterNetworkCallback(it) } }
+        cellularCallback?.let { runCatching { connectivity.unregisterNetworkCallback(it) } }
+        wifiCallback = null
+        cellularCallback = null
+        wifiNetwork.set(null)
+        cellularNetwork.set(null)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        super.onDestroy()
+    }
 
     companion object {
         private const val TAG = "NetworkBunder"

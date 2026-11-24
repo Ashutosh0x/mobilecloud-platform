@@ -222,7 +222,6 @@ fun DashboardScreen() {
                 value = TelemetryProvider.formatUptime(t.uptimeMs),
                 icon = Icons.Filled.Schedule,
                 accent = Aurora.GlowGreen,
-                chip = { StatusPill("↑ 99.9%", color = Aurora.GreenSoft) },
                 modifier = Modifier.weight(1f),
             )
             MetricCard(
@@ -429,8 +428,8 @@ fun DashboardScreen() {
                 }
                 Spacer(Modifier.height(8.dp))
                 listOf(
-                    "Solana/Jito execution — no exchange connectivity, no orders signed",
-                    "PoR reconciliation — por-kernel daemon (127.0.0.1:3000) not reachable",
+                    "Solana/Jito execution — no exchange connectivity configured; no orders signed",
+                    "PoR reconciliation — needs the por-kernel daemon on 127.0.0.1:3000",
                     "Mesh — no WireGuard/libp2p tunnels configured",
                     "Stellar Soroban attestation — no contract deployed/referenced",
                 ).forEach { name ->

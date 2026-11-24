@@ -68,7 +68,12 @@ pub fn evaluate_trade(
     }
 
     // Invariant 2: per-position equity cap (integer-exact).
-    let allowed = portfolio_equity_micro_usdc * MAX_POSITION_EQUITY_BPS / 10_000;
+    // Widen to u128 before multiplying: equity is denominated in micro-USDC, so
+    // a naive u64 multiply by the bps constant overflows above ~$73.8M and
+    // panics (debug) or wraps to a near-zero cap (release).
+    let allowed =
+        (u128::from(portfolio_equity_micro_usdc) * u128::from(MAX_POSITION_EQUITY_BPS) / 10_000)
+            as u64;
     if requested_size_micro_usdc > allowed {
         violations.push(RiskViolation::PositionCapExceeded {
             requested_micro_usdc: requested_size_micro_usdc,
@@ -77,7 +82,10 @@ pub fn evaluate_trade(
     }
 
     // Invariant 3: T+1 clearing buffer on total open exposure.
-    let required_buffer = open_exposure_micro_usdc * T1_CLEARING_BUFFER_BPS / 10_000;
+    // Same u128 widening: open exposure above ~$9.2M overflows a u64 multiply
+    // by 2_000 bps, which would silently understate the required buffer.
+    let required_buffer =
+        (u128::from(open_exposure_micro_usdc) * u128::from(T1_CLEARING_BUFFER_BPS) / 10_000) as u64;
     if overnight_reserve_micro_usdc < required_buffer {
         violations.push(RiskViolation::T1BufferBreached {
             reserve_micro_usdc: overnight_reserve_micro_usdc,

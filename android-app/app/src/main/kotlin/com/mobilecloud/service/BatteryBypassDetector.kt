@@ -17,6 +17,12 @@ import android.os.BatteryManager
  * converge on this sysfs/BatteryManager state, so the detector needs no
  * per-OEM code paths for *detection* — only for *activation* (see
  * HardwareSafetyScreen).
+ *
+ * **Passive observation only (audit P7.2).** `BatteryManager` exposes the
+ * resulting power state but no public API to command the PMIC, so this module
+ * can only *report* whether bypass is already active. Actively requesting
+ * bypass requires root `sysfs` access or an OEM-specific settings toggle that
+ * the user enables themselves; nothing here can force it.
  */
 object BatteryBypassDetector {
 

@@ -49,6 +49,11 @@ const EVENT_TYPES = new Set([
   "build.started", "build.updated", "build.completed", "build.failed",
   "configuration.updated", "notification.created", "notification.read",
   "server.status_changed",
+  "device.pairing.created", "device.pairing.scanned",
+  "device.pairing.approval_requested", "device.pairing.approved",
+  "device.pairing.connected", "device.pairing.expired",
+  "device.pairing.revoked",
+  "device.connected", "device.disconnected", "device.updated",
 ]);
 
 function clamp(value, min, max) {

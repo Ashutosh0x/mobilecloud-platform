@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.os.Build
 import com.mobilecloud.core.NodeModeState
 import com.mobilecloud.core.TradingEngineController
+import com.mobilecloud.security.HardwareAttestation
 import com.mobilecloud.work.WorkerScheduler
 
 class MobileCloudApp : Application() {
@@ -22,11 +23,12 @@ class MobileCloudApp : Application() {
         }
     }
 
-    external fun getKernelVersion(): String
-
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // Bind the application context so the hardware anchor + Soroban
+        // Ed25519 identity are persisted across launches.
+        HardwareAttestation.install(this)
         // Honesty layer + fail-closed engine state: persisted mode and halt
         // state are loaded before any UI can render.
         NodeModeState.load(this)
@@ -44,7 +46,7 @@ class MobileCloudApp : Application() {
                 "MobileCloud Edge Supervisor",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "24/7 background telemetry and blockchain arbitrage supervisor"
+                description = "Device telemetry, PoR pulls and CloudShell supervision"
             }
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)

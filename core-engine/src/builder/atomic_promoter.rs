@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::builder::DeploymentStore;
 use crate::AppState;
 
 /// Validate the Build Output API v3 contract of a build output directory
@@ -116,18 +115,37 @@ pub fn atomic_swap(state: &std::sync::Arc<AppState>, project: &str, deploy_id: &
         ".{project}.{}.tmp",
         std::process::id()
     ));
-    // Relative target keeps the symlink valid when `home` moves (AVF mounts).
-    let relative_target = PathBuf::from("..")
-        .join("deployments")
-        .join(project)
-        .join(deploy_id)
-        .join("output");
     let _ = std::fs::remove_file(&temp);
+    let _ = std::fs::remove_dir_all(&temp);
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&relative_target, &temp)?;
+    {
+        // Relative target keeps the symlink valid when `home` moves (AVF mounts).
+        let relative_target = PathBuf::from("..")
+            .join("deployments")
+            .join(project)
+            .join(deploy_id)
+            .join("output");
+        std::os::unix::fs::symlink(&relative_target, &temp)?;
+        std::fs::rename(&temp, &live)?;
+    }
     #[cfg(not(unix))]
-    std::fs::write(&temp, &relative_target.to_string_lossy().as_bytes())?;
-    std::fs::rename(&temp, &live)?;
+    {
+        // No portable atomic symlink on Windows/FAT/FUSE storage (junctions are
+        // restricted, symlinks need Developer Mode). Materialize the deployment
+        // as a real directory and swap it in with a rename (non-empty targets
+        // must be removed first, since `rename` will not clobber a directory).
+        let source = state
+            .home
+            .join("deployments")
+            .join(project)
+            .join(deploy_id)
+            .join("output");
+        copy_tree(&source, &temp)?;
+        if live.exists() {
+            std::fs::remove_dir_all(&live)?;
+        }
+        std::fs::rename(&temp, &live)?;
+    }
     Ok(())
 }
 

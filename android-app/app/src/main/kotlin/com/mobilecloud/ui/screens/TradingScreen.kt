@@ -239,8 +239,19 @@ fun TradingScreen() {
         if (haltState.halted) {
             Spacer(Modifier.height(8.dp))
             Text(
-                "Resume is an explicit operator authorization (tap to authorize) — the engine stays halted across restarts until then.",
+                "Resume is an explicit operator authorization — hold the control below to clear the latch. The engine stays halted across restarts until then.",
                 color = Aurora.TextFaint, fontSize = 10.sp,
+            )
+            Spacer(Modifier.height(8.dp))
+            HoldToConfirmButton(
+                text = "▶  RESUME TRADING (HOLD 1.5s)",
+                holdingText = { p -> "HOLD TO RESUME… ${(p * 100).toInt()}%" },
+                onConfirm = {
+                    haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                    TradingEngineController.resume(context)
+                },
+                container = Aurora.GreenDeep,
+                enabled = haltState.halted,
             )
         }
     }

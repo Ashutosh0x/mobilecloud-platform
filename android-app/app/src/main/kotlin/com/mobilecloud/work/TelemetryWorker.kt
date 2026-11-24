@@ -4,10 +4,10 @@ import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import androidx.glance.appwidget.updateAll
+import com.mobilecloud.core.TelemetryProvider
 import com.mobilecloud.service.BatteryBypassDetector
 import com.mobilecloud.widget.EdgeStatusWidget
 import com.mobilecloud.widget.WidgetStateStore
-import java.io.File
 
 /**
  * 15-minute node telemetry heartbeat (GitHub WidgetWorker cadence, tightened
@@ -37,10 +37,16 @@ class TelemetryWorker(context: Context, params: WorkerParameters) :
         return Result.success()
     }
 
-    /** /sys/class/thermal/thermal_zone0/temp in milli-°C, -1 when unreadable. */
-    private fun readSocTempMilliC(): Int = runCatching {
-        File("/sys/class/thermal/thermal_zone0/temp").readText().trim().toInt()
-    }.getOrDefault(-1)
+    /**
+     * Best live CPU/SoC thermal zone in milli-°C, or -1 when none is readable.
+     * Reuses the shared probe so the worker applies the same cpu/soc type
+     * filter and trip-point exclusion as the dashboard (reading zone0 raw
+     * often returns a kernel trip-point constant, or is denied by SELinux).
+     */
+    private fun readSocTempMilliC(): Int {
+        val (celsius, _) = TelemetryProvider.readBestSocTemp()
+        return celsius?.let { (it * 1000).toInt() } ?: -1
+    }
 
     /** core-engine mesh peer count; 0 when the daemon is not reachable. */
     private fun fetchMeshPeers(): Int {

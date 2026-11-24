@@ -80,10 +80,7 @@ fun ProofOfReserveScreen() {
             Column(Modifier.padding(14.dp)) {
                 Row {
                     Text("MODE: ", color = Aurora.TextLow, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
-                    Text(
-                        if (daemonReachable == true) "DEGRADED" else "DEGRADED",
-                        color = Aurora.Red, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono,
-                    )
+                    Text("DEGRADED", color = Aurora.Red, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(

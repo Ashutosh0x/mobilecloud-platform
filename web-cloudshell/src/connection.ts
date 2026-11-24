@@ -20,6 +20,8 @@ export type ConnectionStatus =
 export interface CloudShellConnectionOptions {
   /** Override the websocket URL (defaults to the serving origin). */
   url?: string;
+  /** Terminal credential; falls back to the page's `?token=` query param. */
+  token?: string;
   /** Callback for ordered PTY output bytes. */
   onData: (bytes: Uint8Array) => void;
   /** Status transitions (for the UI indicator). */
@@ -40,11 +42,17 @@ export class CloudShellConnection {
 
   constructor(private readonly options: CloudShellConnectionOptions) {}
 
-  /** Human/gateway-facing URL: wss:// when served over TLS. */
+  /** Human/gateway-facing URL: wss:// when served over TLS, token-gated. */
   private endpoint(): string {
-    if (this.options.url) return this.options.url;
-    const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    return `${protocol}${location.host}/terminal/ws`;
+    const base =
+      this.options.url ??
+      `${location.protocol === 'https:' ? 'wss://' : 'ws://'}${location.host}/terminal/ws`;
+    const token =
+      this.options.token ?? new URLSearchParams(location.search).get('token') ?? undefined;
+    if (!token) return base;
+    const url = new URL(base, location.href);
+    url.searchParams.set('token', token);
+    return url.toString();
   }
 
   connect(): void {

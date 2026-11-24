@@ -56,6 +56,11 @@ pub struct AppState {
     /// Webhook shared secret (mirrored from the StrongBox Keystore on the
     /// Android side; injected via env in development).
     pub webhook_secret: Vec<u8>,
+    /// Credential required before any terminal session is granted (PTY over
+    /// WebSocket). Provisioned from the Android Keystore via
+    /// `MOBILECLOUD_TERMINAL_TOKEN`; when unset it falls back to the node's
+    /// shared secret. An empty value fails closed — no shell is handed out.
+    pub terminal_token: Vec<u8>,
     /// Host header → project routing table (custom domains + preview URLs).
     pub host_map: RwLock<HashMap<String, String>>,
     /// Rolling request counters for /metrics.
@@ -71,12 +76,21 @@ impl AppState {
         for dir in ["sources", "cache", "deployments", "live", "engine/bin", "logs"] {
             let _ = std::fs::create_dir_all(home.join(dir));
         }
+        // A dedicated terminal credential when provisioned, else the node's
+        // shared secret. Left empty (fails closed) only when neither exists,
+        // which disables the shell rather than exposing an unauthenticated one.
+        let terminal_token = std::env::var("MOBILECLOUD_TERMINAL_TOKEN")
+            .ok()
+            .map(String::into_bytes)
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| webhook_secret.clone());
         AppState {
             home,
             engine_bin,
             deployments: Arc::new(DeploymentStore::new()),
             log_hub: RwLock::new(HashMap::new()),
             webhook_secret,
+            terminal_token,
             host_map: RwLock::new(HashMap::new()),
             requests_total: AtomicU64::new(0),
             builds_total: AtomicU64::new(0),

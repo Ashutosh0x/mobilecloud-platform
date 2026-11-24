@@ -33,6 +33,20 @@ export const EVENT_TYPES = [
   "notification.created",
   "notification.read",
   "server.status_changed",
+  // QR device pairing + connected-device lifecycle. Every transition of a
+  // pairing session (create → scan → approve → connect, or expire/revoke) is
+  // appended to the outbox so both the browser and the Android device update
+  // without polling.
+  "device.pairing.created",
+  "device.pairing.scanned",
+  "device.pairing.approval_requested",
+  "device.pairing.approved",
+  "device.pairing.connected",
+  "device.pairing.expired",
+  "device.pairing.revoked",
+  "device.connected",
+  "device.disconnected",
+  "device.updated",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];

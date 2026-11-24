@@ -7,8 +7,10 @@
 //! 2. Computes net spread after **all** fees (Backpack taker 8 bps +
 //!    Raydium 25 bps + Jito tip) using integer micro-USDC math — no floats
 //!    in the profitability path,
-//! 3. Builds an **atomic multi-instruction bundle** (buy CLOB leg + sell AMM
-//!    leg + Jito tip) submitted to the Jito Block Engine,
+//! 3. Builds an **atomic multi-instruction bundle** whose swap legs are the
+//!    aggregator's own instructions (buy USDC→ANT leg + sell ANT→USDC leg,
+//!    fetched from the Jupiter v6 swap API — see [`crate::jupiter_swap_api`])
+//!    plus the Jito tip, submitted to the Jito Block Engine,
 //! 4. On spread evaporation before block inclusion, the entire bundle
 //!    **reverts atomically** — zero inventory risk, zero lost gas.
 //!
@@ -16,6 +18,7 @@
 //! are structurally enforced here; position sizing is delegated to
 //! [`crate::risk_invariants`].
 
+use crate::jupiter_swap_api::{InstructionPlan, QuoteRequest, SwapApi, SwapApiError, SwapRequest};
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
@@ -80,7 +83,16 @@ pub struct ArbitrageOpportunity {
     pub gross_spread_per_share: u64,
     /// Total fee estimate (micro-USDC): CLOB fee + AMM fee + tip.
     pub estimated_fees_micro_usdc: u64,
-    pub bundle: Transaction,
+}
+
+/// A ready-to-sign atomic bundle: the aggregator-returned swap instructions
+/// for both legs plus the Jito tip, together with the address lookup tables
+/// the relayer must fold into a v0 message (the API's
+/// `addressLookupTableAddresses`, carried through verbatim).
+#[derive(Debug)]
+pub struct AtomicBundle {
+    pub transaction: Transaction,
+    pub address_lookup_table_addresses: Vec<String>,
 }
 
 pub struct ArbitrageEngine {
@@ -89,6 +101,9 @@ pub struct ArbitrageEngine {
     jito_tip_lamports: u64,
     /// Invariant 4: maximum tolerable slippage vs mid (bps).
     max_slippage_bps: u32,
+    /// Aggregator client supplying the swap legs (see [`SwapApi`]). `None`
+    /// until the live transport is bound; paper/offline runs leave it unset.
+    swap_api: Option<Arc<dyn SwapApi>>,
 }
 
 impl ArbitrageEngine {
@@ -98,7 +113,15 @@ impl ArbitrageEngine {
             min_profit_threshold_micro_usdc: (min_profit_threshold_usdc * MICRO_USDC as f64) as u64,
             jito_tip_lamports: (jito_tip_sol * LAMPORTS_PER_SOL as f64) as u64,
             max_slippage_bps: 15,
+            swap_api: None,
         }
+    }
+
+    /// Bind the aggregator client that supplies the swap legs. Without it,
+    /// [`Self::build_atomic_bundle`] returns [`SwapApiError::NotConfigured`].
+    pub fn with_swap_api(mut self, swap_api: Arc<dyn SwapApi>) -> Self {
+        self.swap_api = Some(swap_api);
+        self
     }
 
     pub fn with_slippage_guard(mut self, max_slippage_bps: u32) -> Self {
@@ -140,7 +163,7 @@ impl ArbitrageEngine {
         // hard band relative to the AMM mid price.
         let mid = amm_quote.mid_price();
         let slippage_bps = if mid == 0 {
-            u64::MAX
+            u128::MAX
         } else {
             gross_spread_per_share as u128 * 10_000 / mid as u128
         };
@@ -160,7 +183,6 @@ impl ArbitrageEngine {
             net_profit_micro_usdc: net.saturating_sub(estimated_fees_micro_usdc),
             gross_spread_per_share,
             estimated_fees_micro_usdc,
-            bundle: self.build_atomic_bundle(trade_size_ant),
         })
     }
 
@@ -191,35 +213,68 @@ impl ArbitrageEngine {
 
     /// Construct the atomic multi-instruction transaction including the Jito
     /// MEV tip. All legs execute or the whole bundle reverts — Invariant 1.
-    fn build_atomic_bundle(&self, trade_size_ant: u64) -> Transaction {
+    ///
+    /// The two swap legs (buy USDC→ANT, sell ANT→USDC) are fetched from the
+    /// aggregator's own [`SwapApi`] and deserialized **verbatim**: the account
+    /// list and the Anchor discriminator come from the aggregator, never from
+    /// this crate. Hand-assembling a v6 account list (~18–25 accounts) with a
+    /// raw `u64` "discriminator" yields a bundle that fails on-chain
+    /// simulation — precisely what this path avoids.
+    pub async fn build_atomic_bundle(
+        &self,
+        clob_buy_quote: &PoolQuote,
+        trade_size_ant: u64,
+    ) -> Result<AtomicBundle, SwapApiError> {
+        let api = self.swap_api.as_ref().ok_or(SwapApiError::NotConfigured)?;
+
+        // Buy leg: spend USDC to acquire `trade_size_ant` ANT.
+        let buy_input_usdc = ((trade_size_ant as u128) * (clob_buy_quote.ant_ask_price as u128)
+            / MICRO_USDC as u128) as u64;
+        let buy_quote = api
+            .quote(&QuoteRequest::exact_in(
+                USDC_MINT,
+                ANT_MINT,
+                buy_input_usdc,
+                self.max_slippage_bps,
+            ))
+            .await?;
+        let buy_plan = api
+            .swap_instructions(&SwapRequest::new(
+                self.payer.pubkey().to_string(),
+                buy_quote,
+            ))
+            .await?
+            .to_plan()?;
+
+        // Sell leg: return `trade_size_ant` ANT to USDC via the same
+        // aggregator (Raydium is one of its routed venues, so the pool's
+        // account layout and discriminator are the aggregator's, not ours).
+        let sell_quote = api
+            .quote(&QuoteRequest::exact_in(
+                ANT_MINT,
+                USDC_MINT,
+                trade_size_ant,
+                self.max_slippage_bps,
+            ))
+            .await?;
+        let sell_plan = api
+            .swap_instructions(&SwapRequest::new(
+                self.payer.pubkey().to_string(),
+                sell_quote,
+            ))
+            .await?
+            .to_plan()?;
+
         let mut instructions = Vec::new();
+        for plan in buy_plan
+            .instructions
+            .iter()
+            .chain(sell_plan.instructions.iter())
+        {
+            instructions.push(plan_to_instruction(plan)?);
+        }
 
-        // 1. Swap leg 1: acquire ANT with slippage-protected routing
-        //    (Jupiter v6; account metas assembled per canonical router layout).
-        let buy_leg = Instruction {
-            program_id: Pubkey::from_str(JUPITER_V6_PROGRAM).expect("valid jupiter program id"),
-            accounts: vec![
-                AccountMeta::new(self.payer.pubkey(), true),
-                AccountMeta::new_readonly(Pubkey::from_str(USDC_MINT).expect("valid usdc"), false),
-                AccountMeta::new(Pubkey::from_str(ANT_MINT).expect("valid ant"), false),
-            ],
-            data: trade_size_ant.to_le_bytes().to_vec(),
-        };
-        instructions.push(buy_leg);
-
-        // 2. Swap leg 2: sell ANT back into the AMM for USDC.
-        let sell_leg = Instruction {
-            program_id: Pubkey::from_str(RAYDIUM_AMM_V4).expect("valid raydium program id"),
-            accounts: vec![
-                AccountMeta::new(self.payer.pubkey(), true),
-                AccountMeta::new(Pubkey::from_str(ANT_MINT).expect("valid ant"), false),
-                AccountMeta::new(Pubkey::from_str(USDC_MINT).expect("valid usdc"), false),
-            ],
-            data: trade_size_ant.to_le_bytes().to_vec(),
-        };
-        instructions.push(sell_leg);
-
-        // 3. Jito MEV tip: guarantees priority inclusion or complete revert.
+        // Jito MEV tip: guarantees priority inclusion or complete revert.
         let tip_account = Pubkey::from_str(JITO_TIP_ACCOUNT).expect("valid jito tip account");
         instructions.push(system_instruction::transfer(
             &self.payer.pubkey(),
@@ -229,8 +284,44 @@ impl ArbitrageEngine {
 
         // Unsigned transaction — the relayer populates the recent blockhash
         // immediately before submission (sub-400ms slot discipline).
-        Transaction::new_with_payer(&instructions, Some(&self.payer.pubkey()))
+        let transaction = Transaction::new_with_payer(&instructions, Some(&self.payer.pubkey()));
+
+        Ok(AtomicBundle {
+            transaction,
+            address_lookup_table_addresses: buy_plan
+                .address_lookup_table_addresses
+                .into_iter()
+                .chain(sell_plan.address_lookup_table_addresses)
+                .collect(),
+        })
     }
+}
+
+/// Convert one aggregator instruction plan into a Solana [`Instruction`],
+/// preserving the program id, account order and privilege flags verbatim.
+///
+/// The `data` bytes — including the Anchor 8-byte discriminator — are copied
+/// exactly as the aggregator returned them; this function never reconstructs
+/// them.
+fn plan_to_instruction(plan: &InstructionPlan) -> Result<Instruction, SwapApiError> {
+    let program_id =
+        Pubkey::from_str(&plan.program_id).map_err(|e| SwapApiError::Pubkey(e.to_string()))?;
+    let mut accounts = Vec::with_capacity(plan.accounts.len());
+    for meta in &plan.accounts {
+        let pubkey =
+            Pubkey::from_str(&meta.pubkey).map_err(|e| SwapApiError::Pubkey(e.to_string()))?;
+        accounts.push(match (meta.is_signer, meta.is_writable) {
+            (true, true) => AccountMeta::new(pubkey, true),
+            (true, false) => AccountMeta::new_readonly(pubkey, true),
+            (false, true) => AccountMeta::new(pubkey, false),
+            (false, false) => AccountMeta::new_readonly(pubkey, false),
+        });
+    }
+    Ok(Instruction {
+        program_id,
+        accounts,
+        data: plan.data.clone(),
+    })
 }
 
 /// Jito tip cost expressed in micro-USDC (SOL-priced tip normalized for the
@@ -261,8 +352,12 @@ mod tests {
     }
 
     #[test]
-    fn profitable_spread_produces_bundle() {
-        let engine = engine();
+    fn profitable_spread_produces_opportunity() {
+        // A $1.10 spread on an $89.55 mid is ~122 bps, which the engine's
+        // default 15 bps guard (Invariant 4) would classify as dislocation.
+        // The spread is nonetheless net-profitable, so widen the guard here to
+        // exercise the profit path; the guard itself is covered separately.
+        let engine = engine().with_slippage_guard(150);
         let clob = quote("Backpack CLOB", 88_400_000, 88_400_000, 100_000);
         let amm = quote("Raydium CPMM", 89_500_000, 89_600_000, 50_000);
         let opp = engine
@@ -271,8 +366,6 @@ mod tests {
         assert_eq!(opp.buy_venue, "Backpack CLOB");
         assert_eq!(opp.sell_venue, "Raydium CPMM");
         assert!(opp.net_profit_micro_usdc > 0);
-        // Bundle contains exactly: buy leg + sell leg + tip.
-        assert_eq!(opp.bundle.message.instructions.len(), 3);
     }
 
     #[test]
@@ -308,5 +401,58 @@ mod tests {
         let clob = quote("Backpack CLOB", 89_000_000, 89_000_000, 100_000);
         let amm = quote("Raydium CPMM", 89_000_001, 89_000_001, 50_000);
         assert!(engine.evaluate_arbitrage(&clob, &amm, 1).is_none());
+    }
+
+    #[tokio::test]
+    async fn recorded_aggregator_builds_both_legs_plus_tip() {
+        use crate::jupiter_swap_api::RecordedSwapApi;
+
+        let engine = engine().with_swap_api(Arc::new(RecordedSwapApi::from_fixtures()));
+        let clob = quote("Backpack CLOB", 88_400_000, 88_400_000, 100_000);
+        let bundle = engine
+            .build_atomic_bundle(&clob, 10_000)
+            .await
+            .expect("recorded aggregator fixtures build a bundle");
+
+        // buy leg (compute-budget + setup + swap)
+        // + sell leg (compute-budget + setup + swap)
+        // + Jito tip
+        assert_eq!(bundle.transaction.message.instructions.len(), 7);
+        // One lookup-table address per leg, straight from the API response.
+        assert_eq!(bundle.address_lookup_table_addresses.len(), 2);
+    }
+
+    #[test]
+    fn aggregator_swap_instruction_keeps_full_account_layout() {
+        let response: crate::jupiter_swap_api::SwapInstructionsResponse =
+            serde_json::from_str(crate::jupiter_swap_api::RECORDED_SWAP_INSTRUCTIONS_FIXTURE)
+                .expect("fixture deserializes");
+        let plan = response.to_plan().expect("plan decodes");
+        let swap = plan
+            .instructions
+            .iter()
+            .find(|ix| ix.program_id == crate::jupiter_swap_api::JUPITER_V6_PROGRAM_ID)
+            .expect("aggregator returned the routed swap");
+
+        let instruction = plan_to_instruction(swap).expect("aggregator program id is valid");
+        // The full aggregator account list is carried through verbatim — not
+        // the 3-account hand-rolled layout of the original defect.
+        assert_eq!(instruction.accounts.len(), 18);
+        assert_eq!(
+            instruction.program_id.to_string(),
+            crate::jupiter_swap_api::JUPITER_V6_PROGRAM_ID
+        );
+        // Discriminator/data are copied byte-for-byte, never reconstructed.
+        assert_eq!(instruction.data, swap.data);
+    }
+
+    #[tokio::test]
+    async fn bundle_without_swap_api_is_not_configured() {
+        let engine = engine();
+        let clob = quote("Backpack CLOB", 88_400_000, 88_400_000, 100_000);
+        assert!(matches!(
+            engine.build_atomic_bundle(&clob, 10_000).await,
+            Err(SwapApiError::NotConfigured)
+        ));
     }
 }

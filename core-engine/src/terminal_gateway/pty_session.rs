@@ -3,10 +3,13 @@
 //! `portable-pty` allocates a real `/dev/pts` pair so interactive programs
 //! (vim, htop, fzf, less) get line discipline, signal translation
 //! (Ctrl+C → SIGINT), and alternate-screen handling — impossible over plain
-//! pipes. Every session attaches to a persistent `tmux` daemon
-//! (`tmux new-session -A -s mobilecloud-session`) per §2.3, so a closed
+//! pipes. When `tmux` is available every session attaches to a persistent
+//! daemon (`tmux new-session -A -s mobilecloud-session`) per §2.3, so a closed
 //! browser tab or sleeping phone screen never terminates long-running work.
+//! On vanilla devices without `tmux` the session falls back to a direct
+//! interactive shell instead of failing with exit code 127.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
@@ -83,7 +86,12 @@ impl PtySession {
 
         // Sandboxed userland environment (terminal doc §3 isolation model):
         // private HOME, engine bin first on PATH, read-only system dirs.
-        let mut cmd = CommandBuilder::new(shell_path(engine_bin));
+        let shell = shell_path(engine_bin);
+        let tmux = find_executable("tmux", engine_bin);
+        let mut cmd = match &tmux {
+            Some(tmux_bin) => CommandBuilder::new(tmux_bin.to_string_lossy().to_string()),
+            None => CommandBuilder::new(shell.clone()),
+        };
         cmd.env("TERM", "xterm-256color");
         cmd.env("HOME", home.join("home").to_string_lossy().to_string());
         cmd.env(
@@ -94,9 +102,16 @@ impl PtySession {
             ),
         );
         cmd.env("PS1", "mobilecloud$ ");
+        cmd.env("SHELL", shell);
         cmd.cwd(home.join("home").to_string_lossy().to_string());
-        // Attach to (or create) the persistent tmux session.
-        cmd.args(["-c", "tmux new-session -A -s mobilecloud-session"]);
+        if tmux.is_some() {
+            // Attach to (or create) the persistent tmux session.
+            cmd.args(["new-session", "-A", "-s", "mobilecloud-session"]);
+        } else {
+            // Vanilla device without tmux: hand out a direct interactive shell
+            // rather than exiting 127 on `tmux: not found`.
+            tracing::info!("tmux not found on PATH — spawning a direct interactive shell");
+        }
 
         let child = pair
             .slave
@@ -151,6 +166,22 @@ fn shell_path(engine_bin: &std::path::Path) -> String {
         }
     }
     "/system/bin/sh".to_string()
+}
+
+/// Locate an executable on the child's effective PATH (engine bin first, then
+/// the Android userland, then the parent process PATH). `None` means the tool
+/// is genuinely absent, not merely unbundled.
+fn find_executable(name: &str, engine_bin: &std::path::Path) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = vec![engine_bin.to_path_buf()];
+    for dir in ["/system/bin", "/vendor/bin", "/usr/bin", "/usr/local/bin", "/bin"] {
+        dirs.push(PathBuf::from(dir));
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    dirs.into_iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 #[cfg(test)]

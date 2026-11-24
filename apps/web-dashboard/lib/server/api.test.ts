@@ -127,3 +127,48 @@ test("a JA4 rule matches only a well-formed header and does not invent a digest"
   assert.deepEqual(body.firewall.traffic.topJa4.map((row) => row.value), [digest]);
   assert.equal(body.firewall.traffic.notes.some((note) => note.includes("ASN")), true);
 });
+
+test("an unreachable core engine blocks the deploy and is reported honestly", async () => {
+  const { resetDb } = await import("./db.ts");
+  resetDb();
+  const { handle } = await import("./api.ts");
+  const original = process.env.MOBILECLOUD_BUILDER_URL;
+  process.env.MOBILECLOUD_BUILDER_URL = "http://127.0.0.1:1";
+  try {
+    const signup = await handle(new Request("http://local/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Ada", email: "ada4@example.com", password: "correct-horse" }),
+    }), ["auth", "signup"]);
+    const session = (signup.headers.get("set-cookie") ?? "").split(";")[0];
+
+    const created = await handle(new Request("http://local/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: session },
+      body: JSON.stringify({ name: "ledger", framework: "Next.js", repoUrl: "https://github.com/acme/ledger.git" }),
+    }), ["projects"]);
+    assert.equal(created.status, 201);
+    const project = await created.json() as { id: string; repoUrl: string | null };
+    assert.equal(project.repoUrl, "https://github.com/acme/ledger.git");
+
+    const deploy = await handle(new Request("http://local/api/deployments", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: session },
+      body: JSON.stringify({ projectId: project.id }),
+    }), ["deployments"]);
+    assert.equal(deploy.status, 201);
+    const recorded = await deploy.json() as { status: string; note: string };
+    assert.equal(recorded.status, "blocked");
+    assert.ok(recorded.note.length > 0);
+    assert.match(recorded.note, /engine/);
+
+    const builder = await handle(new Request("http://local/api/builder", { headers: { cookie: session } }), ["builder"]);
+    assert.equal(builder.status, 200);
+    const info = await builder.json() as { enabled: boolean; reachable: boolean };
+    assert.equal(info.enabled, true);
+    assert.equal(info.reachable, false);
+  } finally {
+    if (original === undefined) delete process.env.MOBILECLOUD_BUILDER_URL;
+    else process.env.MOBILECLOUD_BUILDER_URL = original;
+  }
+});

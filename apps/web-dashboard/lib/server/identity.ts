@@ -76,6 +76,9 @@ export function userFromBearer(db: DatabaseSync, header: string | null) {
   ).get(tokenHash(raw), Date.now()) as { id: string; email: string; name: string; role: string; plan: string; tokenId: string } | undefined;
   if (!row) return null;
   db.prepare("UPDATE access_tokens SET last_used = ? WHERE id = ?").run(Date.now(), row.tokenId);
+  // A device credential is an access token; mirror the activity onto the device
+  // row so the dashboard can show an honest "last active" per connected device.
+  db.prepare("UPDATE connected_devices SET last_active = ? WHERE token_id = ?").run(Date.now(), row.tokenId);
   return { id: row.id, email: row.email, name: row.name, role: row.role, plan: row.plan };
 }
 

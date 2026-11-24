@@ -3,10 +3,9 @@
 // Library: libmobilecloud_native.so (loaded by MobileCloudApp).
 //
 // Surfaces:
-//  1. Kernel version string (MobileCloudApp.getKernelVersion).
-//  2. Unix PTY master/slave spawner for the inbuilt CloudShell
+//  1. Unix PTY master/slave spawner for the inbuilt CloudShell
 //     (NativePtyController): forkpty + non-blocking master fd.
-//  3. sysfs SoC thermal reader for the supervisor governor loop
+//  2. sysfs SoC thermal reader for the supervisor governor loop
 //     (CloudSupervisorService).
 //
 // StrongBox KeyStore operations stay on the Kotlin side: the TEE keymaster
@@ -42,18 +41,6 @@ int set_nonblocking(int fd) {
 } // namespace
 
 extern "C" {
-
-// ---------------------------------------------------------------------------
-// Kernel identity
-// ---------------------------------------------------------------------------
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_mobilecloud_MobileCloudApp_getKernelVersion(
-        JNIEnv* env,
-        jobject /* this */) {
-    std::string version = "por-kernel-2026.1-aarch64";
-    return env->NewStringUTF(version.c_str());
-}
 
 // ---------------------------------------------------------------------------
 // PTY subsystem (com.mobilecloud.terminal.NativePtyController)
@@ -147,17 +134,49 @@ Java_com_mobilecloud_terminal_NativePtyController_nativeClosePty(
 // Thermal governor feed (com.mobilecloud.service.CloudSupervisorService)
 // ---------------------------------------------------------------------------
 
+// Longest temperature any real SoC reports (milli-°C). Above this the value is
+// a kernel constant, not a measurement.
+static const int kMaxPlausibleMilli = 120000;
+
+// Kernel trip-point zones are named "<zone>-step", "-usr", "-lowf", "-high",
+// "-crit" or "-max*": their temps are CONFIG constants (e.g. 44600), not live
+// readings. Reporting one would show a throttle threshold as temperature.
+static bool isTripPointName(const char *type) {
+    static const char *kTripSuffixes[] = {
+        "-step", "-usr", "-lowf", "-high", "-crit", "-max",
+    };
+    size_t len = strlen(type);
+    for (const char *suffix : kTripSuffixes) {
+        size_t slen = strlen(suffix);
+        if (len >= slen && strncmp(type + (len - slen), suffix, slen) == 0) return true;
+    }
+    return false;
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_com_mobilecloud_service_CloudSupervisorService_nativeReadSocTempMilli(
         JNIEnv *, jclass) {
-    int best = 31000; // emulated idle fallback when sysfs is unavailable
-    for (int zone = 0; zone < 16; ++zone) {
-        char path[96];
-        snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/temp", zone);
-        FILE *f = fopen(path, "re");
+    // -1 means "no CPU/SoC thermal zone could be read". Callers MUST treat that
+    // as unknown and skip the thermal guard — never substitute a made-up value.
+    int best = -1;
+    for (int zone = 0; zone < 32; ++zone) {
+        char typePath[96];
+        snprintf(typePath, sizeof(typePath), "/sys/class/thermal/thermal_zone%d/type", zone);
+        FILE *tf = fopen(typePath, "re");
+        if (!tf) continue;
+        char type[64] = {0};
+        bool readType = fscanf(tf, "%63s", type) == 1;
+        fclose(tf);
+        if (!readType) continue;
+        if (strncmp(type, "cpu", 3) != 0 && strncmp(type, "soc", 3) != 0) continue;
+        if (isTripPointName(type)) continue;
+
+        char tempPath[96];
+        snprintf(tempPath, sizeof(tempPath), "/sys/class/thermal/thermal_zone%d/temp", zone);
+        FILE *f = fopen(tempPath, "re");
         if (!f) continue;
         int milli = 0;
-        if (fscanf(f, "%d", &milli) == 1 && milli > best && milli < 120000) {
+        if (fscanf(f, "%d", &milli) == 1 && milli > best && milli < kMaxPlausibleMilli) {
             best = milli;
         }
         fclose(f);

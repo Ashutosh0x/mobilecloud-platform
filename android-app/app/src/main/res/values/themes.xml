@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Base app theme. Compose renders every screen itself, so this theme only
+      needs to remove the platform action bar and colour the launch window to
+      match the app's black canvas — it never supplies UI chrome.
+
+      A framework Material (dark) theme is used deliberately: the app hosts a
+      FragmentActivity for BiometricPrompt and does not depend on AppCompat.
+    -->
+    <style name="Theme.MobileCloud" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:colorBackground">@android:color/black</item>
+    </style>
+</resources>

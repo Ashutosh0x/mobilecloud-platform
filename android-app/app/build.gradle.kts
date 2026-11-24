@@ -4,6 +4,16 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Release signing is driven entirely by the environment; no key material or
+// password is committed. The release build is only signed when a keystore can
+// actually be found, otherwise `signingConfig` stays null and Gradle produces
+// an unsigned release APK instead of failing with a made-up password.
+val releaseKeystore: File? = listOfNotNull(
+    System.getenv("KEYSTORE_PATH")?.let { file(it) },
+    file("../../mobilecloud-release.jks"),
+    file("mobilecloud-release.jks"),
+).firstOrNull { it.exists() }
+
 android {
     // The R / BuildConfig classes must live in the root source package
     // (`com.mobilecloud.*`) because every screen and the terminal view import
@@ -35,15 +45,17 @@ android {
     }
 
     signingConfigs {
-        create("release") {
-            storeFile = file(System.getenv("KEYSTORE_PATH") ?: "../../mobilecloud-release.jks")
-            storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "MobileCloud2026Secure!"
-            keyAlias = System.getenv("KEY_ALIAS") ?: "mobilecloud-key"
-            keyPassword = System.getenv("KEY_PASSWORD") ?: "MobileCloud2026Secure!"
-            enableV1Signing = true
-            enableV2Signing = true
-            enableV3Signing = true
-            enableV4Signing = true
+        releaseKeystore?.let { keystore ->
+            create("release") {
+                storeFile = keystore
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
+            }
         }
     }
 
@@ -51,7 +63,8 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("release")
+            // Signed only when a real keystore is present; otherwise unsigned.
+            signingConfig = releaseKeystore?.let { signingConfigs.getByName("release") }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

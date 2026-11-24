@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Analytics, DbFile, Deployment, Domain, FuncRow, HostInfo, LogRow, Member, Metrics, ObjectRow, Project, RangeKey, User } from "./types";
+import { CSRF_HEADER, readCsrfCookie } from "./csrf";
 import { realtime, type RealtimeState } from "./realtime";
 
 export type { RangeKey };
@@ -170,10 +171,12 @@ function transient(s: CloudState) {
 const Ctx = createContext<Api | null>(null);
 
 async function request(path: string, init?: RequestInit) {
+  const method = (init?.method ?? "GET").toUpperCase();
+  const csrf = method === "GET" || method === "HEAD" ? null : readCsrfCookie();
   const res = await fetch(`/api/${path}`, {
     ...init,
     credentials: "include",
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    headers: { "content-type": "application/json", ...(csrf ? { [CSRF_HEADER]: csrf } : {}), ...(init?.headers ?? {}) },
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(typeof data.error === "string" ? data.error : `Request failed (${res.status})`);

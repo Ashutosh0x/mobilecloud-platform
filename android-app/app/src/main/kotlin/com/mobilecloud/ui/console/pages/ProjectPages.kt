@@ -328,7 +328,7 @@ fun BuildsPage(store: ConsoleStore) {
 
     PageHead(
         "Builds & Agent Deployments",
-        "Autonomous on-device edge deployments powered by Open Build Output v3, Turbopack on 3nm ARM64 (16.5s builds), and agentic ingress.",
+        "Queue a build request against a stored project, purge a cache tag, or roll back a recorded deployment. A request stays stored unless a build runner accepts it.",
     )
     Spacer(Modifier.height(12.dp))
     CPanel(title = "Queue a build") {
@@ -354,8 +354,20 @@ fun BuildsPage(store: ConsoleStore) {
 
     Spacer(Modifier.height(14.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Box(Modifier.weight(1f)) { CStat("Build Speed", "16.5s avg", hint = "Native 3nm ARM64 Silicon") }
-        Box(Modifier.weight(1f)) { CStat("Atomic Promotion", "< 15 ms", hint = "Zero-downtime pointer swap") }
+        Box(Modifier.weight(1f)) {
+            CStat(
+                "Build requests",
+                snap.builds.size.toString(),
+                hint = "Rows stored for your account",
+            )
+        }
+        Box(Modifier.weight(1f)) {
+            CStat(
+                "Awaiting a runner",
+                snap.builds.count { it.status == "blocked" }.toString(),
+                hint = "Stored but not accepted by a build runner",
+            )
+        }
     }
     Spacer(Modifier.height(10.dp))
     CPanel(title = "Cache Revalidation") {

@@ -80,11 +80,11 @@ fun CloudShellScreen() {
     fun onSpecial(key: SpecialKey) {
         when (key) {
             SpecialKey.Esc -> send("\u001b")
-            SpecialKey.Tab -> send("	")
+            SpecialKey.Tab -> send("\t")
             SpecialKey.Up -> send("\u001b[A")
-            SpecialKey.Down -> send("[B")
-            SpecialKey.Left -> send("[D")
-            SpecialKey.Right -> send("[C")
+            SpecialKey.Down -> send("\u001b[B")
+            SpecialKey.Left -> send("\u001b[D")
+            SpecialKey.Right -> send("\u001b[C")
             is SpecialKey.CtrlChar -> send((key.ch.code and 0x1F).toChar().toString())
             is SpecialKey.AltChar -> send("\u001b" + key.ch)
         }

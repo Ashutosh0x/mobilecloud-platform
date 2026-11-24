@@ -45,7 +45,7 @@ fn self_or_fallback(
     _project: &str,
     clone_url: &str,
     branch: &str,
-    commit: &str,
+    _commit: &str,
     dest: PathBuf,
     libgit2_result: anyhow::Result<()>,
 ) -> anyhow::Result<PathBuf> {
@@ -53,6 +53,10 @@ fn self_or_fallback(
         Ok(()) => Ok(dest),
         Err(libgit2_err) => {
             // Fallback: system git (bundled in the MobileCloud engine dir or PATH).
+            // The libgit2 attempt already created `dest` (and its `.git`), and a
+            // CLI clone aborts when the destination is a non-empty directory, so
+            // clear it first.
+            let _ = std::fs::remove_dir_all(&dest);
             let status = std::process::Command::new("git")
                 .args([
                     "clone",

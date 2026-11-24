@@ -15,6 +15,7 @@
 //! gates in [`risk_invariants`] and every execution path must pass all four.
 
 pub mod edge_runtime_daemon;
+pub mod jupiter_swap_api;
 pub mod risk_invariants;
 pub mod soroban_circuit_breaker;
 

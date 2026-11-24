@@ -5284,7 +5284,12 @@ name = "trading-engine"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "base64 0.22.1",
  "hex",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
  "por-kernel",
  "serde",
  "serde_json",
