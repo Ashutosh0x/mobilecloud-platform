@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,6 +35,7 @@ import com.mobilecloud.ui.console.CToggleRow
 import com.mobilecloud.ui.console.Hint
 import com.mobilecloud.ui.console.HourBars
 import com.mobilecloud.ui.console.PageHead
+import com.mobilecloud.ui.console.ScanToLinkButton
 import com.mobilecloud.ui.console.Tone
 import com.mobilecloud.ui.console.action
 import com.mobilecloud.ui.console.ctime
@@ -41,6 +43,7 @@ import com.mobilecloud.ui.console.jobj
 import com.mobilecloud.ui.theme.AppFonts
 import com.mobilecloud.ui.theme.Aurora
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 /* ------------------------------- Firewall ------------------------------ */
 
@@ -192,66 +195,78 @@ private fun RankCard(title: String, rows: List<Pair<String, Int>>, empty: String
     }
 }
 
-/* ----------------------------- Device login ---------------------------- */
+/* ---------------------------- Linked devices --------------------------- */
 
 @Composable
 fun DevicePage(store: ConsoleStore) {
     val scope = rememberCoroutineScope()
-    var userCode by remember { mutableStateOf("") }
-    var deviceCode by remember { mutableStateOf("") }
-    var status by remember { mutableStateOf("Request a code, approve it in Settings, then poll.") }
-    var token by remember { mutableStateOf<String?>(null) }
+    var devices by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
+    var loading by remember { mutableStateOf(false) }
 
-    PageHead("Device login", "RFC 8628 style code. The secret never goes into a shell prompt.")
-    Spacer(Modifier.height(12.dp))
-    CPanel {
-        CButton("Request code", onClick = {
-            scope.launch {
-                try {
-                    val data = store.client.request("auth/device/code", "POST")
-                    val uc = data.optString("userCode")
-                    val dc = data.optString("deviceCode")
-                    if (uc.isEmpty() || dc.isEmpty()) {
-                        status = data.optString("error").ifEmpty { "Could not start a device code" }
-                    } else {
-                        userCode = uc
-                        deviceCode = dc
-                        token = null
-                        status = "Waiting for approval. Confirm this code in Settings."
-                    }
-                } catch (e: Exception) {
-                    status = e.message ?: "Could not start a device code"
-                }
+    fun load() {
+        scope.launch {
+            loading = true
+            try {
+                val array = store.client.request("devices").optJSONArray("devices")
+                devices = (0 until (array?.length() ?: 0)).mapNotNull { array?.optJSONObject(it) }
+            } catch (_: Exception) {
+                // The list is best-effort; linking a phone still works without it.
+            } finally {
+                loading = false
             }
-        })
-        if (userCode.isNotEmpty()) {
-            Spacer(Modifier.height(10.dp))
-            Hint("User code: $userCode")
         }
-        Spacer(Modifier.height(8.dp))
-        Hint(status)
-        Spacer(Modifier.height(10.dp))
-        CButton("Poll for token", onClick = {
-            scope.launch {
-                try {
-                    val data = store.client.request("auth/device/token", "POST", jobj("deviceCode" to deviceCode).toString())
-                    val t = data.optString("token")
-                    status = if (data.optString("status") == "approved" && t.isNotEmpty()) {
-                        token = t
-                        "Approved. The token is shown once and stored only as a hash."
-                    } else if (data.optString("status") == "pending") {
-                        "Still waiting for approval."
-                    } else {
-                        data.optString("error").ifEmpty { data.optString("status").ifEmpty { "Not approved" } }
+    }
+
+    LaunchedEffect(Unit) { load() }
+
+    PageHead(
+        "Link device",
+        "Scan the QR code shown in the dashboard to sign this phone in. Approving it there is what links the device — no password is typed on the phone.",
+    )
+    Spacer(Modifier.height(12.dp))
+    CPanel(
+        title = "Pair this phone",
+        subtitle = "The dashboard shows a two-minute code. Scan it, approve the request, and this phone is signed in and connected in real time.",
+    ) {
+        ScanToLinkButton(store, label = "Scan the dashboard QR code") { load() }
+    }
+
+    Spacer(Modifier.height(14.dp))
+    CPanel(title = "Linked devices", subtitle = "Devices paired with a QR code, newest first.") {
+        if (devices.isEmpty()) {
+            CEmpty(if (loading) "Loading…" else "No linked devices yet.")
+        } else {
+            devices.forEach { device ->
+                val id = device.optString("id")
+                val revoked = device.optBoolean("revoked")
+                Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            device.optString("name").ifEmpty { "Device" },
+                            color = Aurora.TextHi, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            listOf(device.optString("platform"), ctime(device.optLong("pairedAt")))
+                                .filter { it.isNotBlank() }.joinToString(" · "),
+                            color = Aurora.TextMid, fontSize = 11.sp,
+                        )
                     }
-                } catch (e: Exception) {
-                    status = e.message ?: "Not approved"
+                    if (revoked) {
+                        CBadge("revoked", Tone.BAD)
+                    } else {
+                        CButton("Revoke", onClick = {
+                            scope.launch {
+                                try {
+                                    store.call("devices/$id", null, "DELETE")
+                                    load()
+                                } catch (e: Exception) {
+                                    store.notify(e.message ?: "Request failed")
+                                }
+                            }
+                        }, kind = BtnKind.GHOST, compact = true)
+                    }
                 }
             }
-        }, kind = BtnKind.GHOST, enabled = deviceCode.isNotEmpty())
-        token?.let {
-            Spacer(Modifier.height(10.dp))
-            Hint("Access token: $it")
         }
     }
 }

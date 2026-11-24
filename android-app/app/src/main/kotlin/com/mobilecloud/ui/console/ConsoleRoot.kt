@@ -188,6 +188,18 @@ fun ConsoleLogin(store: ConsoleStore) {
             }
         }
 
+        Spacer(Modifier.height(16.dp))
+        Text("or", color = Aurora.TextLow, fontSize = 11.sp)
+        Spacer(Modifier.height(10.dp))
+        Column(Modifier.fillMaxWidth()) {
+            Text(
+                "Show a QR code on the dashboard's Device page, then scan it here to sign this phone in without typing a password.",
+                color = Aurora.TextMid, fontSize = 12.sp,
+            )
+            Spacer(Modifier.height(10.dp))
+            ScanToLinkButton(store, label = "Sign in with a QR code")
+        }
+
         Spacer(Modifier.height(18.dp))
         Text("MobileCloud • Build. Ship. Scale.", color = Aurora.TextLow, fontSize = 11.sp)
     }

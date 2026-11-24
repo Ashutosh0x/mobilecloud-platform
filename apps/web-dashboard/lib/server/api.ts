@@ -10,6 +10,8 @@ import { collectAnalytics, collectHost, collectMetrics } from "./metrics.ts";
 import { capabilities, collectObservability, inspectRequest, listBuilds, listDrives, listFirewallEvents, listRules, listWorkflows, observedJa4, summarizeVitals, trafficSummary } from "./platform.ts";
 import { approveDevice, clearProtection, createToken, gateCookie, identityProviders, listNotifications, listSessions, listTokens, listWebhooks, notify, pollDevice, protectionStatus, readGate, setProtection, startDevice, unlockProtection, userFromBearer } from "./identity.ts";
 import { changesSince, publish, tx } from "./events.ts";
+import { approveFromBrowser, approvePairing, closePairing, createPairing, expireStale, listDevices, markAwaitingApproval, publicPairing, readPairing, renameDevice, revokeDevice, scanPairing, secretMatches } from "./pairing.ts";
+import { encodePairingTicket, renderPairingQr } from "./qr.ts";
 
 const COOKIE = "mc_session";
 const WEEK = 7 * 24 * 3600 * 1000;
@@ -173,6 +175,44 @@ function str(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+/**
+ * The control-plane origin a pairing QR code should send the phone back to.
+ *
+ * The browser is the only party that knows the address the phone can actually
+ * reach (LAN IP, tunnel hostname, adb-reverse port), so it is taken from the
+ * request the browser made rather than guessed from server configuration.
+ */
+function originOf(req: Request) {
+  const origin = req.headers.get("origin");
+  if (origin) return origin.replace(/\/+$/, "");
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
+  if (host) return `${req.headers.get("x-forwarded-proto") ?? "http"}://${host}`;
+  return new URL(req.url).origin;
+}
+
+/** Turns a pairing state-machine reason into something a user can act on. */
+function pairingError(reason: string) {
+  switch (reason) {
+    case "unknown_session":
+    case "invalid_secret":
+      return "This QR code is not valid. Ask the dashboard to show a new one.";
+    case "expired":
+      return "This QR code has expired. QR codes are valid for two minutes.";
+    case "closed":
+      return "This pairing was cancelled on the dashboard.";
+    case "already_connected":
+      return "This QR code has already been used.";
+    case "already_approved":
+      return "This QR code was already approved. Ask the dashboard to show a new one.";
+    case "not_approved":
+      return "This pairing has not been approved on the dashboard yet.";
+    case "account_mismatch":
+      return "This QR code belongs to a different account.";
+    default:
+      return "This pairing could not be completed. Try again from the dashboard.";
+  }
+}
+
 /** A repository URL must look like a git remote the builder can clone. */
 function isGitUrl(value: string) {
   return /^(https:\/\/|http:\/\/|git@|ssh:\/\/)/.test(value);
@@ -301,6 +341,98 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const result = pollDevice(db, str((await body(req)).deviceCode));
     const status = result.status === "approved" ? 200 : result.status === "expired" ? 400 : 202;
     return { response: json(result, status), status, owner: null };
+  }
+
+  // ---- QR device pairing: the scanning device's half ---------------------
+  // The phone starts with no session, so these three calls are authorised by
+  // possession of the 256-bit secret carried only inside the QR code. That is
+  // deliberately not enough on its own to link a device: the account-scoped
+  // browser approval (`POST device/pairing/{id}/approve`) is the other half,
+  // and only the two together produce a credential.
+
+  if (method === "POST" && parts[0] === "device" && parts[1] === "pairing" && parts[2] && parts[3] === "scan") {
+    const input = await body(req);
+    const secret = str(input.secret);
+    if (!secret) return { response: json({ error: "A pairing secret is required" }, 400), status: 400, owner: null };
+    const device = {
+      name: str(input.name) || undefined,
+      platform: str(input.platform) || undefined,
+      appVersion: str(input.appVersion) || undefined,
+    };
+    const result = scanPairing(db, parts[2], secret, device, clientIp(req));
+    if (!result.ok) {
+      const status = result.reason === "unknown_session" || result.reason === "invalid_secret" ? 404 : 409;
+      return { response: json({ error: pairingError(result.reason), reason: result.reason }, status), status, owner: null };
+    }
+    markAwaitingApproval(db, parts[2]);
+    const scanned = readPairing(db, parts[2]) ?? result.row;
+    // Fan out so the browser flips to the approval screen without polling.
+    publish(db, scanned.owner_id, "device.pairing.scanned", scanned.id, publicPairing(scanned));
+    if (scanned.status === "AWAITING_APPROVAL") {
+      publish(db, scanned.owner_id, "device.pairing.approval_requested", scanned.id, publicPairing(scanned));
+    }
+    return { response: json({ pairing: publicPairing(scanned), duplicate: result.duplicate }), status: 200, owner: null };
+  }
+
+  if (method === "POST" && parts[0] === "device" && parts[1] === "pairing" && parts[2] && parts[3] === "status") {
+    const row = readPairing(db, parts[2]);
+    if (!row || !secretMatches(row, str((await body(req)).secret))) {
+      return { response: json({ error: pairingError("unknown_session"), reason: "unknown_session" }, 404), status: 404, owner: null };
+    }
+    return { response: json({ pairing: publicPairing(row) }), status: 200, owner: null };
+  }
+
+  if (method === "POST" && parts[0] === "device" && parts[1] === "pairing" && parts[2] && parts[3] === "claim") {
+    const input = await body(req);
+    const row = readPairing(db, parts[2]);
+    if (!row || !secretMatches(row, str(input.secret))) {
+      return { response: json({ error: pairingError("unknown_session"), reason: "unknown_session" }, 404), status: 404, owner: null };
+    }
+    const device = {
+      name: str(input.name) || undefined,
+      platform: str(input.platform) || undefined,
+      appVersion: str(input.appVersion) || undefined,
+    };
+    // One transaction: the session is consumed if and only if the device row
+    // and its durable credential are both created.
+    const claimed = tx(db, () => approvePairing(db, row, row.owner_id, device, clientIp(req)));
+    if (!claimed.ok) {
+      const status = claimed.reason === "not_approved" || claimed.reason === "race" ? 409 : 410;
+      return { response: json({ error: pairingError(claimed.reason), reason: claimed.reason }, status), status, owner: null };
+    }
+    const pairing = publicPairing(claimed.row);
+    publish(db, claimed.row.owner_id, "device.pairing.connected", claimed.row.id, pairing);
+    publish(db, claimed.row.owner_id, "device.connected", claimed.device.id, {
+      device_id: claimed.device.id,
+      device_name: claimed.device.name,
+      platform: claimed.device.platform,
+      method: "qr",
+    });
+    log(claimed.row.owner_id, "info", "device", `linked ${claimed.device.name} (${claimed.device.platform}) with a QR code`);
+    // The phone proved the 256-bit secret *and* the account owner approved it,
+    // so this is now that account's device: sign it in. Issuing a session here
+    // is what lets the app talk to the API and open the realtime socket
+    // (which authenticates with the `mc_session` cookie) without a password
+    // ever being typed on the phone. Called after the claim transaction so the
+    // two transactions never nest.
+    const headers = startSession(claimed.row.owner_id, req);
+    return {
+      response: json({
+        account_id: claimed.row.owner_id,
+        device: {
+          id: claimed.device.id,
+          name: claimed.device.name,
+          platform: claimed.device.platform,
+          app_version: claimed.device.appVersion,
+        },
+        // Shown to the phone exactly once; only its hash is stored server-side.
+        credential: claimed.credential,
+        credential_expires_at: claimed.credentialExpiresAt ? new Date(claimed.credentialExpiresAt).toISOString() : null,
+        pairing,
+      }, 200, headers),
+      status: 200,
+      owner: claimed.row.owner_id,
+    };
   }
 
   if (key === "POST auth/logout") {
@@ -700,6 +832,90 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     return { response: json({ ok: true }), status: 200, owner };
   }
 
+  // ---- QR device pairing: the signed-in browser's half -------------------
+
+  // Starts a pairing session and returns the rendered QR. Any session this
+  // account already had open is superseded, so a screenshot of an old code can
+  // never be reused.
+  if (key === "POST device/pairing") {
+    const input = await body(req);
+    const created = createPairing(db, owner, {
+      name: str(input.name) || undefined,
+      platform: str(input.platform) || undefined,
+      userAgent: req.headers.get("user-agent") ?? undefined,
+      ip: clientIp(req),
+    });
+    const row = readPairing(db, created.id);
+    if (!row) return { response: json({ error: "Could not start a pairing session" }, 500), status: 500, owner };
+    const payload = encodePairingTicket({
+      api: originOf(req),
+      id: created.id,
+      secret: created.secret,
+      code: created.verificationCode,
+    });
+    const qr = await renderPairingQr(payload);
+    publish(db, owner, "device.pairing.created", created.id, publicPairing(row));
+    log(owner, "info", "device", "started a QR pairing session");
+    // The secret and the PNG are returned once, to the browser that asked for
+    // them. It is the only moment the secret exists outside the QR image.
+    return { response: json({ pairing: publicPairing(row), payload, qr_data_url: qr }), status: 201, owner };
+  }
+
+  // The browser polls this while the QR is on screen.
+  if (method === "GET" && parts[0] === "device" && parts[1] === "pairing" && parts[2]) {
+    for (const stale of expireStale(db)) {
+      publish(db, stale.owner_id, "device.pairing.expired", stale.id, { pairing_id: stale.id, status: "EXPIRED" });
+    }
+    const row = readPairing(db, parts[2]);
+    if (!row || row.owner_id !== owner) return { response: json({ error: "Pairing session not found" }, 404), status: 404, owner };
+    return { response: json({ pairing: publicPairing(row) }), status: 200, owner };
+  }
+
+  // Approve a scanned device. Only the session's own account can approve, and
+  // only after a device has actually scanned the code.
+  if (method === "POST" && parts[0] === "device" && parts[1] === "pairing" && parts[2] && parts[3] === "approve") {
+    const row = readPairing(db, parts[2]);
+    if (!row || row.owner_id !== owner) return { response: json({ error: "Pairing session not found" }, 404), status: 404, owner };
+    if (!approveFromBrowser(db, parts[2], owner)) {
+      return { response: json({ error: pairingError("not_approved"), reason: "not_approved" }, 409), status: 409, owner };
+    }
+    const approved = readPairing(db, parts[2]) ?? row;
+    publish(db, owner, "device.pairing.approved", parts[2], publicPairing(approved));
+    notify(db, owner, "auth.device", "Device approved", `Approved ${approved.scan_device_name ?? "a device"} over QR`);
+    log(owner, "info", "device", `approved QR pairing for ${approved.scan_device_name ?? "a device"}`);
+    return { response: json({ pairing: publicPairing(approved) }), status: 200, owner };
+  }
+
+  // Cancel (or deny) an open pairing, from any non-terminal state.
+  if (method === "DELETE" && parts[0] === "device" && parts[1] === "pairing" && parts[2]) {
+    const row = readPairing(db, parts[2]);
+    if (!row || row.owner_id !== owner) return { response: json({ error: "Pairing session not found" }, 404), status: 404, owner };
+    if (closePairing(db, parts[2], "cancelled")) {
+      publish(db, owner, "device.pairing.revoked", parts[2], { pairing_id: parts[2], reason: "cancelled" });
+    }
+    return { response: json({ ok: true }), status: 200, owner };
+  }
+
+  if (key === "GET devices") {
+    return { response: json({ devices: listDevices(db, owner) }), status: 200, owner };
+  }
+
+  if (method === "PATCH" && parts[0] === "devices" && parts[1]) {
+    const name = str((await body(req)).name);
+    if (!name) return { response: json({ error: "A device name is required" }, 400), status: 400, owner };
+    if (!renameDevice(db, owner, parts[1], name)) return { response: json({ error: "Device not found" }, 404), status: 404, owner };
+    publish(db, owner, "device.updated", parts[1], { device_id: parts[1], name });
+    return { response: json({ ok: true }), status: 200, owner };
+  }
+
+  if (method === "DELETE" && parts[0] === "devices" && parts[1]) {
+    const revoked = revokeDevice(db, owner, parts[1]);
+    if (!revoked.ok) return { response: json({ error: "Device not found" }, 404), status: 404, owner };
+    publish(db, owner, "device.disconnected", parts[1], { device_id: parts[1], name: revoked.device?.name ?? null, reason: "revoked" });
+    log(owner, "info", "device", `revoked ${revoked.device?.name ?? "a device"}`);
+    return { response: json({ ok: true }), status: 200, owner };
+  }
+
   if (key === "POST protection") {
     const password = String((await body(req)).password ?? "");
     if (password.length < 8) return { response: json({ error: "Password must be at least 8 characters" }, 400), status: 400, owner };
@@ -924,7 +1140,11 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   return { response: json({ error: "Not found" }, 404), status: 404, owner };
 }
 
-function issueSession(userId: string, req: Request) {
+/**
+ * Creates a session row and returns the `Set-Cookie` headers for it. Callers
+ * must not already hold a write transaction: this opens its own.
+ */
+function startSession(userId: string, req: Request): Headers {
   const token = randomBytes(32).toString("hex");
   const csrf = randomBytes(32).toString("hex");
   const agent = (req.headers.get("user-agent") ?? "unknown").slice(0, 180);
@@ -941,7 +1161,12 @@ function issueSession(userId: string, req: Request) {
   const headers = new Headers();
   headers.append("set-cookie", cookieHeader(token, WEEK / 1000));
   headers.append("set-cookie", csrfCookieHeader(csrf, WEEK / 1000));
-  const user = db.prepare("SELECT id, email, name, role, plan FROM users WHERE id = ?").get(userId);
+  return headers;
+}
+
+function issueSession(userId: string, req: Request) {
+  const headers = startSession(userId, req);
+  const user = openDb().prepare("SELECT id, email, name, role, plan FROM users WHERE id = ?").get(userId);
   return { response: json({ user }, 200, headers), status: 200, owner: userId };
 }
 

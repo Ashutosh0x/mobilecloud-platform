@@ -114,4 +114,8 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("androidx.glance:glance-appwidget:1.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // QR scanner for "sign in by scanning the dashboard's code". The library
+    // declares the CAMERA permission in its own manifest, so it is merged in
+    // automatically; the app only has to request it at runtime.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 }

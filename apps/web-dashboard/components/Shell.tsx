@@ -23,7 +23,7 @@ const GROUPS = [
   ] },
   { label: "Security", items: [
     { href: "/firewall", label: "Firewall", icon: "shield" },
-    { href: "/device", label: "Device login", icon: "shield" },
+    { href: "/device", label: "Link device", icon: "shield" },
     { href: "/settings", label: "Settings", icon: "gear" },
   ] },
   { label: "Infrastructure", items: [

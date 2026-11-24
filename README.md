@@ -7,9 +7,9 @@
 ### **The Autonomous Smartphone Edge Cloud & Institutional Proof-of-Reserve Protocol**
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-124%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-144%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 [![Rust](https://img.shields.io/badge/Rust-1.80%2B-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
-[![Android](https://img.shields.io/badge/Android-API%2026--35-3ddc84?style=for-the-badge&logo=android&logoColor=white)](android-app)
+[![Android](https://img.shields.io/badge/Android-API%2030--35-3ddc84?style=for-the-badge&logo=android&logoColor=white)](android-app)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7f52ff?style=for-the-badge&logo=kotlin&logoColor=white)](android-app)
 [![Next.js](https://img.shields.io/badge/Next.js-15.5-000000?style=for-the-badge&logo=nextdotjs&logoColor=white)](apps/web-dashboard)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=black)](apps/web-dashboard)
@@ -184,6 +184,7 @@ MobileCloud combines two decoupled, high-performance engines within one monorepo
 * **Cursor Synchronization (`GET /api/sync/changes?cursor=<seq>`)**: authorized, per-account, ascending replay of everything a client missed. A device that was offline for 30 minutes — or a backend that restarted — recovers the full delta on reconnect instead of showing stale screens.
 * **Shared Event Envelope**: `event_id · event_type · schema_version · account_id · resource_id · sequence · occurred_at · payload`, with 18 event types spanning `account.*`, `session.*`, `project.*`, `deployment.*`, `build.*`, `configuration.updated`, `notification.*` and `server.status_changed`.
 * **One Socket Per Client**: the web console runs a single shared realtime service (no per-component or per-screen connections) and so does the app. Both implement reconnect with exponential backoff **and jitter**, heartbeats with dead-peer detection, `sequence` ordering, `event_id` dedupe, sequence-gap recovery, and a bounded polling fallback when sockets are unavailable.
+* **QR Device Linking, Not Password Typing**: the console's **Link device** page (`/device`) shows a two-minute, single-use pairing code. The mobile app scans it, the browser owner approves it, and the claim issues both a durable device credential and the `mc_session` cookie — so the phone ends up signed in with its realtime socket already authorized, and no password is ever typed on the device. See [§7](#7-sign-in-by-scanning-a-qr-code-web--mobile-linking).
 * **No ADB Reverse Dependency**: the Android node discovers its control plane by validating `/api/health` across the last-known endpoint, loopback, the emulator alias and the device's own `/24`, under fixed per-candidate timeouts and an 8-second single-flight budget. Only validated endpoints are cached, and a saved address is revalidated rather than trusted.
 * **Connection Diagnostics in the App**: an explicit state machine (`INITIALIZING`, `DISCOVERING`, `CONNECTED`, `AUTH_REQUIRED`, `NETWORK_UNAVAILABLE`, `SERVER_UNAVAILABLE`, `INVALID_ENDPOINT`, `AUTHENTICATION_FAILED`) drives a panel showing active endpoint, connection method, last health check, last sync, cursor, pending changes and last error — with **Retry**, **Change server** and **Auto-detect**. "Connected" is only ever shown after an authenticated session has answered.
 * **Optimistic UI with Rollback**: mutations on the web console apply locally first and roll back to the last confirmed snapshot if the server rejects them, then reconcile against the authoritative state.
@@ -369,11 +370,11 @@ The repository enforces strict invariants across the Rust workspace suite and th
 | Subsystem | Test Suite | Invariant Enforced |
 | :--- | :--- | :--- |
 | **`por-kernel`** | 58 tests | `U256` checked arithmetic, zero overflows across 10,000 edge cases, strict T+1 DTCC clearing window, zero-rehypothecation (`shares_on_loan == 0`). |
-| **`por-verifier`** | 23 tests | Monotonic sequence replay defense, TTL freshness expiration, O(N) ascending-key validation, duplicate signer rejection, 5-tier solvency state transitions. |
+| **`por-verifier`** | 25 tests | Monotonic sequence replay defense, TTL freshness expiration, O(N) ascending-key validation, duplicate signer rejection, 5-tier solvency state transitions. |
 | **`core-engine`** | 19 tests | Build Output v3 routing, agentic deployment ingress, cache tag revalidation, atomic symlink rollback (< 15 ms), PTY session allocation. |
-| **`trading-engine`** | 10 tests | Solana arbitrage profitability checks, integer-exact fee calculations, 4 risk invariants (atomic reverts, 2.5% max exposure, 15 bps slippage, 20% T+1 buffer). |
+| **`trading-engine`** | 17 tests | Solana arbitrage profitability checks, integer-exact fee calculations, 4 risk invariants (atomic reverts, 2.5% max exposure, 15 bps slippage, 20% T+1 buffer). |
 | **`por-xdr-toolkit`** | 4 tests | Protocol 30 XDR encoding/decoding, RFC 4506 `Option<ScVec>` presence-flag alignment. |
-| **`apps/web-dashboard`** | 14 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
+| **`apps/web-dashboard`** | 21 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
 
 ```bash
 # Dashboard synchronization suite (Node's built-in test runner)
@@ -388,7 +389,8 @@ cd apps/web-dashboard && npm test
 
 * **Rust Toolchain**: `rustc 1.80+` with `wasm32-unknown-unknown` target.
 * **Android SDK / NDK**: Android Studio Jellyfish+, NDK 26b+, JDK 17 or 21.
-* **Node.js & Bun**: Node.js 20+, Bun 1.1+.
+* **Node.js & Bun**: Node.js 22.6+ (the console uses `node:sqlite` and
+  `--experimental-strip-types`), Bun 1.1+.
 * **Stellar CLI**: Protocol 30 support (`stellar-cli 22.0+`).
 
 ### 2. Verify Kernels & Workspace Tests
@@ -398,7 +400,7 @@ cd apps/web-dashboard && npm test
 git clone https://github.com/Ashutosh0x/mobilecloud-platform.git
 cd mobilecloud-platform
 
-# Run all 107 workspace tests
+# Run all 119 workspace tests
 cargo test --workspace
 
 # Run the 10,000-case deterministic reconciliation suite
@@ -406,6 +408,13 @@ cargo test -p por-kernel --release
 
 # Run the Soroban contract chaos test suite
 cargo test -p por-verifier --release
+
+# The standalone audit tool is its own workspace, so it runs on its own
+cd tools/por-xdr-toolkit && cargo test
+cd ../..
+
+# Dashboard synchronization + QR pairing suite (Node's built-in test runner)
+cd apps/web-dashboard && npm test
 ```
 
 ### 3. Build & Deploy Soroban Smart Contract
@@ -425,19 +434,65 @@ stellar contract deploy \
   --source deployer --network testnet
 ```
 
-### 4. Build & Install Android Node
+### 4. Install the Web App (Management Console)
+
+The web app is `apps/web-dashboard`: a Next.js 15 console plus the realtime
+gateway, both talking to one SQLite database.
 
 ```bash
-# Build release APK with 16 KB page alignment and multi-scheme signing (v1-v4)
-./scripts/build-and-sign-apk.sh
+cd apps/web-dashboard
+npm install
 
-# Sideload to connected device via ADB
+# Development — dashboard API (:3210) and realtime gateway (:3211) together
+npm run dev
+
+# Production — compile once, then serve
+npm run build
+npm start
+
+# Management console   → http://localhost:3210
+# Realtime gateway     → ws://localhost:3211/api/realtime
+# Identity / discovery → http://localhost:3210/api/health
+```
+
+On first boot the console creates the owner account and prints its credentials to
+the process console **once** — copy them before you close the terminal:
+
+```
+email:    owner@mobilecloud.local
+password: <generated one-time password>
+```
+
+Set `MOBILECLOUD_BOOTSTRAP_EMAIL` and `MOBILECLOUD_BOOTSTRAP_PASSWORD` before the
+first start to control those values instead (unattended installs, CI), and
+`MOBILECLOUD_DB` to relocate the database (default `apps/web-dashboard/data/mobilecloud.db`).
+Open `http://localhost:3210`, sign in, and complete onboarding.
+
+The gateway is a separate process on purpose: a Next.js route handler cannot
+answer an HTTP `upgrade`, so the WebSocket listener runs beside the API and tails
+the same SQLite WAL file. Run the two halves independently with
+`npm run dev:web` and `npm run dev:realtime`.
+
+### 5. Install the Mobile App (Android Node)
+
+Prerequisites: Android SDK with build-tools and **NDK 26b+**, **JDK 17 or 21**,
+and a device on **API 30+** (Android 11+) with USB debugging enabled. Point
+`android-app/local.properties` at your SDK (`sdk.dir=…`) — Android Studio writes
+this for you.
+
+```bash
+# Build the debug app and install it on the connected device
+cd android-app
+./gradlew installDebug
+
+# Or build a fully signed release APK (16 KB page alignment, v1–v4 signing)
+./scripts/build-and-sign-apk.sh          # from the repository root
 adb install -r -d -g dist/mobilecloud-release-signed.apk
 
-# Whitelist application from battery optimization
+# Whitelist the app from battery optimization
 adb shell dumpsys deviceidle whitelist +com.mobilecloud.node
 
-# Start foreground supervisor service
+# Start the foreground supervisor service
 adb shell am start-foreground-service -n com.mobilecloud.node/.service.CloudSupervisorService
 
 # Verify hardware battery bypass (net 0 mA current)
@@ -445,26 +500,10 @@ adb shell cat /sys/class/power_supply/battery/status
 # Output: "Not charging" (USB-PD Direct Bypass Active)
 ```
 
-### 5. Launch the Web Management Console + Real-Time Gateway
+The app ships as `com.mobilecloud.node` and runs on arm64-v8a. Grant camera
+permission when the QR scanner asks for it — it is needed for step 7.
 
-```bash
-cd apps/web-dashboard
-npm install
-
-# Runs the dashboard API (:3210) and the realtime gateway (:3211) together
-npm run dev
-
-# Management console  → http://localhost:3210
-# Realtime gateway    → ws://localhost:3211/api/realtime
-# Identity / discovery → http://localhost:3210/api/health
-```
-
-The gateway is a separate process on purpose: a Next.js route handler cannot
-answer an HTTP `upgrade`, so the WebSocket listener runs beside the API and tails
-the same SQLite WAL file. Run the two halves independently with
-`npm run dev:web` and `npm run dev:realtime`.
-
-### 6. Connect the Android Node
+### 6. Connect the Mobile App to the Console
 
 ```bash
 # The node discovers its control plane itself — no adb reverse required.
@@ -477,20 +516,89 @@ adb reverse tcp:3210 tcp:3210
 # Retry / Change server / Auto-detect.
 ```
 
+On the login screen, either sign in with the same account you used on the web
+console, or link the phone by QR code (step 7). Once connected, the app's
+Diagnostics panel shows `CONNECTED` only after an authenticated session has
+answered — never merely because a socket opened.
+
 Remote access (different network, no USB) needs a secure path you control —
 WireGuard/Tailscale or an HTTPS/WSS reverse proxy in front of the control plane.
 Never expose the control-plane port directly to the internet. See
 [`docs/REALTIME-SYNC.md`](docs/REALTIME-SYNC.md) §9 and §13.
 
-### 7. Verify Synchronization End to End
+### 7. Sign In by Scanning a QR Code (Web ⇄ Mobile Linking)
+
+A phone can be handed a signed-in session **without a password ever being typed
+on the device**. The flow is deliberately two-party: the phone proves it saw the
+code, and the account owner approves it in the browser.
+
+1. On the **web app**, sign in and open **Link device** (`/device`).
+2. Click **Show QR code**. The browser mints a new pairing session and renders a
+   QR code containing a single-use 256-bit secret, a short six-character
+   verification code, and the console's API origin. The code is valid for
+   **2 minutes**.
+3. In the **mobile app**, open **Link device** — or tap **Sign in with a QR code**
+   on the login card — and scan the code with the built-in scanner. The app sends
+   the secret, device name, platform and app version to the API. The console
+   flips to **Waiting for your approval** and shows the device that is asking to
+   link, together with its verification code.
+4. Press **Approve device** in the browser. The two-minute window is renewed from
+   that moment, so you are not racing the clock.
+5. The phone observes the approval and **claims** the session. On claim the API
+   mints a durable **365-day device credential** *and* sets the `mc_session`
+   cookie, so the phone is **signed in** immediately and its realtime socket
+   authenticates on the first attempt. On the dashboard the session becomes
+   **CONNECTED** and the device appears under *Linked devices*.
+
+Pairing status machine — `APPROVED` is reported as itself because the phone has
+not claimed yet; it is not the same as connected:
+
+| Status | Meaning |
+| :--- | :--- |
+| `WAITING_FOR_SCAN` | Code shown; nothing has scanned it yet |
+| `SCANNED` / `AWAITING_APPROVAL` | The phone scanned it; waiting for **Approve** |
+| `APPROVED` | Approved; waiting for the phone to claim (one claim only) |
+| `CONNECTED` | Phone claimed it — credential issued and session live |
+| `EXPIRED` / `REVOKED` / `FAILED` | Terminal — show a new code and retry |
+
+Guarantees the implementation and its tests enforce:
+
+* **Single use.** A replayed claim returns `already_connected`; the secret is
+  never reusable. Only the SHA-256 hash of the secret is stored server-side.
+* **Owner-scoped.** A pairing belongs to the account that created it. A different
+  signed-in user gets `404`, not a partial view.
+* **Wrong secret links nothing.** A tampered secret is rejected, and the status
+  response never echoes the secret, its hash, or the owner id.
+* **Approval is required.** An unapproved claim is refused (`409 not_approved`);
+  the phone cannot finish on its own.
+* **Superseding.** Showing a new code revokes the previous open one.
+* **Two-minute TTL.** The code is dead 2 minutes after it is shown; approving
+  renews it for a further 2 minutes so a slow hand-off does not fail.
+
+Linked devices are listed on the same page, newest first, and can be renamed or
+revoked. **Revoking deletes the device credential immediately**, so that phone
+must pair again. A phone that pairs while already signed in is reported as
+`already_connected` rather than silently issuing a second credential.
+
+### 8. Verify Real-Time Synchronization End to End
 
 ```bash
-# Automated: outbox, gateway, authorization, offline recovery (14 tests)
+# Automated: outbox, gateway, authorization, offline recovery, QR pairing (21 tests)
 cd apps/web-dashboard && npm test
 
-# Running the two clients at once and changing a project on either side
-# updates both without a refresh — the propagation path is socket-first,
-# with REST cursor recovery as the guarantee.
+# Then bring both clients up at once and change a project on either side:
+# both update with no refresh. Propagation is socket-first, with REST cursor
+# recovery as the guarantee — stop the console, keep using the phone, restart
+# the console, and the missed changes replay in order exactly once.
+```
+
+Confirm the socket itself is live:
+
+```bash
+# From the browser devtools Network tab, after signing in:
+#   ws://localhost:3211/api/realtime   → 101 Switching Protocols
+# An anonymous upgrade is rejected and surfaced as "sign-in required",
+# never as a network failure.
 ```
 
 ---

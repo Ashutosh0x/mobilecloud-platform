@@ -57,7 +57,7 @@ val ConsoleGroups: List<NavGroup> = listOf(
         "Security",
         listOf(
             NavItem("/firewall", "Firewall", Icons.Filled.Shield),
-            NavItem("/device", "Device login", Icons.Filled.Security),
+            NavItem("/device", "Link device", Icons.Filled.Security),
             NavItem("/settings", "Settings", Icons.Filled.Settings),
         ),
     ),

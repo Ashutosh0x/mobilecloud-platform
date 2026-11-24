@@ -4,24 +4,36 @@ import { newId, tokenHash } from "./db.ts";
 import { createToken } from "./identity.ts";
 
 /**
- * QR device pairing — a secure, single-use device-authorization flow.
+ * QR device pairing — a secure, single-use "sign in with a QR code" flow.
  *
- * A signed-in browser creates a short-lived pairing session and renders its
- * secrets as a QR code. The Android application scans the QR, validates the
- * payload, and then *explicitly approves* the pairing from an account that
- * matches the browser's account. Only then does the server issue a durable
- * device credential.
+ * Two parties, neither able to complete the flow alone:
+ *
+ *   1. A **signed-in browser** creates a short-lived pairing session
+ *      (`createPairing`) and renders its secrets as a QR code.
+ *   2. An **Android device** scans the QR and registers its scan
+ *      (`scanPairing`), proving possession of the 256-bit secret.
+ *   3. The **browser** — which is the account owner — approves the scanned
+ *      device (`approveFromBrowser`). Nothing is linked until this happens,
+ *      so a leaked screenshot alone is useless.
+ *   4. The **Android device** claims the approval (`approvePairing`), which
+ *      atomically issues a durable device credential and records the device.
+ *
+ * The state machine is
+ *   WAITING_FOR_SCAN → SCANNED → AWAITING_APPROVAL → APPROVED → CONNECTED,
+ * plus the terminal EXPIRED / REVOKED / FAILED.
  *
  * Security properties enforced here:
  *   - The pairing secret is 256 bits of CSPRNG entropy and only its SHA-256
  *     hash is stored, so a database read cannot reconstruct a scannable QR.
  *   - Sessions expire after two minutes and can be consumed exactly once.
  *   - Every transition is a guarded, atomic UPDATE, so two clients racing to
- *     approve cannot both win.
- *   - Account isolation: an approving device must belong to the same account
- *     as the browser that created the session.
+ *     scan, approve, or claim cannot both win.
+ *   - Account isolation: an approving browser must own the session, and the
+ *     device is recorded against the session's owner — never against an
+ *     account id supplied by the phone.
  *   - No permanent credential ever travels in the QR payload; the durable
- *     credential is issued over the (already authenticated) approval call.
+ *     credential is minted in step 4 and returned only to the claiming
+ *     device, over the call that proves the secret.
  */
 
 /** Pairing sessions are valid for two minutes, as required by the design. */
@@ -45,8 +57,12 @@ export type PairingStatus =
 
 /** Statuses from which no further transition is allowed. */
 const TERMINAL = new Set<string>(["CONNECTED", "REVOKED", "FAILED", "EXPIRED"]);
-/** Statuses in which a session is still live and can be approved. */
-const OPEN = new Set<string>(["WAITING_FOR_SCAN", "SCANNED", "AWAITING_APPROVAL"]);
+/**
+ * Statuses in which a session is still live: it can still be scanned,
+ * approved, claimed, cancelled, or allowed to expire. `APPROVED` is included
+ * because an approval the phone never claimed is still an open session.
+ */
+const OPEN = new Set<string>(["WAITING_FOR_SCAN", "SCANNED", "AWAITING_APPROVAL", "APPROVED"]);
 
 export type PairingRow = {
   id: string;
@@ -110,7 +126,11 @@ export function effectiveStatus(row: PairingRow): PairingStatus {
   if (row.status === "EXPIRED" || row.status === "REVOKED" || row.status === "FAILED") {
     return row.status;
   }
-  if (row.status === "APPROVED" || row.status === "CONNECTED") return "CONNECTED";
+  // `APPROVED` is deliberately reported as itself: the browser has authorised
+  // the pairing but the phone has not claimed its credential yet, so the
+  // device is not connected and the UI must not imply that it is.
+  if (row.status === "CONNECTED") return "CONNECTED";
+  if (row.status === "APPROVED") return "APPROVED";
   if (row.expires_at <= Date.now()) return "EXPIRED";
   return row.status as PairingStatus;
 }
@@ -238,6 +258,7 @@ export function scanPairing(db: DatabaseSync, id: string, secret: string, device
   if (status === "EXPIRED") return { ok: false, reason: "expired" };
   if (status === "REVOKED" || status === "FAILED") return { ok: false, reason: "closed" };
   if (status === "CONNECTED") return { ok: false, reason: "already_connected" };
+  if (status === "APPROVED") return { ok: false, reason: "already_approved" };
 
   const name = (device.name ?? "Android device").slice(0, 60);
   const platform = (device.platform ?? "android").slice(0, 40);
@@ -268,6 +289,26 @@ export function markAwaitingApproval(db: DatabaseSync, id: string): boolean {
   return Number(result.changes) > 0;
 }
 
+/**
+ * The signed-in browser approves a scanned session.
+ *
+ * Guarded and account-scoped: only the owner of the session can approve it,
+ * and only from a state where a device has actually scanned the code. The TTL
+ * is renewed on approval so the phone has a fresh window to claim the
+ * credential — approving at 1:59 must not strand a device at 2:00.
+ *
+ * Returns false when the session is not the caller's, was never scanned, or
+ * has already been approved, claimed, cancelled, or expired.
+ */
+export function approveFromBrowser(db: DatabaseSync, id: string, owner: string): boolean {
+  const now = Date.now();
+  const result = db.prepare(
+    `UPDATE pairing_sessions SET status = 'APPROVED', approved_at = ?, expires_at = ?
+     WHERE id = ? AND owner_id = ? AND status IN ('SCANNED', 'AWAITING_APPROVAL') AND expires_at > ?`,
+  ).run(now, now + PAIRING_TTL_MS, id, owner, now);
+  return Number(result.changes) > 0;
+}
+
 export type ApproveResult =
   | {
       ok: true;
@@ -279,10 +320,19 @@ export type ApproveResult =
   | { ok: false; reason: string };
 
 /**
- * Approves a pairing from the Android device and issues the durable device
- * credential. The caller must already have verified that [owner] is the
- * authenticated Android account. All writes must run inside one transaction
- * (see `tx()`), so the session is consumed iff the device row is created.
+ * Claims an approval: consumes an `APPROVED` session, records the device, and
+ * mints its durable credential — the final step of the pairing, performed by
+ * the Android device.
+ *
+ * The caller must already have verified that the presented secret matches
+ * (`secretMatches`). [owner] must therefore be the session's own `owner_id`:
+ * the session was created by, and approved from, that account, so a phone can
+ * never attach a device to an account it does not already hold the ticket for.
+ *
+ * A session can only be claimed once it is `APPROVED`, which only the
+ * signed-in browser can set, so neither the QR alone nor the phone alone is
+ * enough to link a device. All writes must run inside one transaction (see
+ * `tx()`), so the session is consumed if and only if the device row is created.
  */
 export function approvePairing(
   db: DatabaseSync,
@@ -297,11 +347,12 @@ export function approvePairing(
   if (status === "EXPIRED") return { ok: false, reason: "expired" };
   if (status === "REVOKED" || status === "FAILED") return { ok: false, reason: "closed" };
   if (status === "CONNECTED") return { ok: false, reason: "already_connected" };
+  if (status !== "APPROVED") return { ok: false, reason: "not_approved" };
 
   const now = Date.now();
   const consumed = db.prepare(
-    `UPDATE pairing_sessions SET status = 'APPROVED', approved_at = ?, owner_id = ?
-     WHERE id = ? AND status IN ('WAITING_FOR_SCAN', 'SCANNED', 'AWAITING_APPROVAL') AND expires_at > ?`,
+    `UPDATE pairing_sessions SET status = 'APPROVED', approved_at = COALESCE(approved_at, ?), owner_id = ?
+     WHERE id = ? AND status = 'APPROVED' AND expires_at > ?`,
   ).run(now, owner, session.id, now);
   if (Number(consumed.changes) === 0) return { ok: false, reason: "race" };
 
@@ -340,7 +391,7 @@ export function approvePairing(
 export function closePairing(db: DatabaseSync, id: string, reason: string): boolean {
   const result = db.prepare(
     `UPDATE pairing_sessions SET status = 'REVOKED', fail_reason = ?
-     WHERE id = ? AND status IN ('WAITING_FOR_SCAN', 'SCANNED', 'AWAITING_APPROVAL')`,
+     WHERE id = ? AND status IN ('WAITING_FOR_SCAN', 'SCANNED', 'AWAITING_APPROVAL', 'APPROVED')`,
   ).run(reason.slice(0, 60), id);
   return Number(result.changes) > 0;
 }
