@@ -84,14 +84,15 @@ impl PtySession {
             })
             .map_err(|e| anyhow::anyhow!("openpty: {e}"))?;
 
-        // Sandboxed userland environment (terminal doc §3 isolation model):
-        // private HOME, engine bin first on PATH, read-only system dirs.
+        // Do not inherit supervisor credentials into the operator's shell.
+        // This does not isolate the shell from the engine user's permissions.
         let shell = shell_path(engine_bin);
         let tmux = find_executable("tmux", engine_bin);
         let mut cmd = match &tmux {
             Some(tmux_bin) => CommandBuilder::new(tmux_bin.to_string_lossy().to_string()),
             None => CommandBuilder::new(shell.clone()),
         };
+        cmd.env_clear();
         cmd.env("TERM", "xterm-256color");
         cmd.env("HOME", home.join("home").to_string_lossy().to_string());
         cmd.env(

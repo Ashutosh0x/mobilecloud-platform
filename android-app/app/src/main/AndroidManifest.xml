@@ -5,16 +5,6 @@
     <!-- Network & Internet Access -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
-
-    <!-- 24/7 Edge Execution & Hardware Wake Locks -->
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Biometric App Lock gate (GitHub AppLockActivity pattern) -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
@@ -29,49 +19,19 @@
         android:allowBackup="false"
         android:hardwareAccelerated="true"
         android:icon="@mipmap/ic_launcher"
-        android:label="MobileCloud Node"
+        android:label="@string/app_name"
         android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MobileCloud"
         tools:targetApi="35">
 
-        <!-- Autonomous CloudSupervisor Foreground Service -->
-        <service
-            android:name="com.mobilecloud.service.CloudSupervisorService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Decentralized financial compute and edge blockchain trading oracle daemon" />
-        </service>
-
-        <!-- Wi-Fi + cellular transport monitor (per-network RTT is not exposed
-             to apps, so none is estimated or displayed) -->
-        <service
-            android:name="com.mobilecloud.service.NetworkBunderService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
-
-        <!-- Boot Receiver for Auto-Start on System Restart -->
-        <receiver
-            android:name="com.mobilecloud.service.BootCompletedReceiver"
-            android:enabled="true"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-            </intent-filter>
-        </receiver>
-
-        <!-- Glance home-screen widgets (GitHub 4-widget pattern → PoR/edge slots) -->
+        <!-- No boot receiver or node service in the console-only build. -->
         <receiver
             android:name="com.mobilecloud.widget.EdgeStatusWidgetReceiver"
             android:enabled="true"
             android:exported="false"
-            android:label="MobileCloud Edge Status">
+            android:label="@string/widget_edge_status_label">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
             </intent-filter>
@@ -84,7 +44,7 @@
             android:name="com.mobilecloud.widget.PorSolvencyWidgetReceiver"
             android:enabled="true"
             android:exported="false"
-            android:label="FurlPay PoR Solvency">
+            android:label="@string/widget_por_solvency_label">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
             </intent-filter>

@@ -177,56 +177,31 @@ export function SpeedView() {
 
 export function BuildsView() {
   const { state, call, setToast } = useCloud();
-  const [projectId, setProjectId] = useState(state.projects[0]?.id ?? "");
-  const [target, setTarget] = useState("web (Bun/Turbopack)");
-  const [trigger, setTrigger] = useState("agent:cursor");
-  const [revalTag, setRevalTag] = useState("products");
+  const [selectedProject, setSelectedProject] = useState("");
+  const [pending, setPending] = useState(false);
+  const projects = state.projects.filter((project) => project.repoUrl);
+  const projectId = projects.find((project) => project.id === selectedProject)?.id ?? projects[0]?.id ?? "";
 
   return (
     <>
       <header className="page-head">
         <div>
-          <h2>Builds & Agent Deployments</h2>
-          <p>Autonomous on-device edge deployments powered by Open Build Output v3, Turbopack on 3nm ARM64 (16.5s builds), and agentic ingress.</p>
+          <h2>Web builds</h2>
+          <p>Build requests are recorded, but execution is disabled. Android builds and cache purges are not supported here.</p>
         </div>
-        <form className="form-row" onSubmit={(e) => { e.preventDefault(); run(() => call("builds", { method: "POST", body: JSON.stringify({ projectId, target, trigger }) }), setToast, "Build Queued"); }}>
-          <select aria-label="Project" value={projectId} onChange={(e) => setProjectId(e.target.value)}>
-            {state.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+        <form className="form-row" onSubmit={(e) => {
+          e.preventDefault();
+          if (!projectId || pending) return;
+          setPending(true);
+          void run(() => call("builds", { method: "POST", body: JSON.stringify({ projectId, target: "web" }) }), setToast, "Build request recorded").finally(() => setPending(false));
+        }}>
+          <select aria-label="Project" value={projectId} onChange={(e) => setSelectedProject(e.target.value)} disabled={!projects.length}>
+            {!projects.length && <option value="">No project with a repository</option>}
+            {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
-          <select aria-label="Target" value={target} onChange={(e) => setTarget(e.target.value)}>
-            <option value="web (Bun/Turbopack)">web (Bun / Turbopack)</option>
-            <option value="android (NDK 16KB)">android (NDK 16KB)</option>
-          </select>
-          <select aria-label="Trigger" value={trigger} onChange={(e) => setTrigger(e.target.value)}>
-            <option value="agent:cursor">agent: Cursor</option>
-            <option value="agent:claude-code">agent: Claude Code</option>
-            <option value="agent:v0">agent: v0.dev</option>
-            <option value="agent:copilot">agent: Copilot</option>
-            <option value="git:push">git: push</option>
-          </select>
-          <button className="primary" type="submit" disabled={!state.projects.length}>Queue Build</button>
+          <button className="primary" type="submit" disabled={!projectId || pending}>{pending ? "Submitting…" : "Request web build"}</button>
         </form>
       </header>
-
-      <section style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "1rem", marginBottom: "1rem" }}>
-        <div style={{ background: "var(--bg-subtle, rgba(255,255,255,0.03))", border: "1px solid var(--border-default, rgba(255,255,255,0.08))", borderRadius: "8px", padding: "1rem" }}>
-          <div style={{ fontSize: "0.8rem", color: "var(--fg-muted, #888)", textTransform: "uppercase" }}>Build Speed</div>
-          <div style={{ fontSize: "1.4rem", fontWeight: "bold", color: "#3ddc84" }}>16.5s avg</div>
-          <div style={{ fontSize: "0.8rem", color: "var(--fg-subtle, #aaa)" }}>Native 3nm ARM64 Silicon</div>
-        </div>
-        <div style={{ background: "var(--bg-subtle, rgba(255,255,255,0.03))", border: "1px solid var(--border-default, rgba(255,255,255,0.08))", borderRadius: "8px", padding: "1rem" }}>
-          <div style={{ fontSize: "0.8rem", color: "var(--fg-muted, #888)", textTransform: "uppercase" }}>Atomic Promotion</div>
-          <div style={{ fontSize: "1.4rem", fontWeight: "bold", color: "#08b5e5" }}>&lt; 15 ms</div>
-          <div style={{ fontSize: "0.8rem", color: "var(--fg-subtle, #aaa)" }}>Zero-downtime pointer swap</div>
-        </div>
-        <div style={{ background: "var(--bg-subtle, rgba(255,255,255,0.03))", border: "1px solid var(--border-default, rgba(255,255,255,0.08))", borderRadius: "8px", padding: "1rem" }}>
-          <div style={{ fontSize: "0.8rem", color: "var(--fg-muted, #888)", textTransform: "uppercase" }}>Cache Revalidation</div>
-          <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
-            <input type="text" value={revalTag} onChange={(e) => setRevalTag(e.target.value)} style={{ padding: "0.3rem 0.5rem", borderRadius: "4px", border: "1px solid #444", background: "#111", color: "#fff", flex: 1, fontSize: "0.85rem" }} />
-            <button type="button" onClick={() => run(() => call("cache/revalidate", { method: "POST", body: JSON.stringify({ project: projectId || "default", tag: revalTag }) }), setToast, "Tag Purged")} style={{ padding: "0.3rem 0.75rem", fontSize: "0.8rem" }}>Purge</button>
-          </div>
-        </div>
-      </section>
 
       <article className="panel">
         {state.builds.map((build) => (
@@ -235,7 +210,6 @@ export function BuildsView() {
               <div className="name"><strong>{build.project}</strong> · <span style={{ opacity: 0.8 }}>{build.target}</span> · <span style={{ color: build.status === "success" || build.status === "live" ? "#3ddc84" : "#ffaa00" }}>{build.status}</span></div>
               <div className="sub">{build.note} · <ClientTime ts={build.createdAt} /></div>
             </div>
-            <button type="button" onClick={() => run(() => call("deploy/rollback", { method: "POST", body: JSON.stringify({ project: build.project, deploy_id: build.id }) }), setToast, "Rollback initiated")} style={{ fontSize: "0.8rem", padding: "0.3rem 0.6rem" }}>Rollback</button>
           </div>
         ))}
         {state.builds.length === 0 && <p className="empty">No build requests stored.</p>}
@@ -251,7 +225,7 @@ export function WorkflowsView() {
   return (
     <>
       <header className="page-head"><div><h2>Workflows and drives</h2><p>Workflow runs are recorded and not executed. Drives are real directories on this server, not microVM volumes.</p></div></header>
-      <form className="form-row" onSubmit={(e) => { e.preventDefault(); run(() => call("workflows", { method: "POST", body: JSON.stringify({ name }) }), setToast, "Workflow saved"); setName(""); }}>
+      <form className="form-row" onSubmit={(e) => { e.preventDefault(); void run(async () => { const result = await call("workflows", { method: "POST", body: JSON.stringify({ name }) }); setName((value) => value === name ? "" : value); return result; }, setToast, "Workflow saved"); }}>
         <input aria-label="Workflow name" placeholder="nightly-audit" value={name} onChange={(e) => setName(e.target.value)} required />
         <button className="primary" type="submit">Save workflow</button>
       </form>
@@ -267,7 +241,7 @@ export function WorkflowsView() {
         ))}
         {state.workflows.length === 0 && <p className="empty">No workflows stored.</p>}
       </article>
-      <form className="form-row" onSubmit={(e) => { e.preventDefault(); run(() => call("drives", { method: "POST", body: JSON.stringify({ name: drive }) }), setToast, "Directory created"); setDrive(""); }}>
+      <form className="form-row" onSubmit={(e) => { e.preventDefault(); void run(async () => { const result = await call("drives", { method: "POST", body: JSON.stringify({ name: drive }) }); setDrive((value) => value === drive ? "" : value); return result; }, setToast, "Directory created"); }}>
         <input aria-label="Drive name" placeholder="workspace" value={drive} onChange={(e) => setDrive(e.target.value)} required />
         <button className="primary" type="submit">Create drive directory</button>
       </form>

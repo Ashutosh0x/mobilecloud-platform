@@ -1,6 +1,7 @@
 package com.mobilecloud.ui.console
 
 import com.mobilecloud.console.ConsoleStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -21,6 +22,8 @@ fun ConsoleStore.action(scope: CoroutineScope, ok: String, block: suspend () -> 
         try {
             val result = block()
             notify(result.optString("note").ifEmpty { ok })
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Exception) {
             notify(error.message ?: "Request failed")
         }

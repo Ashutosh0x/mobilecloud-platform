@@ -40,19 +40,33 @@ export function cpuBusySinceBootPct(): number | null {
   return Math.round((1 - idle / total) * 1000) / 10;
 }
 
-export function collectMetrics(db: DatabaseSync, ownerId: string): Metrics {
+let diskUsage: { root: string; bytes: number; sampled: number } | null = null;
+
+function cachedDiskUsage() {
+  const root = dataRoot();
+  if (!diskUsage || diskUsage.root !== root || Date.now() - diskUsage.sampled > 30_000) {
+    diskUsage = { root, bytes: dirBytes(root), sampled: Date.now() };
+  }
+  return diskUsage.bytes;
+}
+
+export function collectMetrics(db: DatabaseSync, ownerId: string, privileged = false): Metrics {
   const unavailable: string[] = [];
-  const total = os.totalmem();
-  const free = os.freemem();
+  const total = privileged ? os.totalmem() : 0;
+  const free = privileged ? os.freemem() : 0;
   const used = Math.max(0, total - free);
   let diskFree: number | null = null;
   let diskTotal: number | null = null;
-  try {
-    const fs = statfsSync(dataRoot());
-    diskFree = Number(fs.bavail) * Number(fs.bsize);
-    diskTotal = Number(fs.blocks) * Number(fs.bsize);
-  } catch {
-    unavailable.push("Disk free space is not readable on this host.");
+  if (privileged) {
+    try {
+      const fs = statfsSync(dataRoot());
+      diskFree = Number(fs.bavail) * Number(fs.bsize);
+      diskTotal = Number(fs.blocks) * Number(fs.bsize);
+    } catch {
+      unavailable.push("Disk free space is not readable on this host.");
+    }
+  } else {
+    unavailable.push("Shared host resource metrics are visible only in the operator's password session.");
   }
   unavailable.push("Network interface utilization is not measured. Only requests handled by this server are counted.");
   unavailable.push("Phone battery, bypass charging, and wall power are not visible to this process.");
@@ -64,12 +78,12 @@ export function collectMetrics(db: DatabaseSync, ownerId: string): Metrics {
 
   return {
     collectedAt: Date.now(),
-    processUptimeSec: Math.round(process.uptime()),
-    cpuBusySinceBootPct: cpuBusySinceBootPct(),
+    processUptimeSec: privileged ? Math.round(process.uptime()) : 0,
+    cpuBusySinceBootPct: privileged ? cpuBusySinceBootPct() : null,
     memoryUsedPct: total > 0 ? Math.round((used / total) * 1000) / 10 : null,
     memoryUsedBytes: used,
     memoryTotalBytes: total,
-    dataDirBytes: dirBytes(dataRoot()),
+    dataDirBytes: privileged ? cachedDiskUsage() : 0,
     diskFreeBytes: diskFree,
     diskTotalBytes: diskTotal,
     responseAvgMs: row.n > 0 && row.avg != null ? Math.round(row.avg) : null,
@@ -80,7 +94,12 @@ export function collectMetrics(db: DatabaseSync, ownerId: string): Metrics {
   };
 }
 
-export function collectHost(): HostInfo {
+export function collectHost(privileged = false): HostInfo {
+  if (!privileged) return {
+    hostname: "unavailable", platform: "unavailable", arch: "unavailable", release: "unavailable",
+    cpuCount: 0, processUptimeSec: 0, memoryUsedBytes: 0, memoryTotalBytes: 0,
+    unavailable: ["Shared host details are visible only in the operator's password session."],
+  };
   const total = os.totalmem();
   const free = os.freemem();
   return {

@@ -7,10 +7,8 @@ import { useCloud } from "@/lib/store";
 export default function LoginPage() {
   const { state, login } = useCloud();
   const router = useRouter();
-  const [mode, setMode] = useState<"login" | "signup">("login");
-  const [name, setName] = useState("Ashutosh");
-  const [email, setEmail] = useState("ashutosh@gmail.com");
-  const [password, setPassword] = useState("ashutosh@123456@1");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -24,7 +22,7 @@ export default function LoginPage() {
     setPending(true);
     setError(null);
     try {
-      await login(mode === "signup" ? "auth/signup" : "auth/login", { name, email, password });
+      await login({ email, password });
       router.replace("/");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign-in failed");
@@ -37,18 +35,9 @@ export default function LoginPage() {
     <main className="auth">
       <form className="panel auth-card" onSubmit={onSubmit}>
         <h1>MobileCloud</h1>
-        <p>Create an account on this server. The first account is the owner. Nothing here is billed.</p>
-        <div className="seg">
-          <button type="button" className={mode === "signup" ? "on" : ""} onClick={() => setMode("signup")}>Create account</button>
-          <button type="button" className={mode === "login" ? "on" : ""} onClick={() => setMode("login")}>Sign in</button>
-        </div>
-        {mode === "signup" && (
-          <label className="field">Name
-            <input value={name} onChange={(e) => setName(e.target.value)} required maxLength={80} />
-          </label>
-        )}
+        <p>Sign in with an account provisioned by your MobileCloud operator.</p>
         <label className="field">Email
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          <input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required />
         </label>
         <label className="field">Password
           <span className="password-field">
@@ -73,7 +62,7 @@ export default function LoginPage() {
         </label>
         {error && <p className="banner bad" role="alert">{error}</p>}
         {state.status === "error" && <p className="banner bad">{state.error}</p>}
-        <button className="primary" type="submit" disabled={pending}>{pending ? "Working…" : mode === "signup" ? "Create account" : "Sign in"}</button>
+        <button className="primary" type="submit" disabled={pending}>{pending ? "Signing in…" : "Sign in"}</button>
       </form>
     </main>
   );

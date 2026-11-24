@@ -31,6 +31,7 @@ web-cloudshell/dist/
 # MobileCloud engine runtime state (never commit on-device data)
 .mobilecloud/
 deployments/
+!apps/web-dashboard/app/(console)/deployments/
 sources/
 cache/
 *.db

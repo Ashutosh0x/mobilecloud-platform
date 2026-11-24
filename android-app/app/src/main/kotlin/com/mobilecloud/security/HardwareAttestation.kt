@@ -85,16 +85,18 @@ object HardwareAttestation {
      * Ed25519 (Soroban) signature over a 32-byte attestation digest, or `null`
      * when the platform or a tampered keystore cannot produce one.
      */
-    fun signSorobanDigest(digest: ByteArray): ByteArray? = try {
-        val ks = loadKeystore()
-        val privateKey = identityFor(ks).privateKey ?: return null
-        Signature.getInstance("Ed25519").run {
-            initSign(privateKey)
-            update(digest)
-            sign()
+    fun signSorobanDigest(digest: ByteArray): ByteArray? {
+        return try {
+            val ks = loadKeystore()
+            val privateKey = identityFor(ks).privateKey ?: return null
+            Signature.getInstance("Ed25519").run {
+                initSign(privateKey)
+                update(digest)
+                sign()
+            }
+        } catch (e: Exception) {
+            null
         }
-    } catch (e: Exception) {
-        null
     }
 
     private inline fun tryLevel(block: () -> Result): Result =
@@ -144,12 +146,13 @@ object HardwareAttestation {
         }
         val anchor = when (level) {
             "STRONGBOX" -> "Ed25519 seed wrapped by a StrongBox AES key"
-            "TEE" -> "Ed25519 seed wrapped by a TEE AES key (StrongBox unavailable)"
-            "SOFTWARE" -> "Ed25519 seed wrapped by a software keystore key — do not trust for signing"
+            "TEE" -> "Ed25519 seed wrapped by a TEE AES key"
+            "HARDWARE_BACKED" -> "Ed25519 seed wrapped by a secure-hardware AES key (type unknown)"
+            "SOFTWARE" -> "Ed25519 seed wrapped by a software keystore key"
             else -> "anchor security level unreadable — treat the key as untrusted"
         }
         val state = if (identity.created) "generated" else "loaded from the wrapped seed"
-        return "$anchor; identity $state · level read back from KeyInfo"
+        return "$anchor; identity $state. Ed25519 signing runs in the app process."
     }
 
     // ---- Hardware anchor (AES-256-GCM inside AndroidKeyStore) ----------------
@@ -187,7 +190,7 @@ object HardwareAttestation {
     private fun anchorSecurityLevel(ks: KeyStore): String = try {
         val secret = (ks.getEntry(ANCHOR_ALIAS, null) as KeyStore.SecretKeyEntry).secretKey
         val info = SecretKeyFactory.getInstance(secret.algorithm, "AndroidKeyStore")
-            .getKeySpec(secret, KeyInfo::class.java)
+            .getKeySpec(secret, KeyInfo::class.java) as KeyInfo
         when {
             Build.VERSION.SDK_INT >= 31 -> when (info.securityLevel) {
                 KeyProperties.SECURITY_LEVEL_STRONGBOX -> "STRONGBOX"
@@ -197,7 +200,7 @@ object HardwareAttestation {
             }
             else -> {
                 @Suppress("DEPRECATION")
-                if (info.isInsideSecureHardware) "TEE" else "SOFTWARE"
+                if (info.isInsideSecureHardware) "HARDWARE_BACKED" else "SOFTWARE"
             }
         }
     } catch (e: Exception) {

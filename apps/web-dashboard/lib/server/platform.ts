@@ -1,4 +1,5 @@
 import { readdirSync, statSync } from "node:fs";
+import { isIP } from "node:net";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { newId } from "./db.ts";
@@ -9,7 +10,13 @@ const JA4 = /^[tqd]1[23][di]\d{4}[a-z0-9]{2}_[a-f0-9]{12}_[a-f0-9]{12}$/i;
 const CRAWLERS = ["GPTBot", "ClaudeBot", "Bytespider", "Googlebot", "bingbot", "Amazonbot"];
 
 export function clientIp(req: Request) {
-  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "local";
+  // Do not trust caller-provided forwarding headers. Only opt in behind a
+  // private ingress that strips and sets this dedicated header on every request.
+  if (process.env.MOBILECLOUD_TRUST_PROXY === "1") {
+    const address = req.headers.get("x-mobilecloud-client-ip")?.trim() ?? "";
+    if (isIP(address)) return address;
+  }
+  return "unknown";
 }
 
 export function observedJa4(req: Request) {
@@ -264,5 +271,8 @@ export function capabilities() {
     { name: "Play Integrity and App Attest", state: "unavailable", detail: "No attestation credentials are configured." },
     { name: "AI Gateway", state: "unavailable", detail: "No model provider key is configured." },
     { name: "Workflow worker", state: "unavailable", detail: "Workflows can be saved. Runs are recorded and are not executed." },
+    { name: "Webhook delivery", state: "unavailable", detail: "Webhook setup stores metadata only; no outbound requests are sent." },
+    { name: "Console screen privacy", state: "active", detail: "The optional screen password does not authorize API requests." },
+    { name: "Local resource records", state: "active", detail: "Functions, DNS, team invites and billing are not provisioned; storage and databases have limited local-only lifecycles." },
   ];
 }

@@ -152,7 +152,7 @@ type Api = {
    * authoritative snapshot once the request succeeds.
    */
   call: (path: string, init?: RequestInit, optimistic?: OptimisticPatch) => Promise<unknown>;
-  login: (path: "auth/login" | "auth/signup", input: { email: string; password: string; name?: string }) => Promise<void>;
+  login: (input: { email: string; password: string }) => Promise<void>;
   logout: () => Promise<void>;
   pushShell: (line: string) => void;
   setToast: (toast: string | null) => void;
@@ -163,14 +163,9 @@ type Api = {
 /** Local, immediate state change applied before the server confirms it. */
 export type OptimisticPatch = (state: CloudState) => Partial<CloudState>;
 
-/** Fields that describe UI intent, not server data — never rolled back. */
-function transient(s: CloudState) {
-  return { query: s.query, range: s.range, shell: s.shell, toast: s.toast, realtime: s.realtime };
-}
-
 const Ctx = createContext<Api | null>(null);
 
-async function request(path: string, init?: RequestInit) {
+export async function request(path: string, init?: RequestInit) {
   const method = (init?.method ?? "GET").toUpperCase();
   const csrf = method === "GET" || method === "HEAD" ? null : readCsrfCookie();
   const res = await fetch(`/api/${path}`, {
@@ -192,8 +187,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const stateRef = useRef<CloudState>(empty);
   useEffect(() => { stateRef.current = state; }, [state]);
 
+  const refreshSequence = useRef(0);
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     const me = await request("auth/me") as { user: User | null };
+    if (sequence !== refreshSequence.current) return;
     if (!me.user) {
       setState((s) => ({ ...empty, status: "anon", query: s.query, range: s.range, shell: s.shell, realtime: s.realtime }));
       return;
@@ -203,6 +201,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       request("overview") as Promise<Snapshot>,
       request(`analytics?range=${range}`) as Promise<Analytics>,
     ]);
+    if (sequence !== refreshSequence.current || snap.user.id !== me.user.id) return;
     setState((s) => ({
       ...s,
       status: "ready",
@@ -241,7 +240,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     let live = true;
     refresh().catch((error) => {
       if (!live) return;
-      setState((s) => ({ ...s, status: "error", error: error instanceof Error ? error.message : "The control plane is unreachable." }));
+      setState((s) => ({ ...s, status: s.user ? "ready" : "error", error: error instanceof Error ? error.message : "The control plane is unreachable." }));
     });
     return () => { live = false; };
   }, [refresh]);
@@ -260,15 +259,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // page reflects it. Debounced so a burst of events triggers one refresh.
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const unsubscribe = realtime.onEvent(() => {
+    const scheduleRefresh = () => {
       if (timer) return;
       timer = setTimeout(() => {
         timer = null;
         refreshRef.current().catch(() => undefined);
       }, 250);
+    };
+    let status = realtime.snapshot().status;
+    const unsubscribeStatus = realtime.subscribe((next) => {
+      if (status !== next.status && (next.status === "connected" || next.status === "sync_error")) scheduleRefresh();
+      status = next.status;
     });
+    const unsubscribeEvent = realtime.onEvent(scheduleRefresh);
     return () => {
-      unsubscribe();
+      unsubscribeStatus();
+      unsubscribeEvent();
       if (timer) clearTimeout(timer);
     };
   }, []);
@@ -276,32 +282,41 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // Only run the socket for an authenticated session. Signing in starts it,
   // signing out (or a lost session) tears it down.
   useEffect(() => {
-    if (state.status === "ready") realtime.start();
+    if (state.status === "ready" && state.user) realtime.start(state.user.id);
     else realtime.stop();
-  }, [state.status]);
+  }, [state.status, state.user?.id]);
 
   // Bounded safety net: if the socket is unavailable the app still converges.
   useEffect(() => {
     if (state.status !== "ready") return;
     const id = setInterval(() => {
-      if (realtime.snapshot().status === "connected") return;
-      refresh().catch(() => setState((s) => ({ ...s, status: "error", error: "Lost contact with the control plane." })));
+      refresh().catch(() => setState((s) => ({ ...s, error: "Lost contact with the control plane." })));
     }, 60000);
     return () => clearInterval(id);
   }, [state.status, refresh]);
 
   const call = useCallback(async (path: string, init?: RequestInit, optimistic?: OptimisticPatch) => {
-    // Snapshot the last confirmed state so a rejected mutation can be undone.
-    const before = optimistic ? stateRef.current : null;
-    if (before && optimistic) setState((s) => ({ ...s, ...optimistic(s) }));
+    const before = stateRef.current;
+    const patch = optimistic?.(before);
+    if (patch) setState((s) => s.user?.id === before.user?.id ? { ...s, ...patch } : s);
+    let data: unknown;
     try {
-      const data = await request(path, init);
-      await refresh();                       // authoritative reconciliation
-      return data;
+      data = await request(path, init);
     } catch (error) {
-      if (before) setState((s) => ({ ...before, ...transient(s) }));
+      if (patch) setState((s) => {
+        if (s.user?.id !== before.user?.id) return s;
+        const rollback = (Object.keys(patch) as (keyof CloudState)[])
+          .filter((key) => s[key] === patch[key]).map((key) => [key, before[key]]);
+        return { ...s, ...Object.fromEntries(rollback) };
+      });
       throw error;
     }
+    try {
+      await refresh();
+    } catch {
+      setState((s) => s.user?.id === before.user?.id ? { ...s, error: "Saved, but the latest state could not be loaded yet." } : s);
+    }
+    return data;
   }, [refresh]);
 
   const api = useMemo<Api>(() => ({
@@ -310,13 +325,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setRange: (range) => setState((s) => ({ ...s, range })),
     refresh,
     call,
-    login: async (path, input) => {
+    login: async (input) => {
+      refreshSequence.current += 1;
       realtime.reset();
-      await request(path, { method: "POST", body: JSON.stringify(input) });
+      await request("auth/login", { method: "POST", body: JSON.stringify(input) });
       await refresh();
     },
     logout: async () => {
       await request("auth/logout", { method: "POST" });
+      refreshSequence.current += 1;
       realtime.reset();
       setState((s) => ({ ...empty, status: "anon", shell: s.shell }));
     },

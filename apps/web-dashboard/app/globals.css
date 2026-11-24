@@ -72,7 +72,7 @@ h3, .name { font-family: var(--sans); font-weight: 500; letter-spacing: -0.025em
   border-radius: 999px; padding: 0 12px; height: 36px; color: var(--muted);
 }
 .search input { flex: 1; background: transparent; border: 0; outline: none; height: 100%; }
-.search kbd { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.search button { flex-shrink: 0; font-family: var(--mono); font-size: 11px; }
 .top-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; position: relative; }
 .online, .offline, .pending { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
 .dot { width: 8px; height: 8px; border-radius: 99px; background: var(--accent); display: inline-block; box-shadow: 0 0 0 4px color-mix(in oklch, var(--accent) 25%, transparent); }
@@ -202,6 +202,8 @@ select, .form-row input, .filters input, .field input, .modal input, .auth-card 
 .modal-back { position: fixed; inset: 0; background: rgba(0,0,0,0.72); display: grid; place-items: start center; padding-top: 12vh; z-index: 50; }
 .modal { width: min(480px, 92vw); background: #141414; border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
 .modal h3 { margin: 0 0 8px; }
+dialog.modal { color: var(--text); }
+dialog.modal::backdrop { background: rgba(0,0,0,0.72); }
 .hit { display: block; width: 100%; text-align: left; background: transparent; border: 0; border-radius: 8px; padding: 8px; color: var(--text); }
 .hit.on, .hit:hover { background: var(--hover); }
 .toast {
@@ -268,7 +270,7 @@ select, .form-row input, .filters input, .field input, .modal input, .auth-card 
   }
   .bottom-nav .on { color: var(--text); }
   .main { padding: 16px 12px 88px; }
-  .search kbd, .online span, .offline span { display: none; }
+  .online span, .offline span { display: none; }
   .brand { min-width: 0; }
   .brand p { display: none; }
   .stats, .cards, .plans { grid-template-columns: 1fr; }

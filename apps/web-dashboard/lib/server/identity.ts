@@ -1,30 +1,23 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { hashPassword, newId, tokenHash, verifyPassword } from "./db.ts";
-import { publish } from "./events.ts";
+import { publish, tx } from "./events.ts";
 
 const GATE = "mc_gate";
 
 export function notify(db: DatabaseSync, owner: string, type: string, title: string, message: string) {
-  db.prepare(
-    "INSERT INTO notifications (id, owner_id, type, title, message, read, at) VALUES (?, ?, ?, ?, ?, 0, ?)",
-  ).run(newId(), owner, type, title, message.slice(0, 500), Date.now());
-  // Mirror the notification into the outbox so every signed-in device sees the
-  // same unread state without polling.
-  publish(db, owner, "notification.created", null, { type, title, message: message.slice(0, 500) });
-  const hooks = db.prepare("SELECT url, secret, events FROM webhooks WHERE owner_id = ?").all(owner) as { url: string; secret: string; events: string }[];
-  const body = JSON.stringify({ type, title, message, at: Date.now() });
-  for (const hook of hooks) {
-    const events = hook.events.split(",").filter(Boolean);
-    if (events.length && !events.includes(type) && !events.includes("*")) continue;
-    const signature = createHmac("sha256", hook.secret).update(body).digest("hex");
-    void fetch(hook.url, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-mobilecloud-signature": signature },
-      body,
-      signal: AbortSignal.timeout(4000),
-    }).catch(() => undefined);
-  }
+  const insert = () => {
+    const id = newId();
+    const excerpt = message.slice(0, 500);
+    db.prepare(
+      "INSERT INTO notifications (id, owner_id, type, title, message, read, at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+    ).run(id, owner, type, title, excerpt, Date.now());
+    publish(db, owner, "notification.created", id, { id, type, title, message: excerpt });
+  };
+  if (db.isTransaction) insert();
+  else tx(db, insert);
+  // Deliberately no outbound delivery, even for previously stored endpoints.
+  // Re-enable only with a connection-time egress policy and bounded worker.
 }
 
 export function listNotifications(db: DatabaseSync, owner: string) {
@@ -59,40 +52,49 @@ export function listTokens(db: DatabaseSync, owner: string) {
 
 export function createToken(db: DatabaseSync, owner: string, name: string, days: number) {
   const raw = `mc_${randomBytes(24).toString("hex")}`;
-  const expires = days > 0 ? Date.now() + days * 86400_000 : null;
+  const expires = Date.now() + days * 86400_000;
+  const id = newId();
   db.prepare(
     "INSERT INTO access_tokens (id, owner_id, name, token_hash, prefix, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).run(newId(), owner, name.slice(0, 60), tokenHash(raw), raw.slice(0, 10), Date.now(), expires);
-  return { token: raw, expiresAt: expires };
+  ).run(id, owner, name.slice(0, 60), tokenHash(raw), raw.slice(0, 10), Date.now(), expires);
+  return { id, token: raw, expiresAt: expires };
 }
 
 export function userFromBearer(db: DatabaseSync, header: string | null) {
-  if (!header?.startsWith("Bearer mc_")) return null;
+  if (!header || !/^Bearer mc_[a-f0-9]{48}$/i.test(header)) return null;
   const raw = header.slice("Bearer ".length);
+  const now = Date.now();
   const row = db.prepare(
-    `SELECT u.id, u.email, u.name, u.role, u.plan, t.id AS tokenId
+    `SELECT u.id, u.email, u.name, u.role, u.plan, t.id AS tokenId, d.id AS deviceId
      FROM access_tokens t JOIN users u ON u.id = t.owner_id
-     WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > ?)`,
-  ).get(tokenHash(raw), Date.now()) as { id: string; email: string; name: string; role: string; plan: string; tokenId: string } | undefined;
+     LEFT JOIN connected_devices d ON d.token_id = t.id AND d.owner_id = u.id
+     WHERE t.token_hash = ? AND t.expires_at > ? AND (d.id IS NULL OR d.revoked = 0)`,
+  ).get(tokenHash(raw), now) as { id: string; email: string; name: string; role: string; plan: string; tokenId: string; deviceId: string | null } | undefined;
   if (!row) return null;
-  db.prepare("UPDATE access_tokens SET last_used = ? WHERE id = ?").run(Date.now(), row.tokenId);
-  // A device credential is an access token; mirror the activity onto the device
-  // row so the dashboard can show an honest "last active" per connected device.
-  db.prepare("UPDATE connected_devices SET last_active = ? WHERE token_id = ?").run(Date.now(), row.tokenId);
-  return { id: row.id, email: row.email, name: row.name, role: row.role, plan: row.plan };
+  const { tokenId, deviceId, ...user } = row;
+  try {
+    db.prepare("UPDATE access_tokens SET last_used = ? WHERE id = ? AND (last_used IS NULL OR last_used < ?)").run(now, tokenId, now - 60_000);
+    if (deviceId) db.prepare("UPDATE connected_devices SET last_active = ? WHERE id = ? AND last_active < ?").run(now, deviceId, now - 60_000);
+  } catch { /* Activity is advisory. */ }
+  return { user, tokenId, deviceId };
 }
 
 export function startDevice(db: DatabaseSync) {
   const device = randomBytes(24).toString("hex");
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let code = "";
-  const bytes = randomBytes(8);
-  for (let i = 0; i < 8; i += 1) code += alphabet[bytes[i] % alphabet.length];
-  const userCode = `${code.slice(0, 4)}-${code.slice(4)}`;
-  db.prepare(
-    "INSERT INTO device_codes (id, device_hash, user_code, status, expires_at) VALUES (?, ?, ?, 'pending', ?)",
-  ).run(newId(), tokenHash(device), userCode, Date.now() + 10 * 60_000);
-  return { deviceCode: device, userCode, expiresIn: 600 };
+  return tx(db, () => {
+    const now = Date.now();
+    db.prepare("DELETE FROM device_codes WHERE expires_at <= ?").run(now);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const code = Array.from(randomBytes(8), (byte) => alphabet[byte % alphabet.length]).join("");
+      const userCode = `${code.slice(0, 4)}-${code.slice(4)}`;
+      const result = db.prepare(
+        "INSERT INTO device_codes (id, device_hash, user_code, status, expires_at) VALUES (?, ?, ?, 'pending', ?) ON CONFLICT(user_code) DO NOTHING",
+      ).run(newId(), tokenHash(device), userCode, now + 10 * 60_000);
+      if (result.changes) return { deviceCode: device, userCode, expiresIn: 600 };
+    }
+    throw new Error("No device display code available");
+  });
 }
 
 export function approveDevice(db: DatabaseSync, owner: string, userCode: string) {
@@ -103,14 +105,17 @@ export function approveDevice(db: DatabaseSync, owner: string, userCode: string)
 }
 
 export function pollDevice(db: DatabaseSync, deviceCode: string) {
-  const row = db.prepare(
-    "SELECT id, owner_id AS ownerId, status, expires_at AS expiresAt FROM device_codes WHERE device_hash = ?",
-  ).get(tokenHash(deviceCode)) as { id: string; ownerId: string | null; status: string; expiresAt: number } | undefined;
-  if (!row || row.expiresAt < Date.now()) return { status: "expired" as const };
-  if (row.status !== "approved" || !row.ownerId) return { status: "pending" as const };
-  const issued = createToken(db, row.ownerId, "device", 30);
-  db.prepare("UPDATE device_codes SET status = 'consumed' WHERE id = ?").run(row.id);
-  return { status: "approved" as const, token: issued.token, expiresAt: issued.expiresAt };
+  return tx(db, () => {
+    const row = db.prepare(
+      "SELECT id, owner_id AS ownerId, status, expires_at AS expiresAt FROM device_codes WHERE device_hash = ?",
+    ).get(tokenHash(deviceCode)) as { id: string; ownerId: string | null; status: string; expiresAt: number } | undefined;
+    if (!row || row.expiresAt <= Date.now() || row.status === "consumed") return { status: "expired" as const };
+    if (row.status !== "approved" || !row.ownerId) return { status: "pending" as const };
+    const issued = createToken(db, row.ownerId, "device", 30);
+    db.prepare("UPDATE device_codes SET status = 'consumed' WHERE id = ?").run(row.id);
+    publish(db, row.ownerId, "configuration.updated", issued.id, { resource: "token", id: issued.id });
+    return { status: "approved" as const, token: issued.token, expiresAt: issued.expiresAt };
+  });
 }
 
 export function protectionStatus(db: DatabaseSync, owner: string, cookie: string | null) {
@@ -140,14 +145,15 @@ export function unlockProtection(db: DatabaseSync, owner: string, password: stri
   return gate;
 }
 
-export function gateCookie(token: string, maxAge: number) {
-  return `${GATE}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
+export function gateCookie(token: string, maxAge: number, secure = process.env.NODE_ENV === "production") {
+  return `${GATE}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}${secure ? "; Secure" : ""}`;
 }
 
 export function readGate(req: Request) {
   const raw = req.headers.get("cookie") ?? "";
-  const hit = raw.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${GATE}=`));
-  return hit ? decodeURIComponent(hit.slice(GATE.length + 1)) : null;
+  const hits = raw.split(";").map((part) => part.trim()).filter((part) => part.startsWith(`${GATE}=`));
+  const token = hits.length === 1 ? hits[0].slice(GATE.length + 1) : null;
+  return token && /^[a-f0-9]{48}$/.test(token) ? token : null;
 }
 
 export function listWebhooks(db: DatabaseSync, owner: string) {

@@ -23,7 +23,6 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Schedule
@@ -254,10 +253,10 @@ fun DashboardScreen() {
             )
             MetricCard(
                 label = "BATTERY",
-                value = "${t.battery.batteryPercent}%",
+                value = t.battery.percentLabel,
                 icon = Icons.Filled.BatteryStd,
                 accent = Aurora.Blue,
-                meter = t.battery.batteryPercent / 100f,
+                meter = t.battery.batteryPercent?.div(100f),
                 modifier = Modifier.weight(1f),
             )
         }
@@ -289,13 +288,13 @@ fun DashboardScreen() {
                 Spacer(Modifier.height(14.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     ProgressRing(
-                        progress = t.battery.batteryPercent / 100f,
+                        progress = t.battery.batteryPercent?.div(100f) ?: 0f,
                         color = Aurora.GlowGreen,
                         size = 118.dp, stroke = 10.dp,
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Icon(Icons.Filled.BatteryStd, null, tint = Aurora.GlowGreen, modifier = Modifier.size(18.dp))
-                            Text("${t.battery.batteryPercent}%", color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                            Text(t.battery.percentLabel, color = Aurora.TextHi, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                             Text("Battery", color = Aurora.TextFaint, fontSize = 10.sp)
                         }
                     }
@@ -307,13 +306,10 @@ fun DashboardScreen() {
                             Text("Charge State", color = Aurora.TextLow, fontSize = 11.sp)
                         }
                         Spacer(Modifier.height(4.dp))
-                        Text(t.battery.batteryStatus, color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                        Text(t.battery.status, color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.height(2.dp))
                         Text(
-                            "%.1f °C  ·  current %d mA".format(
-                                t.battery.batteryTempTenthsC / 10.0,
-                                t.battery.batteryCurrentMicroAmps / 1000,
-                            ),
+                            "Cell: ${t.battery.temperatureLabel} · Current: ${t.battery.currentLabel}",
                             color = Aurora.TextFaint,
                             fontSize = 11.sp,
                         )
@@ -321,19 +317,6 @@ fun DashboardScreen() {
                         RefSourceChip("BatteryManager")
                     }
                 }
-                PowerDivider()
-                PowerRow(
-                    icon = Icons.Filled.Block,
-                    tint = if (t.battery.bypassActive) Aurora.GlowGreen else Aurora.Amber,
-                    label = "Bypass Charging",
-                    value = if (t.battery.bypassActive) "DETECTED" else "NOT DETECTED",
-                    valueColor = if (t.battery.bypassActive) Aurora.GlowGreen else Aurora.Amber,
-                    detail = if (t.battery.bypassActive)
-                        "Device charges from USB while the cell is isolated."
-                    else
-                        "Device charges normally; hardware bypass unsupported or not engaged.",
-                    source = "BatteryManager probe",
-                )
                 PowerDivider()
                 PowerRow(
                     icon = Icons.Filled.Power,
@@ -393,26 +376,11 @@ fun DashboardScreen() {
 
         Spacer(Modifier.height(13.dp))
 
-        // ---- Real on-device components ----
         GlowCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
-                SectionLabel("RUNNING ON THIS DEVICE")
+                SectionLabel("LOCAL RUNTIME")
                 Spacer(Modifier.height(8.dp))
-                listOf(
-                    "CloudSupervisorService (foreground, specialUse FGS)",
-                    "NetworkBunderService (foreground, dataSync FGS)",
-                    "WorkManager: TelemetryWorker @15min · PorAttestationWorker @1h",
-                    "CloudShell PTY (forkpty via libmobilecloud_native.so)",
-                    "Biometric App Lock · AndroidKeyStore security gate",
-                ).forEach { name ->
-                    Row(Modifier.padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier.size(6.dp).background(Aurora.GlowGreen, CircleShape)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(name, color = Aurora.TextMid, fontSize = 11.5.sp)
-                    }
-                }
+                Text("Console only. No local node runtime is included.", color = Aurora.TextMid, fontSize = 11.5.sp)
             }
         }
 

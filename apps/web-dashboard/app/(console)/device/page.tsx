@@ -271,7 +271,7 @@ export default function DevicePage() {
               <h3>{statusLabel(session.pairing.status)}</h3>
               <p className="sub">Open the MobileCloud app, tap <b>Link this device</b>, and point it at this code.</p>
               <p className="banner">
-                Or enter this code in the app: <code>{session.pairing.verification_code}</code>
+                Verification code: <code>{session.pairing.verification_code}</code>
               </p>
               <p className="sub">
                 {seconds > 0 ? `Expires in ${seconds}s` : "Expiring…"}

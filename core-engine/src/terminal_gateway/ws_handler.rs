@@ -2,18 +2,15 @@
 //!
 //! Protocol: JSON control frames (`{"type":"input","data":…}` /
 //! `{"type":"resize","cols":…,"rows":…}`) inbound; raw PTY bytes outbound.
-//! Authentication is enforced upstream by the zero-trust ingress
-//! (Cloudflare Access JWT / Tailscale Funnel) — the local listener itself
-//! binds loopback-only, so a remote terminal session can only exist after a
-//! tunnel-authenticated request. New remote sessions additionally require a
-//! biometric-issued token from the Android app (§3.1).
+//! Optional local operator interface for native clients. Browser WebSocket
+//! upgrades and URL credentials are not supported.
 
 use std::sync::Arc;
 
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        OriginalUri, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -33,54 +30,55 @@ enum ClientMessage {
     Resize { cols: u16, rows: u16 },
 }
 
-#[derive(Deserialize)]
-pub struct TerminalAuth {
-    token: Option<String>,
-}
-
 pub async fn ws_terminal_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
-    Query(auth): Query<TerminalAuth>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Response {
-    // A shell is never handed out unauthenticated: an empty configured token
-    // fails closed, exactly like a mismatched one.
-    if !terminal_authorized(&state, &headers, auth.token.as_deref()) {
-        return (StatusCode::UNAUTHORIZED, "terminal authentication required").into_response();
+    if state.terminal_token.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "local terminal is disabled",
+        )
+            .into_response();
     }
-    ws.on_upgrade(move |socket| handle_terminal_session(socket, state))
+    if !terminal_authorized(&state.terminal_token, &headers, uri.query().is_some()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "terminal header authentication required",
+        )
+            .into_response();
+    }
+    ws.max_message_size(64 * 1024)
+        .max_frame_size(64 * 1024)
+        .on_upgrade(move |socket| handle_terminal_session(socket, state))
 }
 
-/// Accept the terminal credential from `?token=`, `x-terminal-token`, or an
-/// `Authorization: Bearer` header (the Android client uses the header form).
-fn terminal_authorized(state: &AppState, headers: &HeaderMap, query_token: Option<&str>) -> bool {
-    let expected = state.terminal_token.as_slice();
-    let candidates = [
-        query_token,
-        headers.get("x-terminal-token").and_then(|v| v.to_str().ok()),
-        headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer ")),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .any(|token| token_matches(expected, token))
-}
-
-/// Constant-time credential comparison; an empty expected token never matches.
-fn token_matches(expected: &[u8], presented: &str) -> bool {
-    let presented = presented.as_bytes();
-    if expected.is_empty() || presented.len() != expected.len() {
+fn terminal_authorized(expected: &[u8], headers: &HeaderMap, has_query: bool) -> bool {
+    if has_query || headers.contains_key(header::ORIGIN) {
         return false;
     }
-    expected
-        .iter()
-        .zip(presented.iter())
-        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-        == 0
+    let presented =
+        crate::bearer(headers).or_else(|| headers.get("x-terminal-token").map(|v| v.as_bytes()));
+    presented.is_some_and(|value| crate::token_matches(expected, value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_requires_dedicated_header_and_rejects_browser_or_query() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer terminal".parse().unwrap());
+        assert!(terminal_authorized(b"terminal", &headers, false));
+        assert!(!terminal_authorized(b"webhook", &headers, false));
+        assert!(!terminal_authorized(b"", &headers, false));
+        assert!(!terminal_authorized(b"terminal", &headers, true));
+        headers.insert(header::ORIGIN, "https://example.test".parse().unwrap());
+        assert!(!terminal_authorized(b"terminal", &headers, false));
+    }
 }
 
 async fn handle_terminal_session(socket: WebSocket, state: Arc<AppState>) {
@@ -92,7 +90,7 @@ async fn handle_terminal_session(socket: WebSocket, state: Arc<AppState>) {
         Err(e) => {
             tracing::error!("terminal PTY allocation failed: {e:#}");
             let _ = ws_sender
-                .send(Message::Text(format!("terminal unavailable: {e}")))
+                .send(Message::Text("terminal unavailable".into()))
                 .await;
             return;
         }

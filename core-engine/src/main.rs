@@ -1,172 +1,248 @@
-//! MobileCloud Core Supervisor (`mobilecloud-core`).
-//!
-//! The native daemon running on the phone (aarch64-linux-android, inside the
-//! app's private storage or an AVF VM). Responsibilities per the master
-//! blueprint §2:
-//!
-//! ```text
-//! 127.0.0.1:3000
-//! ├── POST /webhook/github        HMAC-SHA256 verified Git push → build pipeline
-//! ├── GET  /healthz               Liveness for the Android Foreground Service
-//! ├── GET  /metrics               Prometheus-style node telemetry
-//! ├── GET  /logs/:project         Server-Sent Events build log stream
-//! ├── GET  /terminal/ws           Tri-modal terminal (WebSocket CloudShell)
-//! └── /*   (fallback)             Vercel Build Output API v3 proxy router
-//! ```
-//!
-//! Behind Cloudflare Tunnel / Tailscale Funnel, this localhost listener is
-//! the only serving surface — zero open ports on the device itself.
+//! MobileCloud engine: private operator API and a separate static deployment listener.
 
 mod builder;
 mod proxy;
 mod terminal_gateway;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Request, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Response},
+    extract::{rejection::JsonRejection, DefaultBodyLimit, Path, Request, State},
+    http::{header, uri::Authority, HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::{get, post},
     Json, Router,
 };
-use futures_util::stream::Stream;
+use futures_util::StreamExt;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Semaphore};
 use tracing::{error, info, warn};
 
-use builder::{atomic_promoter, bun_runner, framework_detector, git_cloner, DeployRecord, DeploymentStore};
+use builder::{
+    atomic_promoter, bun_runner, framework_detector, git_cloner, DeployRecord, DeploymentStore,
+};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Runtime layout under `MOBILECLOUD_HOME` (default `/var/mobilecloud`,
-/// overridable for development and AVF mounts):
-/// `sources/`, `cache/`, `deployments/`, `live/`, `engine/`, `logs/`.
-/// Shared as `Arc<AppState>` (interior locks/counters are !Clone).
+/// Each engine is a single operator trust domain, not a shared tenant backend.
+/// E.g. MOBILECLOUD_PREVIEW_PROJECTS='{"demo":{"repository":"owner/repo","branch":"main"}}'.
+/// The optional exact `host` enables serving that project on the deployment listener.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewProject {
+    repository: String,
+    branch: String,
+    host: Option<String>,
+}
+
+impl PreviewProject {
+    fn clone_url(&self) -> String {
+        format!("https://github.com/{}.git", self.repository)
+    }
+}
+
+fn valid_projects(projects: &HashMap<String, PreviewProject>) -> bool {
+    let mut refs = HashSet::new();
+    let mut hosts = HashSet::new();
+    projects.iter().all(|(project, config)| {
+        let repo_ok = config
+            .repository
+            .split_once('/')
+            .is_some_and(|(owner, repo)| {
+                let valid = |part: &str| {
+                    !part.is_empty()
+                        && part.len() <= 100
+                        && part != "."
+                        && part != ".."
+                        && part
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                };
+                valid(owner) && valid(repo) && !repo.to_ascii_lowercase().ends_with(".git")
+            });
+        let host_ok = config.host.as_deref().is_none_or(|host| {
+            host.len() <= 253
+                && host.contains('.')
+                && host.split('.').all(builder::valid_project)
+                && host != "admin.phone.mobilecloud.live"
+                && hosts.insert(host)
+        });
+        builder::valid_project(project)
+            && repo_ok
+            && host_ok
+            && !config.branch.is_empty()
+            && config.branch.len() <= 255
+            && git2::Reference::is_valid_name(&format!("refs/heads/{}", config.branch))
+            && refs.insert((
+                config.repository.to_ascii_lowercase(),
+                config.branch.as_str(),
+            ))
+    })
+}
+
 pub struct AppState {
     pub home: PathBuf,
     pub engine_bin: PathBuf,
-    pub deployments: Arc<DeploymentStore>,
-    /// Per-project build log broadcasters (SSE consumers).
-    pub log_hub: RwLock<HashMap<String, broadcast::Sender<String>>>,
-    /// Webhook shared secret (mirrored from the StrongBox Keystore on the
-    /// Android side; injected via env in development).
-    pub webhook_secret: Vec<u8>,
-    /// Credential required before any terminal session is granted (PTY over
-    /// WebSocket). Provisioned from the Android Keystore via
-    /// `MOBILECLOUD_TERMINAL_TOKEN`; when unset it falls back to the node's
-    /// shared secret. An empty value fails closed — no shell is handed out.
-    pub terminal_token: Vec<u8>,
-    /// Host header → project routing table (custom domains + preview URLs).
-    pub host_map: RwLock<HashMap<String, String>>,
-    /// Rolling request counters for /metrics.
-    pub requests_total: AtomicU64,
-    pub builds_total: AtomicU64,
-    pub agent_builds_total: AtomicU64,
-    pub cache_revalidations_total: AtomicU64,
+    deployments: DeploymentStore,
+    projects: HashMap<String, PreviewProject>,
+    logs: HashMap<String, broadcast::Sender<String>>,
+    trusted_preview: bool,
+    build_slot: Arc<Semaphore>,
+    deployment_slots: Arc<Semaphore>,
+    operator_token: Vec<u8>,
+    webhook_secret: Vec<u8>,
+    terminal_token: Vec<u8>,
+    requests_total: AtomicU64,
+    builds_total: AtomicU64,
+    agent_builds_total: AtomicU64,
 }
 
 impl AppState {
-    pub fn new(home: PathBuf, webhook_secret: Vec<u8>) -> Self {
-        let engine_bin = home.join("engine/bin");
-        for dir in ["sources", "cache", "deployments", "live", "engine/bin", "logs"] {
-            let _ = std::fs::create_dir_all(home.join(dir));
+    fn new(home: PathBuf, projects: HashMap<String, PreviewProject>) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            valid_projects(&projects),
+            "invalid or ambiguous MOBILECLOUD_PREVIEW_PROJECTS"
+        );
+        let home = std::path::absolute(home)?;
+        for dir in ["sources", "deployments", "engine/bin", "home"] {
+            std::fs::create_dir_all(home.join(dir))?;
         }
-        // A dedicated terminal credential when provisioned, else the node's
-        // shared secret. Left empty (fails closed) only when neither exists,
-        // which disables the shell rather than exposing an unauthenticated one.
-        let terminal_token = std::env::var("MOBILECLOUD_TERMINAL_TOKEN")
-            .ok()
-            .map(String::into_bytes)
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| webhook_secret.clone());
-        AppState {
+        let logs = projects
+            .keys()
+            .map(|project| (project.clone(), broadcast::channel(256).0))
+            .collect();
+        Ok(Self {
+            engine_bin: home.join("engine/bin"),
+            deployments: DeploymentStore::new(home.join("deployments")),
             home,
-            engine_bin,
-            deployments: Arc::new(DeploymentStore::new()),
-            log_hub: RwLock::new(HashMap::new()),
-            webhook_secret,
-            terminal_token,
-            host_map: RwLock::new(HashMap::new()),
+            projects,
+            logs,
+            trusted_preview: false,
+            build_slot: Arc::new(Semaphore::new(1)),
+            deployment_slots: Arc::new(Semaphore::new(16)),
+            operator_token: Vec::new(),
+            webhook_secret: Vec::new(),
+            terminal_token: Vec::new(),
             requests_total: AtomicU64::new(0),
             builds_total: AtomicU64::new(0),
             agent_builds_total: AtomicU64::new(0),
-            cache_revalidations_total: AtomicU64::new(0),
+        })
+    }
+
+    pub fn log_line(&self, project: &str, line: impl AsRef<str>) {
+        // Raw child output goes only to authenticated, transient SSE subscribers.
+        // Do not copy repository output into supervisor or ingress logs.
+        if let Some(sender) = self.logs.get(project) {
+            let _ = sender.send(line.as_ref().to_string());
         }
     }
 
-    /// Resolve a Host header to a project name (`store.mydomain.com` →
-    /// `store-production`), falling back to the wildcard preview convention.
-    pub async fn project_for_host(&self, host: &str) -> Option<String> {
-        let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
-        let map = self.host_map.read().await;
-        if let Some(project) = map.get(&host) {
-            return Some(project.clone());
-        }
-        // Preview URL convention: dpl-c4a89.<anything>.live → any project
-        // whose latest deployment matches; the store is authoritative.
-        if host.starts_with("dpl-") {
-            let short = host.trim_start_matches("dpl-").split('.').next()?.to_string();
-            return self.deployments.project_for_prefix(&short);
-        }
-        None
-    }
-
-    pub async fn log_line(&self, project: &str, line: impl AsRef<str>) {
-        let sender = {
-            let mut hub = self.log_hub.write().await;
-            hub.entry(project.to_string())
-                .or_insert_with(|| broadcast::channel(256).0)
-                .clone()
-        };
-        let _ = sender.send(line.as_ref().to_string());
-        info!(target: "mobilecloud::build", "{}", line.as_ref());
+    fn preview_enabled(&self) -> bool {
+        self.trusted_preview && !self.projects.is_empty()
     }
 }
 
-// ---------------------------------------------------------------------------
-// GitHub webhook ingestion (HMAC-SHA256 per research report §8).
-// ---------------------------------------------------------------------------
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).as_deref() == Ok("1")
+}
+
+fn credential(name: &str) -> Vec<u8> {
+    std::env::var(name)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_default()
+        .into_bytes()
+}
+
+// An empty expected credential never authenticates. Verify a fixed-size MAC so
+// matching a prefix of the configured credential gives no comparison signal.
+fn token_matches(expected: &[u8], presented: &[u8]) -> bool {
+    if expected.is_empty() || presented.is_empty() {
+        return false;
+    }
+    let mut mac =
+        HmacSha256::new_from_slice(b"mobilecloud credential comparison v1").expect("valid key");
+    let mut actual = mac.clone();
+    actual.update(presented);
+    mac.update(expected);
+    mac.verify_slice(&actual.finalize().into_bytes()).is_ok()
+}
+
+fn bearer(headers: &HeaderMap) -> Option<&[u8]> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .as_bytes()
+        .strip_prefix(b"Bearer ")
+}
+
+async fn operator_auth(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let headers = request.headers();
+    if headers.contains_key(header::ORIGIN)
+        || !bearer(headers).is_some_and(|value| token_matches(&state.operator_token, value))
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "operator bearer credential required",
+        )
+            .into_response();
+    }
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+fn verify_github_signature(secret: &[u8], body: &[u8], signature: &str) -> bool {
+    if secret.is_empty() {
+        return false;
+    }
+    let Some(provided) = signature
+        .strip_prefix("sha256=")
+        .and_then(|value| hex::decode(value).ok())
+    else {
+        return false;
+    };
+    let mut mac = HmacSha256::new_from_slice(secret).expect("valid key length");
+    mac.update(body);
+    mac.verify_slice(&provided).is_ok()
+}
 
 #[derive(serde::Deserialize)]
 struct PushPayload {
+    repository: RepoInfo,
+    #[serde(rename = "ref")]
+    git_ref: String,
+    after: String,
     #[serde(default)]
-    repository: Option<RepoInfo>,
-    #[serde(default)]
-    r#ref: Option<String>,
-    /// `after` is the head commit of the push.
-    #[serde(default)]
-    after: Option<String>,
-    #[serde(default)]
-    deleted: Option<bool>,
+    deleted: bool,
 }
 
 #[derive(serde::Deserialize)]
 struct RepoInfo {
-    #[serde(default)]
-    full_name: Option<String>,
-    #[serde(default)]
-    clone_url: Option<String>,
+    full_name: String,
 }
 
-/// Constant-time HMAC-SHA256 verification of `X-Hub-Signature-256`.
-fn verify_github_signature(secret: &[u8], body: &[u8], header: &str) -> bool {
-    let Some(provided) = header.strip_prefix("sha256=") else {
-        return false;
-    };
-    let Ok(provided) = hex::decode(provided) else {
-        return false;
-    };
-    let mut mac = match HmacSha256::new_from_slice(secret) {
-        Ok(mac) => mac,
-        Err(_) => return false,
-    };
-    mac.update(body);
-    mac.verify_slice(&provided).is_ok()
+fn preview_disabled() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "trusted local preview builds are disabled",
+    )
+        .into_response()
 }
 
 async fn github_webhook(
@@ -174,467 +250,543 @@ async fn github_webhook(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    if !state.preview_enabled() || state.webhook_secret.is_empty() {
+        return preview_disabled();
+    }
     let signature = headers
         .get("x-hub-signature-256")
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    if !verify_github_signature(&state.webhook_secret, &body, signature) {
-        return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
+    if headers.contains_key(header::ORIGIN)
+        || !verify_github_signature(&state.webhook_secret, &body, signature)
+    {
+        return (StatusCode::UNAUTHORIZED, "invalid webhook signature").into_response();
     }
-
-    let payload: PushPayload = match serde_json::from_slice(&body) {
-        Ok(p) => p,
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("bad payload: {e}")).into_response(),
+    if !headers.get("x-github-event").is_some_and(|v| v == "push") {
+        return (StatusCode::OK, "non-push event ignored").into_response();
+    }
+    let Ok(payload) = serde_json::from_slice::<PushPayload>(&body) else {
+        return (StatusCode::BAD_REQUEST, "invalid push payload").into_response();
     };
-    if payload.deleted.unwrap_or(false) {
+    if payload.deleted {
         return (StatusCode::OK, "branch deleted; ignored").into_response();
     }
-
-    let repository = payload.repository;
-    let repo = repository
-        .as_ref()
-        .map(|r| r.full_name.clone().unwrap_or_else(|| r.clone_url.clone().unwrap_or_default()))
-        .unwrap_or_default();
-    let clone_url = repository.and_then(|r| r.clone_url).unwrap_or_default();
-    let branch = payload
-        .r#ref
-        .unwrap_or_default()
-        .trim_start_matches("refs/heads/")
-        .to_string();
-    let commit = payload.after.unwrap_or_default();
-    if repo.is_empty() || clone_url.is_empty() || branch.is_empty() {
-        return (StatusCode::BAD_REQUEST, "missing repository/ref").into_response();
+    let Some(branch) = payload.git_ref.strip_prefix("refs/heads/") else {
+        return (StatusCode::OK, "non-branch event ignored").into_response();
+    };
+    let Some((project, _)) = state.projects.iter().find(|(_, configured)| {
+        configured
+            .repository
+            .eq_ignore_ascii_case(&payload.repository.full_name)
+            && configured.branch == branch
+    }) else {
+        return (
+            StatusCode::FORBIDDEN,
+            "repository/ref is not configured for local preview",
+        )
+            .into_response();
+    };
+    if !git_cloner::valid_commit(&payload.after) {
+        return (StatusCode::BAD_REQUEST, "invalid commit").into_response();
     }
-
-    let project = repo.replace('/', "-");
-    let queued_message = format!("build queued for {project}@{branch}");
-    state.builds_total.fetch_add(1, Ordering::Relaxed);
-    let state2 = state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = run_build_pipeline(&state2, &project, &clone_url, &branch, &commit, Some("git:push".into())).await {
-            error!("build pipeline failed for {project}: {e:#}");
-            state2.log_line(&project, format!("[Deploy] FAILED: {e:#}")).await;
-        }
-    });
-
-    (StatusCode::ACCEPTED, queued_message).into_response()
+    let project = project.clone();
+    match queue_build(
+        state,
+        project,
+        Some(payload.after),
+        "git:push".into(),
+        false,
+    ) {
+        Ok(()) => (StatusCode::ACCEPTED, "trusted preview build queued").into_response(),
+        Err(response) => response,
+    }
 }
-
-/// The 16.5-second lifecycle: clone → detect → install → build → validate →
-/// promote → route reload (master blueprint §4 Lifecycle 1).
-async fn run_build_pipeline(
-    state: &Arc<AppState>,
-    project: &str,
-    clone_url: &str,
-    branch: &str,
-    commit: &str,
-    trigger_source: Option<String>,
-) -> anyhow::Result<()> {
-    let trigger_desc = trigger_source.as_deref().unwrap_or("direct");
-    state.log_line(project, format!("[Deploy] Ingress trigger: {trigger_desc} for commit '{commit}' on branch '{branch}'")).await;
-
-    // 1. In-memory shallow fetch via libgit2 (< 0.5s on-device).
-    let started = std::time::Instant::now();
-    let source_dir = git_cloner::shallow_fetch(state, project, clone_url, branch, commit)?;
-    state.log_line(project, format!("[Git] Shallow fetch complete in {:.2}s", started.elapsed().as_secs_f32())).await;
-
-    // 2. Framework auto-detection.
-    let preset = framework_detector::detect(&source_dir)?;
-    state.log_line(project, format!("[Build] Auto-detected {} preset.", preset.name)).await;
-
-    // 3. Dependency install via Bun hardlink cache (target < 2s warm).
-    let t = std::time::Instant::now();
-    bun_runner::install(state, project, &source_dir, &preset).await?;
-    state.log_line(project, format!("[Build] Dependencies linked in {:.2}s.", t.elapsed().as_secs_f32())).await;
-
-    // 4. Framework compilation (Turbopack on 3nm silicon).
-    let t = std::time::Instant::now();
-    bun_runner::build(state, project, &source_dir, &preset).await?;
-    state.log_line(project, format!("[Build] {} completed in {:.2}s.", preset.build_command, t.elapsed().as_secs_f32())).await;
-
-    // 5. Validate `.mobilecloud/output` and package the immutable deployment.
-    let output_dir = source_dir.join(".mobilecloud/output");
-    let t = std::time::Instant::now();
-    let deploy_id = atomic_promoter::promote(state, project, &output_dir)?;
-    state.log_line(project, format!("[Deploy] Atomic symlink swapped -> {deploy_id} ({:.0}ms).", t.elapsed().as_millis())).await;
-
-    let total = started.elapsed();
-    state.deployments.record(DeployRecord {
-        project: project.into(),
-        deploy_id: deploy_id.clone(),
-        commit: commit.into(),
-        branch: branch.into(),
-        framework: preset.name.to_string(),
-        built_at: chrono_like_now_secs(),
-        ttfb_hint_ms: None,
-        trigger_source,
-    });
-    state.log_line(project, format!("[Deploy] Deployment LIVE in {:.1}s.", total.as_secs_f32())).await;
-    Ok(())
-}
-
-/// UTC seconds without pulling chrono into the daemon.
-fn chrono_like_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-// ---------------------------------------------------------------------------
-// Health / metrics / logs / Agent deployment APIs (2026 Engine Upgrades).
-// ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize)]
-pub struct AgentDeployRequest {
-    pub project: String,
-    pub clone_url: String,
+struct AgentDeployRequest {
+    project: String,
+    clone_url: String,
     #[serde(default = "default_branch")]
-    pub branch: String,
-    #[serde(default)]
-    pub commit: Option<String>,
-    #[serde(default = "default_agent_id")]
-    pub agent_id: String,
+    branch: String,
+    commit: Option<String>,
+    agent_id: Option<String>,
 }
 
 fn default_branch() -> String {
     "main".into()
 }
 
-fn default_agent_id() -> String {
-    "agent:generic".into()
+fn parse_json<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, Response> {
+    body.map(|Json(payload)| payload)
+        .map_err(|e| (e.status(), "invalid JSON request").into_response())
 }
 
-/// Agent-triggered autonomous deployment endpoint (supporting Cursor, Claude Code,
-/// Copilot Workspace, v0, Devin, and custom autonomous agents).
 async fn agent_deploy(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(payload): Json<AgentDeployRequest>,
+    body: Result<Json<AgentDeployRequest>, JsonRejection>,
 ) -> Response {
-    if !state.webhook_secret.is_empty() {
-        let auth_header = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default();
-        let expected_token = String::from_utf8_lossy(&state.webhook_secret);
-        let matches_bearer = auth_header.strip_prefix("Bearer ").map(|t| t == expected_token).unwrap_or(false);
-        let matches_direct = auth_header == expected_token;
-        if !matches_bearer && !matches_direct {
-            let api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or_default();
-            if api_key != expected_token {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({
-                        "error": "unauthorized agent deployment: invalid token"
-                    })),
-                ).into_response();
-            }
-        }
+    if !state.preview_enabled() {
+        return preview_disabled();
     }
-
-    if payload.project.is_empty() || payload.clone_url.is_empty() {
+    let payload = match parse_json(body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    let configured = match project_config(&state, &payload.project) {
+        Ok(config) => config,
+        Err(response) => return response,
+    };
+    // Never fetch a URL supplied by a request, even if the caller is an operator.
+    let canonical = configured.clone_url();
+    if (payload.clone_url != canonical
+        && Some(payload.clone_url.as_str()) != canonical.strip_suffix(".git"))
+        || payload.branch != configured.branch
+    {
         return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "missing required fields: project and clone_url"
-            })),
-        ).into_response();
+            StatusCode::FORBIDDEN,
+            "repository/ref is not configured for local preview",
+        )
+            .into_response();
     }
-
-    let project = payload.project.replace('/', "-");
-    let branch = payload.branch;
-    let commit = payload.commit.unwrap_or_default();
-    let agent_id = payload.agent_id;
+    if payload
+        .commit
+        .as_deref()
+        .is_some_and(|id| !git_cloner::valid_commit(id))
+    {
+        return (StatusCode::BAD_REQUEST, "invalid commit").into_response();
+    }
+    let agent_id = payload.agent_id.as_deref().unwrap_or("generic");
+    if agent_id.is_empty()
+        || agent_id.len() > 64
+        || !agent_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
+    {
+        return (StatusCode::BAD_REQUEST, "invalid agent ID").into_response();
+    }
     let trigger = format!("agent:{agent_id}");
-
-    state.builds_total.fetch_add(1, Ordering::Relaxed);
-    state.agent_builds_total.fetch_add(1, Ordering::Relaxed);
-
-    let state2 = state.clone();
-    let project_clone = project.clone();
-    let clone_url = payload.clone_url;
-    let branch_clone = branch.clone();
-    let commit_clone = commit.clone();
-    let trigger_clone = trigger.clone();
-
-    tokio::spawn(async move {
-        state2.log_line(&project_clone, format!("[Agent] Autonomous build triggered by {trigger_clone}")).await;
-        if let Err(e) = run_build_pipeline(&state2, &project_clone, &clone_url, &branch_clone, &commit_clone, Some(trigger_clone)).await {
-            error!("agent build pipeline failed for {project_clone}: {e:#}");
-            state2.log_line(&project_clone, format!("[Deploy] FAILED: {e:#}")).await;
-        }
-    });
-
+    let project = payload.project;
+    if let Err(response) = queue_build(
+        state,
+        project.clone(),
+        payload.commit,
+        trigger.clone(),
+        true,
+    ) {
+        return response;
+    }
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({
-            "status": "queued",
-            "project": project,
-            "branch": branch,
-            "trigger": trigger,
-            "logs_url": format!("/logs/{project}"),
-            "message": format!("agent deployment initiated by {agent_id} on {project}@{branch}")
+            "status": "queued", "project": project, "branch": payload.branch,
+            "trigger": trigger, "logs_url": format!("/logs/{project}"),
+            "message": "trusted preview build queued"
         })),
-    ).into_response()
+    )
+        .into_response()
+}
+
+fn queue_build(
+    state: Arc<AppState>,
+    project: String,
+    commit: Option<String>,
+    trigger: String,
+    agent: bool,
+) -> Result<(), Response> {
+    let permit = state.build_slot.clone().try_acquire_owned().map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "preview builder busy; retry later",
+        )
+            .into_response()
+    })?;
+    state.builds_total.fetch_add(1, Ordering::Relaxed);
+    if agent {
+        state.agent_builds_total.fetch_add(1, Ordering::Relaxed);
+    }
+    tokio::spawn(async move {
+        let _permit = permit;
+        if let Err(e) = run_build_pipeline(&state, &project, commit, trigger).await {
+            warn!(%project, "trusted preview build failed");
+            state.log_line(&project, format!("[Deploy] FAILED: {e:#}"));
+        }
+    });
+    Ok(())
+}
+
+async fn run_build_pipeline(
+    state: &Arc<AppState>,
+    project: &str,
+    expected: Option<String>,
+    trigger: String,
+) -> anyhow::Result<()> {
+    let config = &state.projects[project];
+    let branch = config.branch.clone();
+    let fetch_branch = branch.clone();
+    let url = config.clone_url();
+    let home = state.home.clone();
+    let (checkout, commit) = tokio::task::spawn_blocking(move || {
+        git_cloner::shallow_fetch(&home, &url, &fetch_branch, expected.as_deref())
+    })
+    .await??;
+    let source_dir = checkout.path();
+    let preset = framework_detector::detect(source_dir)?;
+    anyhow::ensure!(
+        preset.runtime == framework_detector::RuntimeKind::Static,
+        "unsupported preview target: only static builds are supported"
+    );
+    state.log_line(project, format!("[Build] {} ({commit})", preset.name));
+    bun_runner::install(state, project, source_dir, &preset).await?;
+    bun_runner::build(state, project, source_dir, &preset).await?;
+
+    let state_for_promote = state.clone();
+    let record = DeployRecord {
+        project: project.into(),
+        deploy_id: String::new(),
+        commit,
+        branch,
+        framework: preset.name.into(),
+        built_at: now_secs(),
+        ttfb_hint_ms: None,
+        trigger_source: Some(trigger),
+    };
+    let id = tokio::task::spawn_blocking(move || {
+        atomic_promoter::promote(
+            &state_for_promote.deployments,
+            record,
+            &checkout,
+            preset.output_dir,
+        )
+    })
+    .await??;
+    state.log_line(project, format!("[Deploy] Static preview active: {id}"));
+    Ok(())
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn project_config<'a>(state: &'a AppState, project: &str) -> Result<&'a PreviewProject, Response> {
+    if !builder::valid_project(project) {
+        return Err((StatusCode::BAD_REQUEST, "invalid project identifier").into_response());
+    }
+    state
+        .projects
+        .get(project)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "unknown preview project").into_response())
 }
 
 #[derive(serde::Deserialize)]
-pub struct RollbackRequest {
-    pub project: String,
-    pub deploy_id: String,
+struct RollbackRequest {
+    project: String,
+    deploy_id: String,
 }
 
-/// Instant atomic symlink rollback (< 15 ms).
 async fn rollback_deployment(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<RollbackRequest>,
+    body: Result<Json<RollbackRequest>, JsonRejection>,
 ) -> Response {
-    let project = payload.project.replace('/', "-");
-    let deploy_id = payload.deploy_id;
-
-    match atomic_promoter::rollback(&state, &project, &deploy_id) {
-        Ok(record) => {
-            state.log_line(&project, format!("[Rollback] Atomic rollback to {deploy_id} complete (< 15 ms)")).await;
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "success",
-                    "project": project,
-                    "active_deploy_id": deploy_id,
-                    "record": record
-                })),
-            ).into_response()
+    let RollbackRequest { project, deploy_id } = match parse_json(body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    if let Err(response) = project_config(&state, &project) {
+        return response;
+    }
+    if !builder::valid_deploy_id(&deploy_id) {
+        return (StatusCode::BAD_REQUEST, "invalid deployment identifier").into_response();
+    }
+    let store_state = state.clone();
+    let p = project.clone();
+    let id = deploy_id.clone();
+    match tokio::task::spawn_blocking(move || store_state.deployments.rollback(&p, &id)).await {
+        Ok(Ok(Some(record))) => {
+            state.log_line(
+                &project,
+                format!("[Rollback] Active deployment: {deploy_id}"),
+            );
+            Json(serde_json::json!({"status": "success", "project": project, "active_deploy_id": deploy_id, "record": record})).into_response()
         }
-        Err(e) => {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": format!("rollback failed: {e}")
-                })),
-            ).into_response()
-        }
+        Ok(Ok(None)) => (
+            StatusCode::NOT_FOUND,
+            "deployment artifact not found in this project",
+        )
+            .into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "rollback could not be completed",
+        )
+            .into_response(),
     }
 }
 
 #[derive(serde::Deserialize)]
-pub struct CacheRevalidateRequest {
-    pub project: String,
-    #[serde(default)]
-    pub tag: Option<String>,
-    #[serde(default)]
-    pub path: Option<String>,
+struct CacheRevalidateRequest {
+    project: String,
 }
 
-/// Tag-based and path-based distributed cache revalidation endpoint.
 async fn cache_revalidate(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<CacheRevalidateRequest>,
+    body: Result<Json<CacheRevalidateRequest>, JsonRejection>,
 ) -> Response {
-    let project = payload.project.replace('/', "-");
-    state.cache_revalidations_total.fetch_add(1, Ordering::Relaxed);
-
-    let mut details = Vec::new();
-    if let Some(tag) = &payload.tag {
-        details.push(format!("tag '{tag}'"));
+    let payload = match parse_json(body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    if let Err(response) = project_config(&state, &payload.project) {
+        return response;
     }
-    if let Some(path) = &payload.path {
-        details.push(format!("path '{path}'"));
-    }
-    let detail_str = if details.is_empty() { "all cache".into() } else { details.join(", ") };
-
-    state.log_line(&project, format!("[Cache] Revalidation dispatched for {detail_str}")).await;
-
     (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "revalidated",
-            "project": project,
-            "tag": payload.tag,
-            "path": payload.path,
-            "revalidated_at": chrono_like_now_secs(),
-            "propagation_ms": 12
-        })),
-    ).into_response()
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({"error": "cache revalidation is not supported"})),
+    )
+        .into_response()
 }
 
-/// Historical deployments query for a project.
 async fn get_project_deployments(
     State(state): State<Arc<AppState>>,
     Path(project): Path<String>,
-) -> impl IntoResponse {
-    let history = state.deployments.history(&project);
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "project": project,
-            "total": history.len(),
-            "deployments": history
-        })),
-    )
+) -> Response {
+    if let Err(response) = project_config(&state, &project) {
+        return response;
+    }
+    let p = project.clone();
+    match tokio::task::spawn_blocking(move || state.deployments.read(&p)).await {
+        Ok(Ok(snapshot)) => Json(serde_json::json!({
+            "project": project, "total": snapshot.history.len(),
+            "active_deploy_id": snapshot.active, "deployments": snapshot.history
+        }))
+        .into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "deployment history unavailable",
+        )
+            .into_response(),
+    }
 }
 
-async fn healthz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let live_count = state.deployments.live_count();
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "ok",
-            "deployments": live_count,
-            "requests_total": state.requests_total.load(Ordering::Relaxed),
-            "builds_total": state.builds_total.load(Ordering::Relaxed),
-            "agent_builds_total": state.agent_builds_total.load(Ordering::Relaxed),
-            "cache_revalidations_total": state.cache_revalidations_total.load(Ordering::Relaxed),
-        })),
-    )
+async fn healthz() -> impl IntoResponse {
+    Json(serde_json::json!({"status": "ok"}))
 }
 
 async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // SoC thermal zones per the thermal governor (research report §5.3).
-    let soc_temp = read_soc_temp_celsius();
     let body = format!(
-        "# TYPE mobilecloud_soc_temp_celsius gauge\nmobilecloud_soc_temp_celsius {soc_temp}\n\
-         # TYPE mobilecloud_requests_total counter\nmobilecloud_requests_total {}\n\
+        "# TYPE mobilecloud_requests_total counter\nmobilecloud_requests_total {}\n\
          # TYPE mobilecloud_builds_total counter\nmobilecloud_builds_total {}\n\
-         # TYPE mobilecloud_agent_builds_total counter\nmobilecloud_agent_builds_total {}\n\
-         # TYPE mobilecloud_cache_revalidations_total counter\nmobilecloud_cache_revalidations_total {}\n\
-         # TYPE mobilecloud_live_deployments gauge\nmobilecloud_live_deployments {}\n",
+         # TYPE mobilecloud_agent_builds_total counter\nmobilecloud_agent_builds_total {}\n",
         state.requests_total.load(Ordering::Relaxed),
         state.builds_total.load(Ordering::Relaxed),
         state.agent_builds_total.load(Ordering::Relaxed),
-        state.cache_revalidations_total.load(Ordering::Relaxed),
-        state.deployments.live_count(),
     );
-    (
-        StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; version=0.0.4"),
-        )],
-        body,
-    )
-}
-
-/// `/sys/class/thermal/thermal_zone*/temp` — milliscale Celsius on Android.
-fn read_soc_temp_celsius() -> f32 {
-    let mut best: Option<u32> = None;
-    if let Ok(entries) = std::fs::read_dir("/sys/class/thermal") {
-        for entry in entries.flatten() {
-            let p = entry.path().join("temp");
-            if let Ok(raw) = std::fs::read_to_string(&p) {
-                if let Ok(milli) = raw.trim().parse::<u32>() {
-                    best = Some(match best {
-                        Some(b) => b.max(milli),
-                        None => milli,
-                    });
-                }
-            }
-        }
-    }
-    best.map(|m| m as f32 / 1000.0).unwrap_or(0.0)
+    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
 }
 
 async fn build_logs_sse(
     State(state): State<Arc<AppState>>,
     Path(project): Path<String>,
-) -> Sse<impl Stream<Item = Result<Event, anyhow::Error>>> {
-    let rx = {
-        let mut hub = state.log_hub.write().await;
-        hub.entry(project.clone())
-            .or_insert_with(|| broadcast::channel(256).0)
-            .subscribe()
-    };
-    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|item| {
-        match item {
-            Ok(line) => std::future::ready(Some(Ok(Event::default().data(line)))),
-            Err(_) => std::future::ready(None),
-        }
-    });
-    Sse::new(stream).keep_alive(KeepAlive::default())
+) -> Response {
+    if let Err(response) = project_config(&state, &project) {
+        return response;
+    }
+    let stream = tokio_stream::wrappers::BroadcastStream::new(state.logs[&project].subscribe())
+        .map(|item| {
+            Ok::<_, std::convert::Infallible>(match item {
+                Ok(line) => Event::default().data(line),
+                Err(_) => Event::default().data("[Logs] Some lines were dropped"),
+            })
+        });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
-use futures_util::StreamExt;
-
-// ---------------------------------------------------------------------------
-// Entrypoint.
-// ---------------------------------------------------------------------------
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,mobilecloud_core=debug".into()),
-        )
-        .init();
-
-    let home = std::env::var("MOBILECLOUD_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/var/mobilecloud"));
-    // On Android the secret is provisioned by CloudSupervisorService from the
-    // StrongBox Keystore; in development it is provided via env.
-    let webhook_secret = std::env::var("MOBILECLOUD_WEBHOOK_SECRET")
-        .unwrap_or_else(|_| {
-            warn!("MOBILECLOUD_WEBHOOK_SECRET unset — webhook verification will fail");
-            String::new()
-        })
-        .into_bytes();
-
-    let state = Arc::new(AppState::new(home.clone(), webhook_secret));
-    info!("MobileCloud core supervisor starting; home = {}", home.display());
-
-    // Terminal subsystem: PTY supervisor + WebSocket gateway + SSH daemon.
-    terminal_gateway::start_ssh_server(state.clone()).await;
-
-    let app = Router::new()
-        .route("/webhook/github", post(github_webhook))
+fn operator_router(state: Arc<AppState>) -> Router {
+    let protected = Router::new()
         .route("/api/v1/deploy/agent", post(agent_deploy))
         .route("/api/v1/deploy/rollback", post(rollback_deployment))
         .route("/api/v1/cache/revalidate", post(cache_revalidate))
         .route("/api/v1/deployments/:project", get(get_project_deployments))
-        .route("/healthz", get(healthz))
         .route("/metrics", get(metrics))
         .route("/logs/:project", get(build_logs_sse))
+        .route_layer(middleware::from_fn_with_state(state.clone(), operator_auth));
+    Router::new()
+        .merge(protected)
+        .route(
+            "/webhook/github",
+            post(github_webhook).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route("/healthz", get(healthz))
         .merge(terminal_gateway::ws_router())
-        .fallback(proxy_handler)
-        .with_state(state.clone());
+        .layer(DefaultBodyLimit::max(16 * 1024))
+        .with_state(state)
+}
 
-    let bind = std::env::var("MOBILECLOUD_BIND").unwrap_or_else(|_| "127.0.0.1:3000".into());
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
-    info!("listening on http://{bind} (tunnel-facing ingress → localhost only)");
+fn deployment_router(state: Arc<AppState>) -> Router {
+    Router::new().fallback(proxy_handler).with_state(state)
+}
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+fn loopback_bind(name: &str, default: &str) -> anyhow::Result<SocketAddr> {
+    let bind: SocketAddr = std::env::var(name)
+        .unwrap_or_else(|_| default.into())
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{name} must be a numeric loopback socket address"))?;
+    anyhow::ensure!(bind.ip().is_loopback(), "{name} must bind to loopback");
+    Ok(bind)
+}
+
+fn main() -> anyhow::Result<()> {
+    // SAFETY: these libgit2 process-wide limits are set at entry, before any
+    // worker threads or concurrent libgit2 operations exist.
+    unsafe {
+        git2::opts::set_server_connect_timeout_in_milliseconds(10_000)?;
+        git2::opts::set_server_timeout_in_milliseconds(30_000)?;
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+    let home = std::env::var("MOBILECLOUD_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/var/mobilecloud"));
+    let projects = match std::env::var("MOBILECLOUD_PREVIEW_PROJECTS") {
+        Ok(raw) => serde_json::from_str(&raw)
+            .map_err(|_| anyhow::anyhow!("invalid MOBILECLOUD_PREVIEW_PROJECTS JSON"))?,
+        Err(std::env::VarError::NotPresent) => HashMap::new(),
+        Err(_) => anyhow::bail!("invalid MOBILECLOUD_PREVIEW_PROJECTS encoding"),
+    };
+    let mut state = AppState::new(home, projects)?;
+    state.trusted_preview = env_flag("MOBILECLOUD_TRUSTED_LOCAL_PREVIEW");
+    state.operator_token = credential("MOBILECLOUD_OPERATOR_TOKEN");
+    state.webhook_secret = credential("MOBILECLOUD_WEBHOOK_SECRET");
+    let terminal_token = credential("MOBILECLOUD_TERMINAL_TOKEN");
+    let dashboard_token = credential("MOBILECLOUD_BUILDER_TOKEN");
+    let secrets = [
+        &state.operator_token,
+        &state.webhook_secret,
+        &terminal_token,
+        &dashboard_token,
+    ];
+    for (index, secret) in secrets.iter().enumerate() {
+        anyhow::ensure!(
+            secret.is_empty() || !secrets[..index].contains(secret),
+            "engine credentials must be distinct"
+        );
+    }
+    if env_flag("MOBILECLOUD_ENABLE_LOCAL_TERMINAL") {
+        state.terminal_token = terminal_token;
+    }
+    if state.preview_enabled() {
+        warn!("trusted local preview enabled: builds run as the engine user, with no sandbox or tenant isolation");
+    }
+    let state = Arc::new(state);
+    let control =
+        tokio::net::TcpListener::bind(loopback_bind("MOBILECLOUD_BIND", "127.0.0.1:3000")?).await?;
+    let deploy =
+        tokio::net::TcpListener::bind(loopback_bind("MOBILECLOUD_DEPLOY_BIND", "127.0.0.1:3001")?)
+            .await?;
+    info!(operator = %control.local_addr()?, deployments = %deploy.local_addr()?, "engine listening on loopback");
+    if env_flag("MOBILECLOUD_ENABLE_LOCAL_SSH") {
+        terminal_gateway::start_ssh_server(state.clone()).await;
+    }
+    let (shutdown, _) = tokio::sync::watch::channel(false);
+    let mut control_shutdown = shutdown.subscribe();
+    let mut deploy_shutdown = shutdown.subscribe();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown.send(true);
+    });
+    tokio::try_join!(
+        axum::serve(control, operator_router(state.clone())).with_graceful_shutdown(async move {
+            let _ = control_shutdown.changed().await;
+        }),
+        axum::serve(deploy, deployment_router(state)).with_graceful_shutdown(async move {
+            let _ = deploy_shutdown.changed().await;
+        }),
+    )?;
     Ok(())
 }
 
-/// Catch-all ingress handler: every non-platform route resolves through the
-/// Open Build Output API v3 router against the host's live deployment.
-async fn proxy_handler(
-    State(state): State<Arc<AppState>>,
-    request: Request<axum::body::Body>,
-) -> Response {
+fn deployment_path(path: &str) -> bool {
+    // Normalize separators and percent escapes for this deny check only. The
+    // deployment router never merges or forwards to the operator router.
+    let mut decoded = Vec::with_capacity(path.len());
+    let mut bytes = path.as_bytes().iter().copied();
+    while let Some(byte) = bytes.next() {
+        let byte = if byte == b'%' {
+            let (Some(a), Some(b)) = (bytes.next(), bytes.next()) else {
+                return false;
+            };
+            let Ok([byte]) = <[u8; 1]>::try_from(hex::decode([a, b]).unwrap_or_default()) else {
+                return false;
+            };
+            byte
+        } else {
+            byte
+        };
+        if byte.is_ascii_control() || byte == b'%' {
+            return false;
+        }
+        decoded.push(byte.to_ascii_lowercase());
+    }
+    let mut parts = decoded
+        .split(|b| *b == b'/' || *b == b'\\')
+        .filter(|part| !part.is_empty());
+    if !decoded.starts_with(b"/") || parts.clone().any(|p| p == b"." || p == b"..") {
+        return false;
+    }
+    match parts.next() {
+        Some(b"api") => parts.next() != Some(b"v1"),
+        Some(b"webhook" | b"terminal" | b"logs" | b"healthz" | b"metrics") => false,
+        _ => true,
+    }
+}
+
+async fn proxy_handler(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    if !deployment_path(request.uri().path()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     state.requests_total.fetch_add(1, Ordering::Relaxed);
     let host = request
         .headers()
         .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-
-    let Some(project) = state.project_for_host(&host).await else {
-        return (StatusCode::NOT_FOUND, "unknown host").into_response();
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<Authority>().ok());
+    let Some((project, _)) = host.as_ref().and_then(|host| {
+        state.projects.iter().find(|(_, p)| {
+            p.host
+                .as_deref()
+                .is_some_and(|configured| configured.eq_ignore_ascii_case(host.host()))
+        })
+    }) else {
+        return (StatusCode::NOT_FOUND, "unknown deployment host").into_response();
     };
-
-    match proxy::router::route_request(&state, &project, request).await {
+    let Ok(permit) = state.deployment_slots.clone().try_acquire_owned() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "deployment listener busy").into_response();
+    };
+    match proxy::router::route_request(&state, project, request, permit).await {
         Ok(response) => response,
         Err(proxy::router::RouterError::NoDeployment) => {
             (StatusCode::SERVICE_UNAVAILABLE, "no live deployment").into_response()
         }
         Err(e) => {
-            error!("router error for {host}: {e:?}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "router failure").into_response()
+            error!(%project, error = %e, "deployment routing failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "deployment routing failed",
+            )
+                .into_response()
         }
     }
 }
@@ -646,61 +798,314 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let terminate = async {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut sig) => {
-                sig.recv().await;
+            Ok(mut signal) => {
+                signal.recv().await;
             }
             Err(_) => std::future::pending::<()>().await,
         }
     };
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
+    tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
     info!("shutdown signal received; draining connections");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[tokio::test]
-    async fn test_app_state_metrics_initialization() {
-        let tmp = tempdir().unwrap();
-        let state = Arc::new(AppState::new(tmp.path().to_path_buf(), vec![]));
-        assert_eq!(state.agent_builds_total.load(Ordering::Relaxed), 0);
-        assert_eq!(state.cache_revalidations_total.load(Ordering::Relaxed), 0);
-        assert_eq!(state.requests_total.load(Ordering::Relaxed), 0);
+    const AGENT_PATH: &str = "/api/v1/deploy/agent";
+    const AGENT_BODY: &str =
+        r#"{"project":"demo","clone_url":"https://github.com/example/demo.git"}"#;
+    const AUTH: &str = "Authorization: Bearer operator-test\r\n";
+
+    fn test_state(dir: &std::path::Path) -> AppState {
+        let mut state = AppState::new(
+            dir.to_owned(),
+            HashMap::from([(
+                "demo".into(),
+                PreviewProject {
+                    repository: "example/demo".into(),
+                    branch: "main".into(),
+                    host: Some("demo.example.test".into()),
+                },
+            )]),
+        )
+        .unwrap();
+        state.operator_token = b"operator-test".to_vec();
+        state.webhook_secret = b"webhook-test".to_vec();
+        state
+    }
+
+    async fn request(
+        router: Router,
+        method: &str,
+        path: &str,
+        extra_headers: &str,
+        body: &str,
+    ) -> (u16, String) {
+        request_host(
+            router,
+            method,
+            path,
+            "demo.example.test",
+            extra_headers,
+            body,
+        )
+        .await
+    }
+
+    async fn request_host(
+        router: Router,
+        method: &str,
+        path: &str,
+        host: &str,
+        extra_headers: &str,
+        body: &str,
+    ) -> (u16, String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let raw = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra_headers}\r\n{body}", body.len());
+        socket.write_all(raw.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            socket.read_to_end(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        server.abort();
+        let response = String::from_utf8(response).unwrap();
+        (
+            response.split_whitespace().nth(1).unwrap().parse().unwrap(),
+            response,
+        )
     }
 
     #[tokio::test]
-    async fn test_cache_revalidation_updates_counter() {
-        let tmp = tempdir().unwrap();
-        let state = Arc::new(AppState::new(tmp.path().to_path_buf(), vec![]));
-        let req = CacheRevalidateRequest {
-            project: "demo-app".into(),
-            tag: Some("products".into()),
-            path: None,
-        };
-        let response = cache_revalidate(State(state.clone()), Json(req)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(state.cache_revalidations_total.load(Ordering::Relaxed), 1);
+    async fn private_operator_routes_authenticate_before_reading_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_state(dir.path()));
+        let router = operator_router(state);
+        for (method, path) in [
+            ("POST", AGENT_PATH),
+            ("POST", "/api/v1/deploy/rollback"),
+            ("POST", "/api/v1/cache/revalidate"),
+            ("GET", "/logs/demo"),
+            ("GET", "/api/v1/deployments/demo"),
+            ("GET", "/metrics"),
+        ] {
+            let (status, _) = request(router.clone(), method, path, "", "").await;
+            assert_eq!(status, 401, "{method} {path}");
+        }
+        assert_eq!(
+            request(
+                router.clone(),
+                "GET",
+                "/api/v1/deployments/demo",
+                "Authorization: Bearer webhook-test\r\n",
+                ""
+            )
+            .await
+            .0,
+            401
+        );
+        assert_eq!(
+            request(
+                router.clone(),
+                "GET",
+                "/api/v1/deployments/demo",
+                &format!("{AUTH}Origin: https://example.test\r\n"),
+                ""
+            )
+            .await
+            .0,
+            401
+        );
+        let (status, response) =
+            request(router.clone(), "GET", "/api/v1/deployments/demo", AUTH, "").await;
+        assert_eq!(status, 200);
+        assert!(response.contains("cache-control: no-store"));
+        assert_eq!(
+            request(
+                router.clone(),
+                "GET",
+                "/api/v1/deployments/unknown",
+                AUTH,
+                ""
+            )
+            .await
+            .0,
+            404
+        );
+        assert_eq!(
+            request(
+                router.clone(),
+                "POST",
+                "/api/v1/deploy/rollback",
+                AUTH,
+                r#"{"project":"demo","deploy_id":"invalid"}"#
+            )
+            .await
+            .0,
+            400
+        );
+        assert_eq!(
+            request(
+                router,
+                "POST",
+                "/api/v1/cache/revalidate",
+                AUTH,
+                r#"{"project":"demo","tag":"test"}"#
+            )
+            .await
+            .0,
+            501
+        );
     }
 
     #[tokio::test]
-    async fn test_agent_deploy_payload_validation() {
-        let tmp = tempdir().unwrap();
-        let state = Arc::new(AppState::new(tmp.path().to_path_buf(), vec![]));
-        let bad_req = AgentDeployRequest {
-            project: "".into(),
-            clone_url: "".into(),
-            branch: "main".into(),
-            commit: None,
-            agent_id: "cursor".into(),
-        };
-        let response = agent_deploy(State(state), HeaderMap::new(), Json(bad_req)).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    async fn builds_require_opt_in_and_match_the_local_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        let after = "0123456789abcdef0123456789abcdef01234567";
+        let push = format!(
+            r#"{{"repository":{{"full_name":"example/demo"}},"ref":"refs/heads/main","after":"{after}"}}"#
+        );
+        let mut mac = HmacSha256::new_from_slice(&state.webhook_secret).unwrap();
+        mac.update(push.as_bytes());
+        let signed = format!(
+            "X-GitHub-Event: push\r\nX-Hub-Signature-256: sha256={}\r\n",
+            hex::encode(mac.finalize().into_bytes())
+        );
+        let router = operator_router(Arc::new(test_state(dir.path())));
+        assert_eq!(
+            request(router.clone(), "POST", AGENT_PATH, AUTH, AGENT_BODY)
+                .await
+                .0,
+            503
+        );
+        assert_eq!(
+            request(router, "POST", "/webhook/github", &signed, &push)
+                .await
+                .0,
+            503
+        );
+
+        state.trusted_preview = true;
+        // Prove valid requests reach the queue boundary without doing a network fetch.
+        let _permit = state.build_slot.clone().try_acquire_owned().unwrap();
+        let router = operator_router(Arc::new(state));
+        assert_eq!(
+            request(router.clone(), "POST", AGENT_PATH, AUTH, AGENT_BODY)
+                .await
+                .0,
+            429
+        );
+        assert_eq!(
+            request(router.clone(), "POST", "/webhook/github", &signed, &push)
+                .await
+                .0,
+            429
+        );
+        assert_eq!(
+            request(router.clone(), "POST", "/webhook/github", "", &push)
+                .await
+                .0,
+            401
+        );
+        let (status, response) = request(
+            router,
+            "POST",
+            AGENT_PATH,
+            AUTH,
+            &AGENT_BODY.replace("example/demo", "example/other"),
+        )
+        .await;
+        assert_eq!(status, 403);
+        assert!(!response.contains("example/other"));
+    }
+
+    #[tokio::test]
+    async fn deployment_listener_serves_only_static_routes_on_configured_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_state(dir.path()));
+        let checkout = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(checkout.path().join("dist/api")).unwrap();
+        std::fs::write(checkout.path().join("dist/api/example.txt"), "public asset").unwrap();
+        atomic_promoter::promote(
+            &state.deployments,
+            DeployRecord {
+                project: "demo".into(),
+                deploy_id: String::new(),
+                commit: "commit".into(),
+                branch: "main".into(),
+                framework: "static".into(),
+                built_at: 1,
+                ttfb_hint_ms: None,
+                trigger_source: None,
+            },
+            &checkout,
+            "dist",
+        )
+        .unwrap();
+        let router = deployment_router(state.clone());
+        for path in [
+            "/logs/demo",
+            "/terminal/ws",
+            "/webhook/github",
+            "/healthz",
+            "/metrics",
+            "/api/v1/deployments/demo",
+        ] {
+            assert_eq!(
+                request(router.clone(), "GET", path, AUTH, "").await.0,
+                404,
+                "{path}"
+            );
+        }
+        assert_eq!(
+            request_host(
+                router.clone(),
+                "GET",
+                "/api/example.txt",
+                "unconfigured.example.test",
+                "",
+                ""
+            )
+            .await
+            .0,
+            404
+        );
+        let (status, response) = request(router, "GET", "/api/example.txt", "", "").await;
+        assert_eq!(status, 200);
+        assert!(response.ends_with("public asset"));
+        assert_eq!(
+            request(operator_router(state), "GET", "/api/example.txt", "", "")
+                .await
+                .0,
+            404
+        );
+    }
+
+    #[test]
+    fn identifiers_and_reserved_segments_are_canonical() {
+        assert!(builder::valid_project("operator-demo1"));
+        assert!(!builder::valid_project("demo/app"));
+        assert!(!builder::valid_project("COM1"));
+        assert!(!builder::valid_project("com1"));
+        assert!(builder::valid_deploy_id("dpl_0123456789abcdef01234567"));
+        assert!(!builder::valid_deploy_id("dpl_012345"));
+        assert!(!deployment_path("/api/v1"));
+        assert!(!deployment_path("/logs/%64emo"));
+        assert!(!deployment_path("/healthz/"));
+        assert!(deployment_path("/api/demo"));
+        assert!(deployment_path("/docs/healthz"));
     }
 }

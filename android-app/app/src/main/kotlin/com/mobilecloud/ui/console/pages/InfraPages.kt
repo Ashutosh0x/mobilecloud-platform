@@ -132,11 +132,11 @@ fun StoragePage(store: ConsoleStore) {
         CField("Contents", content, { content = it }, placeholder = "file contents")
         Spacer(Modifier.height(10.dp))
         CButton("Upload", onClick = {
-            val encoded = Base64.encodeToString(content.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+            val submittedContent = content
+            val payload = jobj("bucket" to bucket, "key" to key, "contentBase64" to Base64.encodeToString(submittedContent.toByteArray(Charsets.UTF_8), Base64.NO_WRAP))
             store.action(scope, "Object written") {
-                store.call("storage", jobj("bucket" to bucket, "key" to key, "contentBase64" to encoded))
+                store.call("storage", payload).also { if (content == submittedContent) content = "" }
             }
-            content = ""
         }, enabled = bucket.isNotBlank() && key.isNotBlank() && content.isNotBlank())
     }
 
@@ -202,7 +202,7 @@ fun FunctionsPage(store: ConsoleStore) {
     var route by remember { mutableStateOf("/api/") }
     val rows = snap.functions.filter { q.isEmpty() || "${it.name} ${it.route}".lowercase().contains(q) }
 
-    PageHead("Functions", "Names and routes are stored. Invocation is refused until handler source exists, and the counter is not incremented.")
+    PageHead("Functions", "Registration stores a name and route only. Function execution is not supported here.")
     Spacer(Modifier.height(12.dp))
     CPanel(title = "Register a function") {
         CField("Function name", name, { name = it }, placeholder = "quote")
@@ -210,9 +210,12 @@ fun FunctionsPage(store: ConsoleStore) {
         CField("Route", route, { route = it })
         Spacer(Modifier.height(10.dp))
         CButton("Register", onClick = {
-            store.action(scope, "Function registered") { store.call("functions", jobj("name" to name, "route" to route)) }
-            name = ""
-        }, enabled = name.isNotBlank() && route.isNotBlank())
+            val submittedName = name
+            val payload = jobj("name" to submittedName, "route" to route)
+            store.action(scope, "Function registered") {
+                store.call("functions", payload).also { if (name == submittedName) name = "" }
+            }
+        }, enabled = name.isNotBlank() && route.isNotBlank() && !store.busy)
     }
 
     Spacer(Modifier.height(14.dp))
@@ -221,17 +224,12 @@ fun FunctionsPage(store: ConsoleStore) {
             CEmpty("No functions registered.")
         } else {
             rows.forEach { f ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(f.name, color = Aurora.TextHi, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "${f.route} · source ${if (f.hasSource) "stored" else "missing"} · ${f.invocations} invocations",
-                            color = Aurora.TextMid, fontSize = 11.sp,
-                        )
-                    }
-                    CButton("Invoke", onClick = {
-                        store.action(scope, "Invoked") { store.call("functions/${f.id}/invoke") }
-                    }, kind = BtnKind.GHOST, compact = true)
+                Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                    Text(f.name, color = Aurora.TextHi, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "${f.route} · source ${if (f.hasSource) "stored" else "missing"} · ${f.invocations} invocations",
+                        color = Aurora.TextMid, fontSize = 11.sp,
+                    )
                 }
             }
         }
@@ -445,9 +443,15 @@ fun TeamPage(store: ConsoleStore) {
         CField("Email", email, { email = it }, placeholder = "Email")
         Spacer(Modifier.height(10.dp))
         CButton("Save invite", onClick = {
-            store.action(scope, "Invite saved. No email was sent.") { store.call("team", jobj("name" to name, "email" to email)) }
-            name = ""
-            email = ""
+            val submittedName = name
+            val submittedEmail = email
+            val payload = jobj("name" to submittedName, "email" to submittedEmail)
+            store.action(scope, "Invite saved. No email was sent.") {
+                store.call("team", payload).also {
+                    if (name == submittedName) name = ""
+                    if (email == submittedEmail) email = ""
+                }
+            }
         }, enabled = name.isNotBlank() && email.isNotBlank())
     }
 

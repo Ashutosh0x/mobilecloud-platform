@@ -58,6 +58,7 @@ export type EventEnvelope = {
   account_id: string;
   resource_id: string | null;
   sequence: number;
+  previous_sequence: number;
   occurred_at: string;
   payload: Record<string, unknown>;
 };
@@ -74,7 +75,16 @@ const RETENTION_DAYS = 30;
  * and its outbox row commit atomically: either both are visible or neither is.
  */
 export function tx<T>(db: DatabaseSync, fn: () => T): T {
-  db.exec("BEGIN IMMEDIATE");
+  return transaction(db, "BEGIN IMMEDIATE", fn);
+}
+
+/** Captures the replay watermark and its resource view from the same SQLite snapshot. */
+export function snapshot<T>(db: DatabaseSync, fn: () => T): T {
+  return transaction(db, "BEGIN", fn);
+}
+
+function transaction<T>(db: DatabaseSync, begin: "BEGIN" | "BEGIN IMMEDIATE", fn: () => T): T {
+  db.exec(begin);
   try {
     const out = fn();
     db.exec("COMMIT");
@@ -125,6 +135,7 @@ function rowToEnvelope(row: Record<string, unknown>): StoredEvent {
     account_id: String(row.owner_id),
     resource_id: row.resource_id == null ? null : String(row.resource_id),
     sequence: seq,
+    previous_sequence: Number(row.previous_seq ?? 0),
     occurred_at: new Date(at).toISOString(),
     payload,
     seq,
@@ -152,8 +163,9 @@ export function changesSince(
   limit = 500,
 ): { cursor: number; events: StoredEvent[]; more: boolean; latest: number } {
   const rows = db.prepare(
-    `SELECT seq, id, owner_id, type, resource_id, schema_version, payload, at
-     FROM events WHERE owner_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`,
+    `SELECT e.seq, e.id, e.owner_id, e.type, e.resource_id, e.schema_version, e.payload, e.at,
+       COALESCE((SELECT MAX(p.seq) FROM events p WHERE p.owner_id = e.owner_id AND p.seq < e.seq), 0) AS previous_seq
+     FROM events e WHERE e.owner_id = ? AND e.seq > ? ORDER BY e.seq ASC LIMIT ?`,
   ).all(ownerId, cursor, limit + 1) as Record<string, unknown>[];
   const more = rows.length > limit;
   const page = more ? rows.slice(0, limit) : rows;

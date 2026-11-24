@@ -190,8 +190,8 @@ pub async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
         authorized_keys,
     };
 
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", SSH_PORT)).await?;
-    tracing::info!("SSH daemon listening on 0.0.0.0:{SSH_PORT} (Ed25519 publickey only)");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", SSH_PORT)).await?;
+    tracing::info!("Local operator SSH listening on 127.0.0.1:{SSH_PORT} (Ed25519 public key only)");
     server.run_on_socket(config, &listener).await?;
     Ok(())
 }

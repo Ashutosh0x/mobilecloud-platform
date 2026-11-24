@@ -1,53 +1,27 @@
-# MobileCloud Zero-Trust Multiplexed Ingress Tunnel (config/cloudflared.yml)
-#
-# Research report section 7.1 Mode A: cloud-assisted zero-compute ingress.
-# The phone holds ZERO open ports; cloudflared establishes four redundant
-# outbound QUIC connections to the nearest Cloudflare edges over Wi-Fi or 5G,
-# and 90–95% of static asset hits are served from the edge cache without
-# waking the phone's CPU at all.
-
+# Deployment-only tunnel. Operator APIs and terminal must stay off the tunnel.
 tunnel: mobilecloud-edge-01
 credentials-file: /var/mobilecloud/state/cloudflared/tunnel.json
 origincert: /var/mobilecloud/state/cloudflared/cert.pem
 
-# Four edge connections for path redundancy across Wi-Fi <-> 5G transitions.
-# QUIC transport survives IP changes via connection migration.
 protocol: quic
-edge-ip-version: 4
+edge-ip-version: "4"
 retries: 5
-# Reconnect windows sized for mobile radio wake-ups (Doze-friendly).
 grace-period: 30s
 udp-payload-size: 1400
 
 ingress:
-  # Web CloudShell (WSS) — full-duplex terminal over the PTY gateway.
+  # Must precede the wildcard: the former CloudShell host has no public origin.
   - hostname: admin.phone.mobilecloud.live
-    service: http://localhost:8080
-    originRequest:
-      noTLSVerify: true          # TLS terminates at the edge; hop is loopback
-      connectTimeout: 5s
-      keepAliveConnections: 8
-      keepAliveTimeout: 90s
-      disableChunkedEncoding: false  # SSE build logs need chunked streaming
+    service: http_status:404
 
-  # Production deployments (host-based routing inside the core-engine router).
+  # The engine serves only explicitly configured exact deployment hosts.
   - hostname: "*.phone.mobilecloud.live"
-    service: http://localhost:8080
+    service: http://127.0.0.1:8080
     originRequest:
-      noTLSVerify: true
       connectTimeout: 5s
       keepAliveConnections: 16
 
-  # Custom domains bound in NetworkingScreen.
   - hostname: store.mydomain.com
-    service: http://localhost:8080
-    originRequest:
-      noTLSVerify: true
-
-  # Preview URLs (dpl-<hash>.phone.mobilecloud.live) share the wildcard rule.
+    service: http://127.0.0.1:8080
 
   - service: http_status:404
-
-# Edge caching offload: static asset paths are cached aggressively at the
-# Cloudflare edge (configured in the Cloudflare dashboard zone — Page Rule
-# `*phone.mobilecloud.live/_next/static/*` → Cache Everything, Edge TTL 1y).

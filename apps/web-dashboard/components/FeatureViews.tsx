@@ -1,6 +1,7 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import type { Deployment } from "@/lib/types";
 import { formatBytes } from "@/lib/format";
 import { useCloud } from "@/lib/store";
 import { ClientTime, Duration } from "./Time";
@@ -24,6 +25,8 @@ async function run(action: () => Promise<unknown>, setToast: (m: string | null) 
 export function ProjectsView() {
   const { state, call, setToast } = useCloud();
   const [name, setName] = useState("");
+  const [repoUrl, setRepoUrl] = useState("");
+  const [saving, setSaving] = useState(false);
   const [framework, setFramework] = useState("Next.js");
   const [drop, setDrop] = useState<string | null>(null);
   const rows = useFiltered(state.projects, (p) => `${p.name} ${p.framework}`);
@@ -37,14 +40,21 @@ export function ProjectsView() {
         </div>
         <form className="form-row" onSubmit={(e) => {
           e.preventDefault();
-          run(() => call("projects", { method: "POST", body: JSON.stringify({ name, framework }) }), setToast, "Project saved");
-          setName("");
+          if (saving) return;
+          setSaving(true);
+          void run(async () => {
+            const result = await call("projects", { method: "POST", body: JSON.stringify({ name, framework, repoUrl }) });
+            setName((value) => value === name ? "" : value);
+            setRepoUrl((value) => value === repoUrl ? "" : value);
+            return result;
+          }, setToast, "Project saved").finally(() => setSaving(false));
         }}>
           <input aria-label="Project name" placeholder="project-name" value={name} onChange={(e) => setName(e.target.value)} required />
           <select aria-label="Framework" value={framework} onChange={(e) => setFramework(e.target.value)}>
             {["Next.js", "Vite", "Astro", "Nuxt", "Remix", "React"].map((f) => <option key={f}>{f}</option>)}
           </select>
-          <button className="primary" type="submit">Create</button>
+          <input aria-label="HTTPS repository URL (optional)" type="url" placeholder="HTTPS repository URL (optional)" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} />
+          <button className="primary" type="submit" disabled={saving}>{saving ? "Saving…" : "Create"}</button>
         </form>
       </header>
       <div className="cards">
@@ -56,7 +66,7 @@ export function ProjectsView() {
               <div className="sub">{p.framework} · {p.target}</div>
               <p className="sub">{last ? `${last.status} · ${last.note}` : "No deployment recorded"}</p>
               <div className="form-row">
-                <button className="primary" type="button" onClick={() => run(() => call("deployments", { method: "POST", body: JSON.stringify({ projectId: p.id }) }), setToast, "Recorded")}>Request deploy</button>
+                <button className="primary" type="button" disabled={!p.repoUrl} onClick={() => run(() => call("deployments", { method: "POST", body: JSON.stringify({ projectId: p.id }) }), setToast, "Deployment request recorded")}>Request deploy</button>
                 <button className="danger" type="button" onClick={() => setDrop(p.id)}>Delete</button>
               </div>
             </article>
@@ -81,6 +91,7 @@ export function ProjectsView() {
 export function DeploymentsView() {
   const { state } = useCloud();
   const [status, setStatus] = useState("All");
+  const badges: Record<Deployment["status"], string> = { blocked: "warn", failed: "error", queued: "building", rolled_back: "info" };
   const rows = useFiltered(state.deployments, (d) => `${d.project} ${d.status} ${d.note}`).filter((d) => status === "All" || d.status === status);
   return (
     <>
@@ -90,7 +101,7 @@ export function DeploymentsView() {
           <p>A request is stored as blocked unless a build runner accepts it. Nothing is marked ready from a timer.</p>
         </div>
         <select aria-label="Status" value={status} onChange={(e) => setStatus(e.target.value)}>
-          {["All", "blocked", "failed"].map((s) => <option key={s}>{s}</option>)}
+          {["All", ...Object.keys(badges)].map((s) => <option key={s}>{s}</option>)}
         </select>
       </header>
       <article className="panel">
@@ -100,7 +111,7 @@ export function DeploymentsView() {
             {rows.map((d) => (
               <tr key={d.id}>
                 <td>{d.project}</td>
-                <td className="badge warn">{d.status}</td>
+                <td><span className={`badge ${badges[d.status] ?? "warn"}`}>{d.status}</span></td>
                 <td><ClientTime ts={d.createdAt} /></td>
                 <td>{d.note}</td>
               </tr>
@@ -116,7 +127,9 @@ export function DeploymentsView() {
 export function DomainsView() {
   const { state, call, setToast } = useCloud();
   const [host, setHost] = useState("");
-  const [project, setProject] = useState(state.projects[0]?.name ?? "");
+  const [selectedProject, setProject] = useState("");
+  const [saving, setSaving] = useState(false);
+  const project = state.projects.find((item) => item.name === selectedProject)?.name ?? state.projects[0]?.name ?? "";
   const [drop, setDrop] = useState<string | null>(null);
   const rows = useFiltered(state.domains, (d) => `${d.host} ${d.project}`);
   return (
@@ -128,14 +141,19 @@ export function DomainsView() {
         </div>
         <form className="form-row" onSubmit={(e) => {
           e.preventDefault();
-          run(() => call("domains", { method: "POST", body: JSON.stringify({ host, project }) }), setToast, "Hostname recorded");
-          setHost("");
+          if (!project || saving) return;
+          setSaving(true);
+          void run(async () => {
+            const result = await call("domains", { method: "POST", body: JSON.stringify({ host, project }) });
+            setHost((value) => value === host ? "" : value);
+            return result;
+          }, setToast, "Hostname recorded").finally(() => setSaving(false));
         }}>
           <input aria-label="Hostname" placeholder="app.example.com" value={host} onChange={(e) => setHost(e.target.value)} required />
           <select aria-label="Project" value={project} onChange={(e) => setProject(e.target.value)}>
             {state.projects.map((p) => <option key={p.id}>{p.name}</option>)}
           </select>
-          <button className="primary" type="submit" disabled={!state.projects.length}>Record</button>
+          <button className="primary" type="submit" disabled={!project || saving}>{saving ? "Saving…" : "Record"}</button>
         </form>
       </header>
       <article className="panel">
@@ -186,8 +204,14 @@ export function FunctionsView() {
   return (
     <>
       <header className="page-head">
-        <div><h2>Functions</h2><p>Names and routes are stored. Invocation is refused until handler source exists, and the counter is not incremented.</p></div>
-        <form className="form-row" onSubmit={(e) => { e.preventDefault(); run(() => call("functions", { method: "POST", body: JSON.stringify({ name, route }) }), setToast, "Function registered"); setName(""); }}>
+        <div><h2>Functions</h2><p>Registration stores a name and route only. Function execution is not supported here.</p></div>
+        <form className="form-row" onSubmit={(e) => {
+          e.preventDefault();
+          void run(async () => {
+            await call("functions", { method: "POST", body: JSON.stringify({ name, route }) });
+            setName((value) => value === name ? "" : value);
+          }, setToast, "Function registered");
+        }}>
           <input aria-label="Function name" placeholder="quote" value={name} onChange={(e) => setName(e.target.value)} required />
           <input aria-label="Route" value={route} onChange={(e) => setRoute(e.target.value)} required />
           <button className="primary" type="submit">Register</button>
@@ -195,9 +219,8 @@ export function FunctionsView() {
       </header>
       <article className="panel">
         {rows.map((f) => (
-          <div key={f.id} className="list-row" style={{ gridTemplateColumns: "1fr auto" }}>
+          <div key={f.id} className="list-row">
             <div><div className="name">{f.name}</div><div className="sub">{f.route} · source {f.hasSource ? "stored" : "missing"} · {f.invocations} invocations</div></div>
-            <button className="ghost" type="button" onClick={() => run(() => call(`functions/${f.id}/invoke`, { method: "POST" }), setToast, "Invoked")}>Invoke</button>
           </div>
         ))}
         {rows.length === 0 && <p className="empty">No functions registered.</p>}
@@ -334,13 +357,13 @@ export function SettingsView() {
         }
       }}>
         <h3>Access tokens</h3>
+        <p className="sub">Tokens are read-only and expire. Sign in again if asked to confirm a credential change.</p>
         <div className="form-row">
           <input aria-label="Token name" placeholder="Name" value={tokenName} onChange={(e) => setTokenName(e.target.value)} required />
           <select aria-label="Expiry" value={days} onChange={(e) => setDays(e.target.value)}>
             <option value="7">7 days</option>
             <option value="30">30 days</option>
             <option value="90">90 days</option>
-            <option value="0">No expiry</option>
           </select>
           <button className="primary" type="submit">Create</button>
         </div>
@@ -353,7 +376,14 @@ export function SettingsView() {
         ))}
       </form>
 
-      <form className="panel" onSubmit={(e) => { e.preventDefault(); run(() => call("device/approve", { method: "POST", body: JSON.stringify({ userCode: device }) }), setToast, "Device approved"); setDevice(""); }}>
+      <form className="panel" onSubmit={(e) => {
+        e.preventDefault();
+        const submitted = device;
+        void run(async () => {
+          await call("device/approve", { method: "POST", body: JSON.stringify({ userCode: submitted }) });
+          setDevice((value) => value === submitted ? "" : value);
+        }, setToast, "Device approved");
+      }}>
         <h3>Approve a device code</h3>
         <p className="sub">A client calls the device-code API, then you confirm the code here. No password is entered in a shell.</p>
         <div className="form-row">
@@ -362,14 +392,21 @@ export function SettingsView() {
         </div>
       </form>
 
-      <form className="panel" onSubmit={(e) => { e.preventDefault(); run(() => call("protection", { method: "POST", body: JSON.stringify({ password: gate }) }), setToast, "Console password saved"); setGate(""); }}>
-        <h3>Console password</h3>
-        <p className="sub">Optional extra password for this browser. It is stored as a scrypt hash. This is not an edge network gate.</p>
+      <form className="panel" onSubmit={(e) => {
+        e.preventDefault();
+        const submitted = gate;
+        void run(async () => {
+          await call("protection", { method: "POST", body: JSON.stringify({ password: submitted }) });
+          setGate((value) => value === submitted ? "" : value);
+        }, setToast, "Screen lock password saved");
+      }}>
+        <h3>Browser screen lock</h3>
+        <p className="sub">This password locks the browser screen only. It does not restrict access to the API.</p>
         <div className="form-row">
-          <input aria-label="Console password" type="password" placeholder="At least 8 characters" value={gate} onChange={(e) => setGate(e.target.value)} minLength={8} required />
+          <input aria-label="Screen lock password" type="password" autoComplete="new-password" placeholder="At least 8 characters" value={gate} onChange={(e) => setGate(e.target.value)} minLength={8} required />
           <button className="primary" type="submit">Set password</button>
         </div>
-        {state.protection.required && <button className="ghost" type="button" onClick={() => run(() => call("protection", { method: "DELETE" }), setToast, "Console password removed")}>Remove password</button>}
+        {state.protection.required && <button className="ghost" type="button" onClick={() => run(() => call("protection", { method: "DELETE" }), setToast, "Screen lock password removed")}>Remove password</button>}
       </form>
 
       <form className="panel" onSubmit={async (e) => {
@@ -384,7 +421,7 @@ export function SettingsView() {
         }
       }}>
         <h3>Webhooks</h3>
-        <p className="sub">This server POSTs JSON and an HMAC-SHA256 signature when a deployment is blocked, a firewall rule denies a request, or a session is created. Delivery errors are not retried.</p>
+        <p className="sub">Webhook registrations are stored, but delivery is disabled.</p>
         <div className="form-row">
           <input aria-label="Webhook URL" placeholder="https://example.com/hooks" value={hookUrl} onChange={(e) => setHookUrl(e.target.value)} required />
           <button className="primary" type="submit">Add</button>
@@ -514,16 +551,24 @@ export function AnalyticsView() {
 }
 
 function Confirm({ title, body, onYes, onCancel }: { title: string; body: string; onYes: () => void; onCancel: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const element = dialog.current!;
+    element.showModal();
+    return () => element.close();
+  }, []);
+  function finish(action: () => void) {
+    dialog.current?.close();
+    action();
+  }
   return (
-    <div className="modal-back" onClick={onCancel}>
-      <div className="modal" role="dialog" aria-label={title} onClick={(e) => e.stopPropagation()}>
-        <h3>{title}</h3>
-        <p>{body}</p>
-        <div className="form-row">
-          <button className="ghost" type="button" onClick={onCancel}>Cancel</button>
-          <button className="danger" type="button" onClick={onYes}>Confirm</button>
-        </div>
+    <dialog ref={dialog} className="modal" aria-label={title} onCancel={(event) => { event.preventDefault(); finish(onCancel); }}>
+      <h3>{title}</h3>
+      <p>{body}</p>
+      <div className="form-row">
+        <button className="ghost" type="button" onClick={() => finish(onCancel)}>Cancel</button>
+        <button className="danger" type="button" onClick={() => finish(onYes)}>Confirm</button>
       </div>
-    </div>
+    </dialog>
   );
 }

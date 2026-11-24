@@ -42,6 +42,7 @@ import com.mobilecloud.ui.console.ctime
 import com.mobilecloud.ui.console.jobj
 import com.mobilecloud.ui.theme.AppFonts
 import com.mobilecloud.ui.theme.Aurora
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -200,24 +201,25 @@ private fun RankCard(title: String, rows: List<Pair<String, Int>>, empty: String
 @Composable
 fun DevicePage(store: ConsoleStore) {
     val scope = rememberCoroutineScope()
-    var devices by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
-    var loading by remember { mutableStateOf(false) }
+    val client = store.client
+    var devices by remember(client) { mutableStateOf<List<JSONObject>>(emptyList()) }
+    var loading by remember(client) { mutableStateOf(true) }
+    var listError by remember(client) { mutableStateOf<String?>(null) }
 
-    fun load() {
-        scope.launch {
-            loading = true
-            try {
-                val array = store.client.request("devices").optJSONArray("devices")
-                devices = (0 until (array?.length() ?: 0)).mapNotNull { array?.optJSONObject(it) }
-            } catch (_: Exception) {
-                // The list is best-effort; linking a phone still works without it.
-            } finally {
-                loading = false
-            }
+    LaunchedEffect(client, store.realtimeState.lastSyncAt) {
+        loading = true
+        try {
+            val array = client.request("devices").getJSONArray("devices")
+            devices = (0 until array.length()).map { array.getJSONObject(it) }
+            listError = null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            listError = "Could not refresh linked devices."
+        } finally {
+            loading = false
         }
     }
-
-    LaunchedEffect(Unit) { load() }
 
     PageHead(
         "Link device",
@@ -226,14 +228,15 @@ fun DevicePage(store: ConsoleStore) {
     Spacer(Modifier.height(12.dp))
     CPanel(
         title = "Pair this phone",
-        subtitle = "The dashboard shows a two-minute code. Scan it, approve the request, and this phone is signed in and connected in real time.",
+        subtitle = "Scan the dashboard code and confirm the HTTPS address and comparison code before approving the request.",
     ) {
-        ScanToLinkButton(store, label = "Scan the dashboard QR code") { load() }
+        ScanToLinkButton(store, label = "Scan the dashboard QR code")
     }
 
     Spacer(Modifier.height(14.dp))
     CPanel(title = "Linked devices", subtitle = "Devices paired with a QR code, newest first.") {
-        if (devices.isEmpty()) {
+        listError?.let { Hint(it) }
+        if (devices.isEmpty() && listError == null) {
             CEmpty(if (loading) "Loading…" else "No linked devices yet.")
         } else {
             devices.forEach { device ->
@@ -255,15 +258,8 @@ fun DevicePage(store: ConsoleStore) {
                         CBadge("revoked", Tone.BAD)
                     } else {
                         CButton("Revoke", onClick = {
-                            scope.launch {
-                                try {
-                                    store.call("devices/$id", null, "DELETE")
-                                    load()
-                                } catch (e: Exception) {
-                                    store.notify(e.message ?: "Request failed")
-                                }
-                            }
-                        }, kind = BtnKind.GHOST, compact = true)
+                            store.action(scope, "Device revoked") { store.call("devices/$id", null, "DELETE") }
+                        }, kind = BtnKind.GHOST, compact = true, enabled = !store.busy)
                     }
                 }
             }
@@ -330,14 +326,14 @@ fun SettingsPage(store: ConsoleStore) {
     }
 
     Spacer(Modifier.height(14.dp))
-    CPanel(title = "Access tokens") {
+    CPanel(title = "Access tokens", subtitle = "Tokens are read-only and expire. Credential changes require a recent password sign-in.") {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f)) { CField("Name", tokenName, { tokenName = it }, placeholder = "Name") }
         }
         Spacer(Modifier.height(8.dp))
         CSelect(
-            listOf("7", "30", "90", "0"), days, { days = it }, modifier = Modifier.fillMaxWidth(),
-            label = { if (it == "0") "No expiry" else "$it days" },
+            listOf("7", "30", "90"), days, { days = it }, modifier = Modifier.fillMaxWidth(),
+            label = { "$it days" },
         )
         Spacer(Modifier.height(10.dp))
         CButton("Create", onClick = {
@@ -374,19 +370,23 @@ fun SettingsPage(store: ConsoleStore) {
         CField("Device code", device, { device = it }, placeholder = "ABCD-EFGH")
         Spacer(Modifier.height(10.dp))
         CButton("Approve", onClick = {
-            store.action(scope, "Device approved") { store.call("device/approve", jobj("userCode" to device)) }
-            device = ""
+            val submittedCode = device
+            store.action(scope, "Device approved") {
+                store.call("device/approve", jobj("userCode" to submittedCode)).also { if (device == submittedCode) device = "" }
+            }
         }, enabled = device.isNotBlank())
     }
 
     Spacer(Modifier.height(14.dp))
-    CPanel(title = "Console password", subtitle = "Optional extra password for this browser. It is stored as a scrypt hash. This is not an edge network gate.") {
+    CPanel(title = "Browser screen lock", subtitle = "This controls the browser screen only. It does not restrict API access or change the Android device lock.") {
         CField("Console password", gate, { gate = it }, placeholder = "At least 8 characters", password = true)
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             CButton("Set password", onClick = {
-                store.action(scope, "Console password saved") { store.call("protection", jobj("password" to gate)) }
-                gate = ""
+                val submittedPassword = gate
+                store.action(scope, "Screen lock password saved") {
+                    store.call("protection", jobj("password" to submittedPassword)).also { if (gate == submittedPassword) gate = "" }
+                }
             }, enabled = gate.length >= 8)
             if (snap.protection.required) {
                 CButton("Remove password", onClick = {
@@ -399,7 +399,7 @@ fun SettingsPage(store: ConsoleStore) {
     Spacer(Modifier.height(14.dp))
     CPanel(
         title = "Webhooks",
-        subtitle = "This server POSTs JSON and an HMAC-SHA256 signature when a deployment is blocked, a firewall rule denies a request, or a session is created. Delivery errors are not retried.",
+        subtitle = "Webhook registrations are stored, but delivery is disabled.",
     ) {
         CField("Webhook URL", hookUrl, { hookUrl = it }, placeholder = "https://example.com/hooks")
         Spacer(Modifier.height(10.dp))

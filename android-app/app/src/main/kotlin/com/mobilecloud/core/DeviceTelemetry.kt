@@ -2,13 +2,51 @@ package com.mobilecloud.core
 
 import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.TrafficStats
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
 import android.os.StatFs
 import android.os.SystemClock
-import com.mobilecloud.service.BatteryBypassDetector
 import java.io.File
+
+/** Passive Android readings only; current cannot establish battery isolation. */
+data class BatteryTelemetry(
+    val status: String,
+    val batteryPercent: Int?,
+    val currentMicroAmps: Int?,
+    val temperatureTenthsC: Int?,
+) {
+    val percentLabel: String get() = batteryPercent?.let { "$it%" } ?: "Unavailable"
+    val currentLabel: String get() = currentMicroAmps?.let { "%.1f mA".format(it / 1000.0) } ?: "Unavailable"
+    val temperatureLabel: String get() = temperatureTenthsC?.let { "%.1f °C".format(it / 10.0) } ?: "Unavailable"
+
+    companion object {
+        fun probe(context: Context): BatteryTelemetry {
+            val battery = context.getSystemService(BatteryManager::class.java)
+            val sticky = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val status = when (sticky?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)) {
+                BatteryManager.BATTERY_STATUS_CHARGING -> "Charging"
+                BatteryManager.BATTERY_STATUS_DISCHARGING -> "Discharging"
+                BatteryManager.BATTERY_STATUS_FULL -> "Full"
+                BatteryManager.BATTERY_STATUS_NOT_CHARGING -> "Not charging"
+                else -> "Unknown"
+            }
+            val level = sticky?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = sticky?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            return BatteryTelemetry(
+                status = status,
+                batteryPercent = if (scale > 0 && level in 0..scale) (100L * level / scale).toInt() else null,
+                currentMicroAmps = battery?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+                    ?.takeUnless { it == Int.MIN_VALUE },
+                temperatureTenthsC = sticky?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
+                    ?.takeUnless { it == Int.MIN_VALUE },
+            )
+        }
+    }
+}
 
 /**
  * REAL device telemetry from legitimate Android system interfaces only
@@ -42,7 +80,7 @@ data class DeviceTelemetry(
     val socTempC: Double?,
     val socTempSource: String?,
     // Battery (BatteryManager — real readings, no bypass assumption)
-    val battery: BatteryBypassDetector.PowerState,
+    val battery: BatteryTelemetry,
     // Network (TrafficStats since boot)
     val rxBytesSinceBoot: Long?,
     val txBytesSinceBoot: Long?,
@@ -60,7 +98,7 @@ object TelemetryProvider {
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val mem = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
 
-        val battery = BatteryBypassDetector.probe(context)
+        val battery = BatteryTelemetry.probe(context)
         val (socTemp, tempSource) = readBestSocTemp()
 
         val stat = runCatching {

@@ -28,42 +28,48 @@ if (!existsSync(nextBin)) {
   process.exit(1);
 }
 
-const children = [];
+const children = new Set();
+const restarts = new Set();
 let stopping = false;
 
-function launch(label, script, args, env) {
-  const child = spawn(process.execPath, [script, ...args], {
-    cwd: appRoot,
-    env: { ...process.env, ...env },
-    stdio: "inherit",
-  });
-  child.on("exit", (code) => {
-    if (stopping) return;
-    console.error(`[run] ${label} exited with code ${code}`);
-    shutdown(code ?? 1);
-  });
-  children.push(child);
-  return child;
+function launch(label, script, args, env, failures = 0) {
+  if (stopping) return;
+  const started = Date.now();
+  const child = spawn(process.execPath, [script, ...args], { cwd: appRoot, env, stdio: "inherit" });
+  children.add(child);
+  const restart = () => {
+    if (!children.delete(child) || stopping) return;
+    const next = Date.now() - started < 60_000 ? failures + 1 : 1;
+    const delay = Math.min(30_000, 500 * 2 ** Math.min(next, 6));
+    console.error(`[run] ${label} stopped; restarting in ${delay} ms`);
+    const timer = setTimeout(() => {
+      restarts.delete(timer);
+      launch(label, script, args, env, next);
+    }, delay);
+    restarts.add(timer);
+  };
+  child.once("error", restart);
+  child.once("exit", restart);
 }
 
-function shutdown(code) {
+function shutdown() {
   if (stopping) return;
   stopping = true;
+  for (const timer of restarts) clearTimeout(timer);
   for (const child of children) {
-    try {
-      child.kill();
-    } catch {
-      /* already gone */
-    }
+    try { child.kill(); } catch { /* already gone */ }
   }
-  setTimeout(() => process.exit(code), 400);
+  setTimeout(() => process.exit(0), 1200).unref();
 }
 
-process.on("SIGINT", () => shutdown(0));
-process.on("SIGTERM", () => shutdown(0));
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
-launch("web", nextBin, [mode, "--port", port], {});
-launch("realtime", join(here, "realtime.mjs"), [], { MOBILECLOUD_REALTIME_PORT: realtimePort });
+const webEnv = { ...process.env, PORT: port, NODE_ENV: mode === "start" ? "production" : "development", MOBILECLOUD_REALTIME_PORT: realtimePort };
+const realtimeEnv = { ...webEnv };
+delete realtimeEnv.MOBILECLOUD_BOOTSTRAP_PASSWORD;
+launch("web", nextBin, [mode, "--hostname", process.env.MOBILECLOUD_WEB_HOST ?? "127.0.0.1", "--port", port], webEnv);
+launch("realtime", join(here, "realtime.mjs"), [], realtimeEnv);
 
 console.log("");
 console.log(`  MobileCloud control plane`);

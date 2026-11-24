@@ -40,7 +40,7 @@ import { createToken } from "./identity.ts";
 export const PAIRING_TTL_MS = 120_000;
 
 /** Device credentials are durable but still expire, and are individually revocable. */
-const DEVICE_CREDENTIAL_DAYS = 365;
+const DEVICE_CREDENTIAL_DAYS = 30;
 
 /** Human-readable code alphabet: no 0/O/1/I/L, so it can be typed from a screen. */
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -67,6 +67,7 @@ const OPEN = new Set<string>(["WAITING_FOR_SCAN", "SCANNED", "AWAITING_APPROVAL"
 export type PairingRow = {
   id: string;
   secret_hash: string;
+  scan_hash: string | null;
   user_code: string;
   owner_id: string;
   status: string;
@@ -130,7 +131,6 @@ export function effectiveStatus(row: PairingRow): PairingStatus {
   // the pairing but the phone has not claimed its credential yet, so the
   // device is not connected and the UI must not imply that it is.
   if (row.status === "CONNECTED") return "CONNECTED";
-  if (row.status === "APPROVED") return "APPROVED";
   if (row.expires_at <= Date.now()) return "EXPIRED";
   return row.status as PairingStatus;
 }
@@ -183,7 +183,7 @@ export function createPairing(
   const now = Date.now();
   db.prepare(
     `UPDATE pairing_sessions SET status = 'REVOKED', fail_reason = 'superseded'
-     WHERE owner_id = ? AND status IN ('WAITING_FOR_SCAN', 'SCANNED', 'AWAITING_APPROVAL')`,
+     WHERE owner_id = ? AND status IN ('WAITING_FOR_SCAN', 'SCANNED', 'AWAITING_APPROVAL', 'APPROVED')`,
   ).run(owner);
 
   const id = newId();
@@ -209,21 +209,19 @@ export function createPairing(
   return { id, secret, verificationCode, expiresAt };
 }
 
-/** Reads a session, applying the expiry clock. Returns undefined if unknown. */
+/** Reads a session without side effects. Projections apply expiry via effectiveStatus. */
 export function readPairing(db: DatabaseSync, id: string): PairingRow | undefined {
-  const row = getRow(db, id);
-  if (!row) return undefined;
-  if (OPEN.has(row.status) && row.expires_at <= Date.now()) {
-    db.prepare("UPDATE pairing_sessions SET status = 'EXPIRED' WHERE id = ? AND status = ?").run(id, row.status);
-    return getRow(db, id);
-  }
-  return row;
+  return getRow(db, id);
 }
 
 /** True when the presented secret matches the stored hash for this session. */
 export function secretMatches(row: PairingRow, secret: string): boolean {
   if (!secret) return false;
   return safeEqualHex(row.secret_hash, tokenHash(secret));
+}
+
+export function scanProofMatches(row: PairingRow, proof: string | null): boolean {
+  return !!row.scan_hash && !!proof && safeEqualHex(row.scan_hash, tokenHash(proof));
 }
 
 /**
@@ -249,7 +247,7 @@ export type ScanResult =
  * once; a second scan from the same device is treated as an idempotent retry
  * rather than an error, so a flaky network cannot strand the user.
  */
-export function scanPairing(db: DatabaseSync, id: string, secret: string, device: PairingDevice, ip?: string): ScanResult {
+export function scanPairing(db: DatabaseSync, id: string, secret: string, device: PairingDevice, scanProof: string, existingProof: string | null): ScanResult {
   const row = readPairing(db, id);
   if (!row) return { ok: false, reason: "unknown_session" };
   if (!secretMatches(row, secret)) return { ok: false, reason: "invalid_secret" };
@@ -266,18 +264,17 @@ export function scanPairing(db: DatabaseSync, id: string, secret: string, device
 
   const result = db.prepare(
     `UPDATE pairing_sessions
-       SET status = 'SCANNED', scanned_at = ?, scan_device_name = ?, scan_device_platform = ?, scan_app_version = ?
+       SET status = 'SCANNED', scanned_at = ?, scan_device_name = ?, scan_device_platform = ?, scan_app_version = ?, scan_hash = ?
      WHERE id = ? AND status = 'WAITING_FOR_SCAN' AND expires_at > ?`,
-  ).run(Date.now(), name, platform, appVersion, id, Date.now());
+  ).run(Date.now(), name, platform, appVersion, tokenHash(scanProof), id, Date.now());
 
   if (Number(result.changes) === 0) {
     const again = readPairing(db, id);
     if (again && (again.status === "SCANNED" || again.status === "AWAITING_APPROVAL")) {
-      return { ok: true, row: again, duplicate: true };
+      return scanProofMatches(again, existingProof) ? { ok: true, row: again, duplicate: true } : { ok: false, reason: "scan_mismatch" };
     }
     return { ok: false, reason: "race" };
   }
-  db.prepare("UPDATE pairing_sessions SET scan_device_platform = ? WHERE id = ?").run(platform, id);
   return { ok: true, row: readPairing(db, id) as PairingRow, duplicate: false };
 }
 
@@ -304,7 +301,7 @@ export function approveFromBrowser(db: DatabaseSync, id: string, owner: string):
   const now = Date.now();
   const result = db.prepare(
     `UPDATE pairing_sessions SET status = 'APPROVED', approved_at = ?, expires_at = ?
-     WHERE id = ? AND owner_id = ? AND status IN ('SCANNED', 'AWAITING_APPROVAL') AND expires_at > ?`,
+     WHERE id = ? AND owner_id = ? AND status IN ('SCANNED', 'AWAITING_APPROVAL') AND expires_at > ? AND scan_hash IS NOT NULL`,
   ).run(now, now + PAIRING_TTL_MS, id, owner, now);
   return Number(result.changes) > 0;
 }
@@ -338,7 +335,6 @@ export function approvePairing(
   db: DatabaseSync,
   session: PairingRow,
   owner: string,
-  device: PairingDevice,
   ip?: string,
 ): ApproveResult {
   if (session.owner_id !== owner) return { ok: false, reason: "account_mismatch" };
@@ -356,21 +352,18 @@ export function approvePairing(
   ).run(now, owner, session.id, now);
   if (Number(consumed.changes) === 0) return { ok: false, reason: "race" };
 
-  const name = (device.name ?? session.scan_device_name ?? "Android device").slice(0, 60);
-  const platform = (device.platform ?? session.scan_device_platform ?? "android").slice(0, 40);
-  const appVersion = (device.appVersion ?? session.scan_app_version ?? "").slice(0, 40) || null;
+  const name = session.scan_device_name ?? "Android device";
+  const platform = session.scan_device_platform ?? "android";
+  const appVersion = session.scan_app_version;
 
   const issued = createToken(db, owner, `device: ${name}`.slice(0, 60), DEVICE_CREDENTIAL_DAYS);
-  const tokenRow = db.prepare("SELECT id FROM access_tokens WHERE token_hash = ?").get(tokenHash(issued.token)) as
-    | { id: string }
-    | undefined;
 
   const deviceId = newId();
   db.prepare(
     `INSERT INTO connected_devices
        (id, owner_id, token_id, pairing_id, name, platform, app_version, method, created_at, paired_at, last_active, last_ip, revoked)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'qr', ?, ?, ?, ?, 0)`,
-  ).run(deviceId, owner, tokenRow?.id ?? null, session.id, name, platform, appVersion, now, now, now, ip ?? null);
+  ).run(deviceId, owner, issued.id, session.id, name, platform, appVersion, now, now, now, ip ?? null);
 
   db.prepare("UPDATE pairing_sessions SET status = 'CONNECTED', connected_at = ?, device_id = ? WHERE id = ?").run(
     now,
@@ -397,17 +390,12 @@ export function closePairing(db: DatabaseSync, id: string, reason: string): bool
 }
 
 /** Marks every session past its TTL as expired and returns them for event fan-out. */
-export function expireStale(db: DatabaseSync): PairingRow[] {
-  const now = Date.now();
-  const rows = db.prepare(
-    "SELECT * FROM pairing_sessions WHERE status IN ('WAITING_FOR_SCAN', 'SCANNED', 'AWAITING_APPROVAL') AND expires_at <= ?",
-  ).all(now) as PairingRow[];
-  if (rows.length) {
-    db.prepare(
-      "UPDATE pairing_sessions SET status = 'EXPIRED' WHERE status IN ('WAITING_FOR_SCAN', 'SCANNED', 'AWAITING_APPROVAL') AND expires_at <= ?",
-    ).run(now);
-  }
-  return rows;
+export function expireStale(db: DatabaseSync, owner: string): PairingRow[] {
+  return db.prepare(
+    `UPDATE pairing_sessions SET status = 'EXPIRED'
+     WHERE owner_id = ? AND status IN ('WAITING_FOR_SCAN', 'SCANNED', 'AWAITING_APPROVAL', 'APPROVED') AND expires_at <= ?
+     RETURNING *`,
+  ).all(owner, Date.now()) as PairingRow[];
 }
 
 export function listDevices(db: DatabaseSync, owner: string) {
@@ -437,8 +425,9 @@ export function revokeDevice(db: DatabaseSync, owner: string, deviceId: string):
     | DeviceRow
     | undefined;
   if (!device) return { ok: false };
-  const now = Date.now();
+  const now = device.revoked_at ?? Date.now();
   db.prepare("UPDATE connected_devices SET revoked = 1, revoked_at = ? WHERE owner_id = ? AND id = ?").run(now, owner, deviceId);
+  db.prepare("DELETE FROM sessions WHERE user_id = ? AND device_id = ?").run(owner, deviceId);
   if (device.token_id) db.prepare("DELETE FROM access_tokens WHERE owner_id = ? AND id = ?").run(owner, device.token_id);
   return { ok: true, device: { ...device, revoked: 1, revoked_at: now } };
 }

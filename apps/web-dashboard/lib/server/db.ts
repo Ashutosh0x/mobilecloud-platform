@@ -1,6 +1,6 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 const SCHEMA = `
@@ -277,92 +277,102 @@ CREATE TABLE IF NOT EXISTS event_cursors (
 let singleton: DatabaseSync | null = null;
 
 export function resetDb() {
+  singleton?.close();
   singleton = null;
 }
 
 export function openDb(file?: string): DatabaseSync {
   if (!file && singleton) return singleton;
-  const target = file ?? process.env.MOBILECLOUD_DB ?? join(process.cwd(), "data", "mobilecloud.db");
+  const target = file ?? process.env.MOBILECLOUD_DB ?? join(dataRoot(), "mobilecloud.db");
   mkdirSync(dirname(target), { recursive: true });
   const db = new DatabaseSync(target);
-  // Every connection — the per-request singleton and each `openDb(file)` handle
-  // (tests, background work) — gets the same durable, concurrency-friendly
-  // pragmas. In WAL mode `synchronous = NORMAL` is safe and avoids an fsync on
-  // every commit, which is what let parallel writers pile up behind the lock.
-  db.exec("PRAGMA journal_mode = WAL;");
-  // The realtime gateway is a second process writing to the same file (its
-  // event cursor), so writers must wait rather than fail with SQLITE_BUSY.
-  db.exec("PRAGMA busy_timeout = 4000;");
-  db.exec("PRAGMA foreign_keys = ON;");
-  db.exec("PRAGMA synchronous = NORMAL;");
-  db.exec(SCHEMA);
-  for (const sql of [
-    "ALTER TABLE sessions ADD COLUMN id TEXT",
-    "ALTER TABLE sessions ADD COLUMN user_agent TEXT",
-    "ALTER TABLE sessions ADD COLUMN created_at INTEGER",
-    "ALTER TABLE sessions ADD COLUMN csrf TEXT",
-    "ALTER TABLE requests ADD COLUMN user_agent TEXT",
-    "ALTER TABLE requests ADD COLUMN host TEXT",
-    "ALTER TABLE requests ADD COLUMN ja4 TEXT",
-    "ALTER TABLE firewall_events ADD COLUMN user_agent TEXT",
-    "ALTER TABLE firewall_events ADD COLUMN host TEXT",
-    "ALTER TABLE firewall_events ADD COLUMN ja4 TEXT",
-    "ALTER TABLE projects ADD COLUMN repo_url TEXT",
-  ]) {
-    try { db.exec(sql); } catch { /* column already exists */ }
+  try {
+    db.exec("PRAGMA busy_timeout = 4000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;");
+    db.exec("BEGIN IMMEDIATE");
+    db.exec(SCHEMA);
+    migrate(db);
+    if (!file) ensureOperator(db);
+    db.exec("COMMIT");
+    if (!file) singleton = db;
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
   }
-  if (!file) {
-    ensureDefaultUser(db);
-    singleton = db;
-  }
-  return db;
 }
 
-/**
- * First-run bootstrap of the node owner account.
- *
- * There are deliberately NO hardcoded credentials here: any deployment that
- * shipped a fixed administrator password would let anyone who reads the source
- * (or the APK) authenticate as the cluster owner.
- *
- * * If the `users` table is already populated, this is a no-op.
- * * Otherwise the owner is created from `MOBILECLOUD_BOOTSTRAP_EMAIL` /
- *   `MOBILECLOUD_BOOTSTRAP_PASSWORD` when provided (unattended installs, CI),
- *   and the password is never logged.
- * * With no env override a cryptographically random one-time password is
- *   generated and printed **once** to the process console so the operator can
- *   complete onboarding and change it.
- */
-function ensureDefaultUser(db: DatabaseSync) {
-  const existing = db.prepare("SELECT id FROM users LIMIT 1").get();
-  if (existing) return;
+function migrate(db: DatabaseSync) {
+  db.exec(`CREATE TABLE IF NOT EXISTS control_plane_migrations (version INTEGER PRIMARY KEY);`);
+  if (!db.prepare("SELECT 1 FROM control_plane_migrations WHERE version = 1").get()) migrateCredentialBindings(db);
+  if (!db.prepare("SELECT 1 FROM control_plane_migrations WHERE version = 2").get()) {
+    db.exec(`
+      ALTER TABLE pairing_sessions ADD COLUMN scan_hash TEXT;
+      UPDATE pairing_sessions SET status = 'REVOKED', fail_reason = 'credential_upgrade'
+        WHERE status IN ('SCANNED','AWAITING_APPROVAL','APPROVED');
+      INSERT INTO control_plane_migrations (version) VALUES (2);
+    `);
+  }
+  if (!db.prepare("SELECT 1 FROM control_plane_migrations WHERE version = 3").get()) {
+    db.prepare(`UPDATE access_tokens SET expires_at = MIN(expires_at, ?)
+      WHERE id IN (SELECT token_id FROM connected_devices WHERE token_id IS NOT NULL)`).run(Date.now() + 30 * 86_400_000);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_objects_key ON objects (owner_id, bucket, key);
+      CREATE INDEX IF NOT EXISTS idx_requests_time ON requests (at);
+      INSERT INTO control_plane_migrations (version) VALUES (3);
+    `);
+  }
+}
 
-  const email = process.env.MOBILECLOUD_BOOTSTRAP_EMAIL?.trim() || "owner@mobilecloud.local";
-  const configured = process.env.MOBILECLOUD_BOOTSTRAP_PASSWORD?.trim();
-  // 24 bytes → 192 bits of entropy for the generated one-time password.
-  const password = configured || randomBytes(24).toString("base64url");
+function migrateCredentialBindings(db: DatabaseSync) {
+  for (const [table, columns] of Object.entries({
+    sessions: { id: "TEXT", user_agent: "TEXT", created_at: "INTEGER", csrf: "TEXT", device_id: "TEXT" },
+    requests: { user_agent: "TEXT", host: "TEXT", ja4: "TEXT" },
+    firewall_events: { user_agent: "TEXT", host: "TEXT", ja4: "TEXT" },
+    projects: { repo_url: "TEXT" },
+  })) {
+    const present = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name));
+    for (const [name, type] of Object.entries(columns)) {
+      if (!present.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+    }
+  }
+  // Older sessions cannot be reliably attributed to a linked device. Require
+  // every such session to sign in again, and retire in-flight legacy codes.
+  db.exec(`
+    DELETE FROM sessions;
+    DELETE FROM device_codes;
+    UPDATE pairing_sessions SET status = 'REVOKED', fail_reason = 'credential_upgrade'
+      WHERE status IN ('WAITING_FOR_SCAN','SCANNED','AWAITING_APPROVAL','APPROVED');
+    DELETE FROM access_tokens WHERE expires_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_sessions_device ON sessions (device_id);
+    CREATE INDEX IF NOT EXISTS idx_requests_owner_at ON requests (owner_id, at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_device_codes_display ON device_codes (user_code);
+  `);
+  // Conservatively retire the old publicly seeded account, without embedding
+  // its former password. An operator may recover it with explicit bootstrap env.
+  const legacy = db.prepare("SELECT id FROM users WHERE email = ?").get("ashutosh@gmail.com") as { id: string } | undefined;
+  if (legacy) {
+    db.prepare("UPDATE users SET password_hash = 'reset-required' WHERE id = ?").run(legacy.id);
+    db.prepare("DELETE FROM access_tokens WHERE owner_id = ?").run(legacy.id);
+    db.prepare("UPDATE connected_devices SET revoked = 1, revoked_at = ? WHERE owner_id = ?").run(Date.now(), legacy.id);
+    db.prepare("DELETE FROM webhooks WHERE owner_id = ?").run(legacy.id);
+  }
+  db.exec("INSERT INTO control_plane_migrations (version) VALUES (1)");
+}
 
-  db.prepare(
-    "INSERT INTO users (id, email, name, password_hash, role, plan, created_at) VALUES (?, ?, 'Owner', ?, 'owner', 'community', ?)",
-  ).run(newId(), email, hashPassword(password), Date.now());
-
-  if (!configured) {
-    // Printed exactly once, at first boot, and never persisted in plaintext.
-    console.warn(
-      [
-        "",
-        "  ┌──────────────────────────────────────────────────────────────┐",
-        "  │ MobileCloud node bootstrap: owner account created            │",
-        "  ├──────────────────────────────────────────────────────────────┤",
-        `  │ email:    ${email.padEnd(50)}│`,
-        `  │ password: ${password.padEnd(50)}│`,
-        "  │                                                              │",
-        "  │ Store this now — it is shown once and cannot be recovered.   │",
-        "  │ Set MOBILECLOUD_BOOTSTRAP_EMAIL/PASSWORD to control it.      │",
-        "  └──────────────────────────────────────────────────────────────┘",
-        "",
-      ].join("\n"),
-    );
+/** Local operator provisioning only. No remotely callable setup and no password logs. */
+function ensureOperator(db: DatabaseSync) {
+  const password = process.env.MOBILECLOUD_BOOTSTRAP_PASSWORD?.trim();
+  if (!password) return;
+  const email = (process.env.MOBILECLOUD_BOOTSTRAP_EMAIL?.trim() || "owner@mobilecloud.local").toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+$/.test(email) || email.length > 254 || password.length < 12 || password.length > 256 || isRetiredPassword(password)) {
+    throw new Error("Invalid operator bootstrap configuration");
+  }
+  const reset = db.prepare("SELECT id FROM users WHERE email = ? AND password_hash = 'reset-required'").get(email) as { id: string } | undefined;
+  if (reset) {
+    db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hashPassword(password), reset.id);
+  } else if (!db.prepare("SELECT 1 FROM users LIMIT 1").get()) {
+    db.prepare("INSERT INTO users (id, email, name, password_hash, role, plan, created_at) VALUES (?, ?, 'Owner', ?, 'owner', 'community', ?)")
+      .run(newId(), email, hashPassword(password), Date.now());
   }
 }
 
@@ -370,6 +380,10 @@ export function hashPassword(password: string): string {
   const salt = randomBytes(16).toString("hex");
   const hash = scryptSync(password, salt, 32).toString("hex");
   return `${salt}:${hash}`;
+}
+
+export function isRetiredPassword(password: string): boolean {
+  return tokenHash(password) === "477b79e5e6c6faff2f40c818304100c8e4d235cb0f2ba9551ce8cc79359227dc";
 }
 
 export function verifyPassword(password: string, stored: string): boolean {
@@ -390,7 +404,9 @@ export function tokenHash(token: string): string {
 }
 
 export function dataRoot(): string {
-  const root = join(process.cwd(), "data");
+  const root = process.env.MOBILECLOUD_DATA_ROOT
+    ? resolve(process.env.MOBILECLOUD_DATA_ROOT)
+    : process.env.MOBILECLOUD_DB ? dirname(resolve(process.env.MOBILECLOUD_DB)) : join(process.cwd(), "data");
   if (!existsSync(root)) mkdirSync(root, { recursive: true });
   return root;
 }

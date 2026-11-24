@@ -230,6 +230,7 @@ fun ProjectsPage(store: ConsoleStore) {
     val rows = (store.snapshot?.projects ?: emptyList()).filter { q.isEmpty() || "${it.name} ${it.framework}".lowercase().contains(q) }
     var name by remember { mutableStateOf("") }
     var framework by remember { mutableStateOf("Next.js") }
+    var repoUrl by remember { mutableStateOf("") }
     var drop by remember { mutableStateOf<String?>(null) }
 
     PageHead("Projects", "Records stored in this server's database. A project does not deploy by itself.")
@@ -238,11 +239,20 @@ fun ProjectsPage(store: ConsoleStore) {
         CField("Project name", name, { name = it }, placeholder = "project-name")
         Spacer(Modifier.height(8.dp))
         CSelect(listOf("Next.js", "Vite", "Astro", "Nuxt", "Remix", "React"), framework, { framework = it })
+        Spacer(Modifier.height(8.dp))
+        CField("HTTPS repository URL (optional)", repoUrl, { repoUrl = it })
         Spacer(Modifier.height(10.dp))
         CButton("Create", onClick = {
-            store.action(scope, "Project saved") { store.call("projects", jobj("name" to name, "framework" to framework)) }
-            name = ""
-        }, enabled = name.isNotBlank())
+            val submittedName = name
+            val submittedRepo = repoUrl
+            val payload = jobj("name" to submittedName, "framework" to framework, "repoUrl" to submittedRepo)
+            store.action(scope, "Project saved") {
+                store.call("projects", payload).also {
+                    if (name == submittedName) name = ""
+                    if (repoUrl == submittedRepo) repoUrl = ""
+                }
+            }
+        }, enabled = name.isNotBlank() && !store.busy)
     }
 
     Spacer(Modifier.height(14.dp))
@@ -259,8 +269,8 @@ fun ProjectsPage(store: ConsoleStore) {
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     CButton("Request deploy", onClick = {
-                        store.action(scope, "Recorded") { store.call("deployments", jobj("projectId" to p.id)) }
-                    })
+                        store.action(scope, "Deployment request recorded") { store.call("deployments", jobj("projectId" to p.id)) }
+                    }, enabled = p.repoUrl.isNotBlank() && !store.busy)
                     CButton("Delete", onClick = { drop = p.id }, kind = BtnKind.DANGER)
                 }
             }
@@ -321,35 +331,26 @@ fun DeploymentsPage(store: ConsoleStore) {
 fun BuildsPage(store: ConsoleStore) {
     val scope = rememberCoroutineScope()
     val snap = store.snapshot ?: return
-    var projectId by remember { mutableStateOf(snap.projects.firstOrNull()?.id ?: "") }
-    var target by remember { mutableStateOf("web") }
-    var trigger by remember { mutableStateOf("agent:cursor") }
-    var revalTag by remember { mutableStateOf("products") }
+    val projects = snap.projects.filter { it.repoUrl.isNotBlank() }
+    var selection by remember { mutableStateOf("") }
+    val projectId = projects.firstOrNull { it.id == selection }?.id ?: projects.firstOrNull()?.id.orEmpty()
 
-    PageHead(
-        "Builds & Agent Deployments",
-        "Queue a build request against a stored project, purge a cache tag, or roll back a recorded deployment. A request stays stored unless a build runner accepts it.",
-    )
+    PageHead("Web builds", "Requests are recorded, but this console does not execute builds. Android builds and cache purges are not supported here.")
     Spacer(Modifier.height(12.dp))
-    CPanel(title = "Queue a build") {
-        CSelect(snap.projects.map { it.name }, snap.projects.firstOrNull { it.id == projectId }?.name ?: "", { picked ->
-            projectId = snap.projects.firstOrNull { it.name == picked }?.id ?: projectId
-        }, modifier = Modifier.fillMaxWidth(), enabled = snap.projects.isNotEmpty())
-        Spacer(Modifier.height(8.dp))
-        CSelect(
-            listOf("web", "android"), target, { target = it }, modifier = Modifier.fillMaxWidth(),
-            label = { if (it == "web") "web (Bun / Turbopack)" else "android (NDK 16KB)" },
-        )
-        Spacer(Modifier.height(8.dp))
-        CSelect(
-            listOf("agent:cursor", "agent:claude-code", "agent:v0", "agent:copilot", "git:push"), trigger, { trigger = it },
-            modifier = Modifier.fillMaxWidth(),
-            label = { it.replace("agent:", "agent: ").replace("git:", "git: ") },
-        )
-        Spacer(Modifier.height(10.dp))
-        CButton("Queue Build", onClick = {
-            store.action(scope, "Build Queued") { store.call("builds", jobj("projectId" to projectId, "target" to target, "trigger" to trigger)) }
-        }, enabled = snap.projects.isNotEmpty())
+    CPanel(title = "Request a web build") {
+        if (projects.isEmpty()) {
+            CEmpty("Add a project with an HTTPS repository to record a build request.")
+        } else {
+            CSelect(
+                projects.map { it.id }, projectId, { selection = it }, modifier = Modifier.fillMaxWidth(),
+                label = { id -> projects.first { it.id == id }.name },
+            )
+            Spacer(Modifier.height(10.dp))
+            CButton("Request web build", onClick = {
+                val payload = jobj("projectId" to projectId, "target" to "web")
+                store.action(scope, "Build request recorded") { store.call("builds", payload) }
+            }, enabled = !store.busy)
+        }
     }
 
     Spacer(Modifier.height(14.dp))
@@ -369,37 +370,15 @@ fun BuildsPage(store: ConsoleStore) {
             )
         }
     }
-    Spacer(Modifier.height(10.dp))
-    CPanel(title = "Cache Revalidation") {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.weight(1f)) {
-                CField("Tag", revalTag, { revalTag = it })
-            }
-            Spacer(Modifier.width(10.dp))
-            CButton("Purge", onClick = {
-                store.action(scope, "Tag Purged") {
-                    store.call("cache/revalidate", jobj("project" to (projectId.ifEmpty { "default" }), "tag" to revalTag))
-                }
-            })
-        }
-    }
-
     Spacer(Modifier.height(14.dp))
     CPanel {
         if (snap.builds.isEmpty()) {
             CEmpty("No build requests stored.")
         } else {
             snap.builds.forEach { b ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("${b.project} · ${b.target} · ${b.status}", color = Aurora.TextHi, fontSize = 12.sp)
-                        Text("${b.note} · ${ctime(b.createdAt)}", color = Aurora.TextMid, fontSize = 11.sp)
-                    }
-                    CButton("Rollback", onClick = {
-                        store.action(scope, "Rollback initiated") {
-                            store.call("deploy/rollback", jobj("project" to b.project, "deploy_id" to b.id))
-                        }
-                    }, kind = BtnKind.GHOST, compact = true)
+                Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                    Text("${b.project} · ${b.target} · ${b.status}", color = Aurora.TextHi, fontSize = 12.sp)
+                    Text("${b.note} · ${ctime(b.createdAt)}", color = Aurora.TextMid, fontSize = 11.sp)
                 }
             }
         }

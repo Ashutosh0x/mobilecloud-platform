@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Edge Node Status widget: 3x2 cells, Glance-rendered, worker-refreshed
-     every 15 min (TelemetryWorker); system resync capped at 30 min. -->
+<!-- Device telemetry sampled at system widget updates, which may be deferred. -->
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:minWidth="180dp"
     android:minHeight="110dp"

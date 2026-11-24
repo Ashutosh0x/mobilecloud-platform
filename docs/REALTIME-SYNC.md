@@ -1,12 +1,6 @@
-# Real-Time Synchronization — Web Console ⇄ Android Node
+# Real-Time Synchronization — Web Console ⇄ Android Console
 
-Status tags: **[DEPLOYED]** where an automated end-to-end test in this repository
-exercises the claim · **[VERIFIED_SOURCE]** where the implementation exists and
-is covered by source-level contracts but is not exercised by a live client in CI.
-
-This document is the engineering reference for the unified Web + Android
-synchronization plane. It is intentionally concrete: every table, message and
-endpoint below exists in the repository today.
+This document records the earlier synchronization design. Use the [current setup](../README.md#4-install-the-web-app-management-console) for operational instructions. The Android client now requires an explicitly confirmed HTTPS origin and same-origin WSS, keeps sessions in memory, and fetches a fresh snapshot after reconnecting. Treat historical `DEPLOYED` and `VERIFIED_SOURCE` labels as design or local test evidence, not proof of a live deployment.
 
 ---
 

@@ -17,8 +17,8 @@
  *                      replay_incomplete / pong / error / server.status
  *
  * Authentication reuses the existing account system: the `mc_session` cookie
- * (same cookie the dashboard uses) or a personal access token
- * (`Authorization: Bearer mc_…` / `?token=mc_…`). A connection only ever
+ * (with an approved browser Origin), or an explicit native Authorization
+ * header (`Session` or `Bearer`). A connection only ever
  * receives rows whose `owner_id` matches the authenticated account, so a
  * cross-account subscription is impossible rather than merely forbidden.
  */
@@ -29,9 +29,23 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 const PORT = Number(process.env.MOBILECLOUD_REALTIME_PORT ?? 3211);
-const HOST = process.env.MOBILECLOUD_REALTIME_HOST ?? "0.0.0.0";
+const HOST = process.env.MOBILECLOUD_REALTIME_HOST ?? "127.0.0.1";
 const POLL_MS = clamp(Number(process.env.MOBILECLOUD_REALTIME_POLL_MS ?? 200), 50, 5000);
-const DB_PATH = process.env.MOBILECLOUD_DB ?? join(process.cwd(), "data", "mobilecloud.db");
+const DB_PATH = process.env.MOBILECLOUD_DB ?? join(process.env.MOBILECLOUD_DATA_ROOT ?? join(process.cwd(), "data"), "mobilecloud.db");
+const WEB_PORT = Number(process.env.PORT ?? 3210);
+const PROTOCOL_PATH = "/api/realtime";
+const MAX_OUTBOUND = 512 * 1024;
+const PROD = process.env.NODE_ENV === "production";
+const origins = new Set();
+try {
+  const url = new URL(process.env.MOBILECLOUD_PUBLIC_ORIGIN ?? "");
+  if ((url.protocol === "https:" || (!PROD && url.protocol === "http:")) && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash) {
+    origins.add(url.origin);
+  }
+} catch { /* Invalid or absent config never creates a production allowlist. */ }
+if (!PROD && !process.env.MOBILECLOUD_PUBLIC_ORIGIN && Number.isInteger(WEB_PORT) && WEB_PORT > 0 && WEB_PORT <= 65535) {
+  for (const host of ["localhost", "127.0.0.1", "[::1]"]) origins.add(new URL(`http://${host}:${WEB_PORT}`).origin);
+}
 const SCHEMA_VERSION = 1;
 const HEARTBEAT_MS = 20_000;
 const CLIENT_TIMEOUT_MS = 75_000;
@@ -69,56 +83,67 @@ function log(level, message, extra) {
 // ---------------------------------------------------------------- database ---
 mkdirSync(dirname(DB_PATH), { recursive: true });
 let db = null;
+let sessionLookup;
+let tokenLookup;
 function openDatabase() {
   if (db) return db;
   if (!existsSync(DB_PATH)) return null;
   const handle = new DatabaseSync(DB_PATH);
-  handle.exec("PRAGMA journal_mode = WAL;");
-  handle.exec("PRAGMA busy_timeout = 4000;");
-  const hasEvents = handle.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='events'").get();
-  if (!hasEvents) {
-    log("warn", "outbox table not present yet; waiting for the API to migrate the database", { db: DB_PATH });
-    return null;
+  try {
+    handle.exec("PRAGMA busy_timeout = 250;");
+    if (!handle.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'control_plane_migrations'").get()
+      || !handle.prepare("SELECT 1 FROM control_plane_migrations WHERE version = 1").get()) return null;
+    sessionLookup = handle.prepare(`
+      SELECT u.id AS userId, u.name, s.id AS sessionId
+      FROM sessions s JOIN users u ON u.id = s.user_id
+      WHERE s.token_hash = ? AND s.expires_at > ? AND s.csrf IS NOT NULL
+        AND (s.device_id IS NULL OR EXISTS (
+          SELECT 1 FROM connected_devices d JOIN access_tokens t ON t.id = d.token_id AND t.owner_id = d.owner_id
+          WHERE d.id = s.device_id AND d.owner_id = s.user_id AND d.revoked = 0 AND t.expires_at > ?
+        ))`);
+    tokenLookup = handle.prepare(`
+      SELECT u.id AS userId, u.name, NULL AS sessionId
+      FROM access_tokens t JOIN users u ON u.id = t.owner_id
+      LEFT JOIN connected_devices d ON d.token_id = t.id AND d.owner_id = u.id
+      WHERE t.token_hash = ? AND t.expires_at > ? AND (d.id IS NULL OR d.revoked = 0)`);
+    db = handle;
+    return db;
+  } finally {
+    if (db !== handle) handle.close();
   }
-  db = handle;
-  return db;
 }
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-/** Resolves a connection's identity from a cookie, bearer token, or query token. */
+function lookup(via, hash) {
+  if (!openDatabase()) return null;
+  const now = Date.now();
+  return via === "token" ? tokenLookup.get(hash, now) : sessionLookup.get(hash, now, now);
+}
+
 function authenticate(req) {
-  const handle = openDatabase();
-  if (!handle) return null;
-  const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
-
-  const bearer = req.headers.authorization;
-  const queryToken = url.searchParams.get("token");
-  const raw = bearer?.startsWith("Bearer ") ? bearer.slice(7) : queryToken;
-  if (raw?.startsWith("mc_")) {
-    const row = handle.prepare(
-      `SELECT u.id, u.email, u.name, u.role, u.plan, t.id AS tokenId
-       FROM access_tokens t JOIN users u ON u.id = t.owner_id
-       WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > ?)`,
-    ).get(sha256(raw), Date.now());
-    if (!row) return null;
-    handle.prepare("UPDATE access_tokens SET last_used = ? WHERE id = ?").run(Date.now(), row.tokenId);
-    return { userId: row.id, name: row.name, email: row.email, sessionId: null, via: "token" };
+  const authorization = req.headers.authorization;
+  const origin = req.headers.origin;
+  let raw;
+  let via;
+  if (authorization !== undefined) {
+    const bearer = /^Bearer (mc_[a-f0-9]{48})$/i.exec(authorization);
+    const nativeSession = origin === undefined ? /^Session ([a-f0-9]{64})$/i.exec(authorization) : null;
+    if (!bearer && !nativeSession) return null;
+    via = bearer ? "token" : "cookie";
+    raw = (bearer ?? nativeSession)[1];
+  } else {
+    if (!origins.has(origin)) return null;
+    const hits = (req.headers.cookie ?? "").split(";").map((p) => p.trim()).filter((p) => p.startsWith("mc_session="));
+    if (hits.length !== 1 || !/^mc_session=[a-f0-9]{64}$/.test(hits[0])) return null;
+    via = "cookie";
+    raw = hits[0].slice("mc_session=".length);
   }
-
-  const cookie = req.headers.cookie ?? "";
-  const hit = cookie.split(";").map((p) => p.trim()).find((p) => p.startsWith("mc_session="));
-  if (!hit) return null;
-  const sessionToken = decodeURIComponent(hit.slice("mc_session=".length));
-  const session = handle.prepare(
-    `SELECT s.id AS sessionId, s.expires_at AS expiresAt, u.id, u.email, u.name, u.role, u.plan
-     FROM sessions s JOIN users u ON u.id = s.user_id
-     WHERE s.token_hash = ?`,
-  ).get(sha256(sessionToken));
-  if (!session || Number(session.expiresAt) < Date.now()) return null;
-  return { userId: session.id, sessionId: session.sessionId, name: session.name, email: session.email, via: "cookie" };
+  const hash = sha256(raw);
+  const identity = lookup(via, hash);
+  return identity ? { ...identity, via, hash } : null;
 }
 
 // -------------------------------------------------------------- ws framing ---
@@ -165,6 +190,7 @@ class Connection {
     this.buffer = Buffer.alloc(0);
     this.fragmentOpcode = null;
     this.fragments = [];
+    this.fragmentBytes = 0;
     this.subscriptions = null; // null = every type
     this.ackedSeq = 0;
     this.delivered = 0;
@@ -179,14 +205,26 @@ class Connection {
     socket.on("end", () => this.terminate());
   }
 
+  authorized() {
+    if (this.closed) return false;
+    try {
+      const { via, hash } = this.identity;
+      if (lookup(via, hash)?.userId === this.ownerId) return true;
+      this.close(1008, "authentication expired or revoked");
+    } catch {
+      this.close(1011, "authentication unavailable");
+    }
+    return false;
+  }
+
   onData(chunk) {
+    if (!this.authorized()) return;
     this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
     try {
-      while (this.readFrame()) {
+      while (!this.closed && this.readFrame()) {
         /* keep draining */
       }
-    } catch (error) {
-      log("warn", "dropping connection after frame error", { error: String(error), account: this.ownerId });
+    } catch {
       this.close(1002, "protocol error");
     }
   }
@@ -210,6 +248,7 @@ class Connection {
       len = Number(big);
       offset = 10;
     }
+    if ((buf[0] & 0x70) !== 0 || (opcode >= OP_CLOSE && (!fin || len > 125))) throw new Error("invalid frame flags");
     if (len > MAX_FRAME) throw new Error("frame exceeds size limit");
     const maskLen = masked ? 4 : 0;
     if (buf.length < offset + maskLen + len) return false;
@@ -239,23 +278,27 @@ class Connection {
     }
     if (opcode === OP_CONT) {
       if (this.fragmentOpcode === null) throw new Error("unexpected continuation frame");
+      this.fragmentBytes += payload.length;
+      if (this.fragmentBytes > MAX_FRAME || this.fragments.length >= 256) throw new Error("message exceeds size limit");
       this.fragments.push(payload);
       if (fin) this.finishMessage();
       return;
     }
-    if (opcode !== OP_TEXT) throw new Error(`unsupported opcode ${opcode}`);
+    if (opcode !== OP_TEXT || this.fragmentOpcode !== null) throw new Error("unexpected data frame");
     if (fin) {
       this.onMessage(payload.toString("utf8"));
       return;
     }
     this.fragmentOpcode = OP_TEXT;
     this.fragments = [payload];
+    this.fragmentBytes = payload.length;
   }
 
   finishMessage() {
-    const text = Buffer.concat(this.fragments).toString("utf8");
+    const text = Buffer.concat(this.fragments, this.fragmentBytes).toString("utf8");
     this.fragmentOpcode = null;
     this.fragments = [];
+    this.fragmentBytes = 0;
     this.onMessage(text);
   }
 
@@ -316,17 +359,24 @@ class Connection {
   replay(cursor) {
     const handle = openDatabase();
     if (!handle) return;
+    if (!this.authorized()) return;
     const rows = handle.prepare(
-      `SELECT seq, id, owner_id, type, resource_id, schema_version, payload, at
-       FROM events WHERE owner_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`,
-    ).all(this.ownerId, cursor, REPLAY_LIMIT + 1);
-    const more = rows.length > REPLAY_LIMIT;
-    const page = more ? rows.slice(0, REPLAY_LIMIT) : rows;
+      `SELECT e.seq, e.id, e.owner_id, e.type, e.resource_id, e.schema_version, e.payload, e.at,
+         COALESCE((SELECT MAX(p.seq) FROM events p WHERE p.owner_id = e.owner_id AND p.seq < e.seq), 0) AS previous_seq
+       FROM events e WHERE e.owner_id = ? AND e.seq > ? ORDER BY e.seq ASC LIMIT ?`,
+    ).iterate(this.ownerId, cursor, REPLAY_LIMIT + 1);
+    const page = [];
+    let more = false;
+    let bytes = 0;
+    for (const row of rows) {
+      bytes += Math.min(Buffer.byteLength(row.payload), MAX_FRAME / 2) + 512;
+      if (page.length >= REPLAY_LIMIT || (page.length > 0 && bytes > MAX_OUTBOUND / 2)) { more = true; break; }
+      page.push(row);
+    }
     const last = page.length ? Number(page[page.length - 1].seq) : cursor;
-    this.send({ type: "replay_start", from: cursor, to: last });
+    this.send({ type: "replay_start", from: cursor, to: last, cursor: last });
     for (const row of page) this.deliver(row);
-    if (more) this.send({ type: "replay_incomplete", cursor: last });
-    else this.send({ type: "replay_complete", cursor: last });
+    this.send({ type: more ? "replay_incomplete" : "replay_complete", cursor: last, to: last, sequence: last });
   }
 
   matches(type) {
@@ -336,7 +386,7 @@ class Connection {
 
   deliver(row) {
     const type = String(row.type);
-    if (!this.matches(type)) return;
+    if (!this.matches(type) || !this.authorized()) return;
     const event = envelope(row);
     this.delivered += 1;
     this.send({ type: "event", event });
@@ -349,6 +399,7 @@ class Connection {
 
   sendRaw(frame) {
     if (this.closed) return;
+    if (this.socket.writableLength + frame.length > MAX_OUTBOUND) return this.terminate();
     try {
       this.socket.write(frame);
     } catch {
@@ -361,18 +412,22 @@ class Connection {
     const body = Buffer.alloc(2 + Buffer.byteLength(reason ?? ""));
     body.writeUInt16BE(code, 0);
     body.write(reason ?? "", 2);
-    this.sendRaw(encodeFrame(OP_CLOSE, body));
-    this.terminate();
+    if (this.socket.writableLength) return this.terminate();
+    try {
+      this.socket.end(encodeFrame(OP_CLOSE, body));
+      const timer = setTimeout(() => this.socket.destroy(), 1000);
+      timer.unref();
+      this.socket.once("close", () => clearTimeout(timer));
+      this.terminate(false);
+    } catch {
+      this.terminate();
+    }
   }
 
-  terminate() {
+  terminate(destroy = true) {
+    if (destroy) this.socket.destroy();
     if (this.closed) return;
     this.closed = true;
-    try {
-      this.socket.destroy();
-    } catch {
-      /* already gone */
-    }
     connections.delete(this);
     const list = byAccount.get(this.ownerId);
     if (list) {
@@ -435,6 +490,7 @@ function envelope(row) {
     account_id: String(row.owner_id),
     resource_id: row.resource_id == null ? null : String(row.resource_id),
     sequence: Number(row.seq),
+    previous_sequence: Number(row.previous_seq ?? 0),
     occurred_at: new Date(Number(row.at)).toISOString(),
     payload,
     ...(truncated ? { truncated: true } : {}),
@@ -446,15 +502,21 @@ const connections = new Set();
 const byAccount = new Map();
 
 // ----------------------------------------------------------------- server ---
-const server = createServer((req, res) => {
-  if (req.url?.startsWith("/api/health")) {
+const server = createServer({ maxHeaderSize: 8192, headersTimeout: 5000, requestTimeout: 10_000 }, (req, res) => {
+  if (req.url === "/api/ready") {
+    let ready = false;
+    try { ready = Boolean(openDatabase()) && tailSeq >= 0 && Date.now() - lastSuccessfulTail < Math.max(1000, POLL_MS * 3) && (!PROD || origins.size > 0); }
+    catch { /* Not ready; keep the identity endpoint independent. */ }
+    res.writeHead(ready ? 200 : 503, { "content-type": "application/json", "cache-control": "no-store" });
+    res.end(JSON.stringify({ ready }));
+    return;
+  }
+  if (req.url === "/api/health") {
     res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
     res.end(JSON.stringify({
       service: "MobileCloud",
       component: "realtime",
       schemaVersion: SCHEMA_VERSION,
-      clients: connections.size,
-      accounts: byAccount.size,
       time: new Date().toISOString(),
     }));
     return;
@@ -463,104 +525,120 @@ const server = createServer((req, res) => {
   res.end(JSON.stringify({ error: "This endpoint speaks WebSocket on /api/realtime" }));
 });
 
-server.on("upgrade", (req, socket) => {
-  // A rejected or half-closed upgrade must never take the gateway down: the
-  // raw socket emits `error` as soon as a client resets mid-handshake.
+function reject(socket, status) {
+  socket.setTimeout(1000, () => socket.destroy());
+  socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+}
+
+const upgradeAttempts = new Map();
+function tooManyUpgrades(peer) {
+  const now = Date.now();
+  for (const [ip, window] of upgradeAttempts) if (window.until <= now) upgradeAttempts.delete(ip);
+  if (!upgradeAttempts.has(peer)) {
+    if (upgradeAttempts.size >= 1024) return true;
+    upgradeAttempts.set(peer, { count: 0, until: now + 10_000 });
+  }
+  return ++upgradeAttempts.get(peer).count > 100;
+}
+
+server.on("upgrade", (req, socket, head) => {
   socket.on("error", () => socket.destroy());
-  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-  const key = req.headers["sec-websocket-key"];
-  const wants = (req.headers.upgrade ?? "").toLowerCase() === "websocket";
+  let conn;
+  try {
+    // Only the canonical path is accepted. Credentials in URLs are never read.
+    if (typeof req.url !== "string" || req.url.split("?", 1)[0] !== PROTOCOL_PATH) return reject(socket, "404 Not Found");
+    if (req.url !== PROTOCOL_PATH) return reject(socket, "401 Unauthorized");
+    const key = req.headers["sec-websocket-key"];
+    const wants = (req.headers.upgrade ?? "").toLowerCase() === "websocket";
+    if (req.method !== "GET" || !wants || req.headers["sec-websocket-version"] !== "13"
+      || typeof key !== "string" || !/^[A-Za-z0-9+/]{22}==$/.test(key)) return reject(socket, "400 Bad Request");
+    if (tooManyUpgrades(socket.remoteAddress ?? "unknown")) return reject(socket, "429 Too Many Requests");
+    if (connections.size >= MAX_CLIENTS_TOTAL || !openDatabase()) return reject(socket, "503 Service Unavailable");
+    const identity = authenticate(req);
+    if (!identity) return reject(socket, "401 Unauthorized");
+    const list = byAccount.get(identity.userId) ?? new Set();
+    if (list.size >= MAX_CLIENTS_PER_ACCOUNT) return reject(socket, "429 Too Many Requests");
 
-  if (!wants || url.pathname !== "/api/realtime" || !key) {
-    socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
-    socket.destroy();
-    return;
+    initializeTail();
+    const latest = currentSeq(identity.userId);
+    socket.write(
+      "HTTP/1.1 101 Switching Protocols\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Connection: Upgrade\r\n" +
+      `Sec-WebSocket-Accept: ${acceptToken(key)}\r\n\r\n`,
+    );
+    conn = new Connection(socket, identity);
+    connections.add(conn);
+    list.add(conn);
+    byAccount.set(identity.userId, list);
+    conn.send({
+      type: "welcome",
+      account_id: identity.userId,
+      account_name: identity.name,
+      via: identity.via,
+      cursor: latest,
+      heartbeat_ms: HEARTBEAT_MS,
+      schema_version: SCHEMA_VERSION,
+      server_time: Date.now(),
+      server_status: "online",
+      subscriptions: "all",
+    });
+    if (head.length) conn.onData(head);
+    log("info", "client connected", { account: identity.userId, via: identity.via, clients: connections.size });
+  } catch {
+    if (conn) conn.close(1011, "upgrade unavailable");
+    else reject(socket, "503 Service Unavailable");
   }
-  if (connections.size >= MAX_CLIENTS_TOTAL) {
-    socket.write("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
-    socket.destroy();
-    return;
-  }
-
-  const identity = authenticate(req);
-  if (!identity) {
-    // 401 tells the client "authenticate", which is different from "unreachable".
-    socket.write("HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n");
-    socket.end(JSON.stringify({ error: "Sign in required" }));
-    return;
-  }
-  const existing = byAccount.get(identity.userId);
-  if (existing && existing.size >= MAX_CLIENTS_PER_ACCOUNT) {
-    socket.write("HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n");
-    socket.destroy();
-    return;
-  }
-
-  socket.write(
-    "HTTP/1.1 101 Switching Protocols\r\n" +
-    "Upgrade: websocket\r\n" +
-    "Connection: Upgrade\r\n" +
-    `Sec-WebSocket-Accept: ${acceptToken(String(key))}\r\n\r\n`,
-  );
-
-  const conn = new Connection(socket, identity);
-  connections.add(conn);
-  const list = byAccount.get(identity.userId) ?? new Set();
-  list.add(conn);
-  byAccount.set(identity.userId, list);
-
-  const latest = currentSeq();
-  conn.send({
-    type: "welcome",
-    account_id: identity.userId,
-    account_name: identity.name,
-    via: identity.via,
-    cursor: latest,
-    heartbeat_ms: HEARTBEAT_MS,
-    schema_version: SCHEMA_VERSION,
-    server_time: Date.now(),
-    server_status: "online",
-    subscriptions: "all",
-  });
-  log("info", "client connected", { account: identity.userId, via: identity.via, clients: connections.size });
 });
 
-function currentSeq() {
+function currentSeq(ownerId) {
   const handle = openDatabase();
   if (!handle) return 0;
-  const row = handle.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM events").get();
+  const row = ownerId
+    ? handle.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM events WHERE owner_id = ?").get(ownerId)
+    : handle.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM events").get();
   return Number(row?.s ?? 0);
 }
 
 // ------------------------------------------------------------------ tailer ---
 let tailSeq = -1;
 
+function initializeTail() {
+  const handle = openDatabase();
+  if (!handle || tailSeq >= 0) return;
+  const latest = currentSeq();
+  const previous = handle.prepare("SELECT seq FROM event_cursors WHERE consumer = 'realtime-gateway'").get();
+  tailSeq = previous ? Math.min(previous.seq, latest) : latest;
+  persistTail(handle);
+}
+
+function persistTail(handle) {
+  handle.prepare(
+    "INSERT INTO event_cursors (consumer, seq, at) VALUES ('realtime-gateway', ?, ?) ON CONFLICT(consumer) DO UPDATE SET seq = excluded.seq, at = excluded.at",
+  ).run(tailSeq, Date.now());
+}
+
 function tail() {
+  for (const conn of connections) conn.authorized();
   const handle = openDatabase();
   if (!handle) return;
-  if (tailSeq < 0) {
-    // Only stream new events; each client replays its own backlog from its cursor.
-    tailSeq = currentSeq();
-    handle.prepare(
-      "INSERT INTO event_cursors (consumer, seq, at) VALUES ('realtime-gateway', ?, ?) ON CONFLICT(consumer) DO UPDATE SET seq = excluded.seq, at = excluded.at",
-    ).run(tailSeq, Date.now());
-    log("info", "tailing event outbox", { db: DB_PATH, from: tailSeq, pollMs: POLL_MS });
-    return;
-  }
+  initializeTail();
   const rows = handle.prepare(
-    `SELECT seq, id, owner_id, type, resource_id, schema_version, payload, at
-     FROM events WHERE seq > ? ORDER BY seq ASC LIMIT 500`,
+    `SELECT e.seq, e.id, e.owner_id, e.type, e.resource_id, e.schema_version, e.payload, e.at,
+       COALESCE((SELECT MAX(p.seq) FROM events p WHERE p.owner_id = e.owner_id AND p.seq < e.seq), 0) AS previous_seq
+     FROM events e WHERE e.seq > ? ORDER BY e.seq ASC LIMIT 500`,
   ).all(tailSeq);
   if (!rows.length) return;
   for (const row of rows) {
     tailSeq = Number(row.seq);
     const listeners = byAccount.get(String(row.owner_id));
     if (!listeners) continue;
-    for (const conn of listeners) conn.deliver(row);
+    for (const conn of listeners) {
+      try { conn.deliver(row); }
+      catch { conn.close(1011, "delivery unavailable"); }
+    }
   }
-  handle.prepare(
-    "INSERT INTO event_cursors (consumer, seq, at) VALUES ('realtime-gateway', ?, ?) ON CONFLICT(consumer) DO UPDATE SET seq = excluded.seq, at = excluded.at",
-  ).run(tailSeq, Date.now());
+  persistTail(handle);
 }
 
 function broadcastServerStatus(status) {
@@ -570,12 +648,12 @@ function broadcastServerStatus(status) {
     schema_version: SCHEMA_VERSION,
     account_id: "*",
     resource_id: "realtime",
-    sequence: currentSeq(),
+    sequence: 0,
     occurred_at: new Date().toISOString(),
     payload: { component: "realtime", status },
     ephemeral: true,
   };
-  for (const conn of connections) conn.send({ type: "event", event: { ...payload, account_id: conn.ownerId } });
+  for (const conn of connections) if (conn.authorized()) conn.send({ type: "event", event: { ...payload, account_id: conn.ownerId } });
 }
 
 function heartbeat() {
@@ -585,17 +663,30 @@ function heartbeat() {
       conn.close(1001, "heartbeat timeout");
       continue;
     }
-    conn.send({ type: "ping", at: now });
+    if (conn.authorized()) {
+      conn.sendRaw(encodeFrame(OP_PING, ""));
+      conn.send({ type: "ping", at: now });
+    }
   }
 }
 
-setInterval(tail, POLL_MS).unref?.();
-setInterval(heartbeat, HEARTBEAT_MS).unref?.();
+let lastSuccessfulTail = 0;
+let lastTailWarning = 0;
+setInterval(() => {
+  try {
+    tail();
+    if (db) lastSuccessfulTail = Date.now();
+  } catch {
+    if (Date.now() - lastTailWarning > 10_000) {
+      lastTailWarning = Date.now();
+      log("warn", "outbox poll failed; retrying");
+    }
+  }
+}, POLL_MS).unref();
+setInterval(heartbeat, HEARTBEAT_MS).unref();
 
 server.listen(PORT, HOST, () => {
-  openDatabase();
-  log("info", "realtime gateway listening", { host: HOST, port: PORT, db: DB_PATH });
-  broadcastServerStatus("online");
+  log("info", "realtime gateway listening", { host: HOST, port: PORT });
 });
 
 function shutdown(signal) {

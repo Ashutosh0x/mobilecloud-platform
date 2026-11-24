@@ -1,76 +1,33 @@
-# MobileCloud local high-performance reverse proxy (config/Caddyfile).
-#
-# Terminates tunnel traffic on the phone and forwards to the native Rust
-# core-engine on 127.0.0.1:3000. TLS is terminated upstream at the Cloudflare
-# / Tailscale edge, so this hop is loopback-only plaintext by design.
-#
-# Master blueprint research report section 7: the phone exposes ZERO open
-# ports; all ingress arrives through the outbound tunnel.
-
+# Loopback ingress for public deployment traffic only. Never point this
+# reverse proxy (or a tunnel) at the operator listener on port 3000.
 {
-	# Phones have limited entropy budgets; keep admin endpoints off.
 	admin off
 	auto_https off
 }
 
 :8080 {
-	# ---- Access & abuse controls (research section 10.2) ----
-	# Per-IP token bucket: 60 r/s burst 120 protects the mobile CPU and radio
-	# from traffic-exhaustion attacks.
-	rate_limit {
-		zone dynamic_zone {
-			key {remote_host}
-			events 60
-			window 1s
-		}
-	}
-
+	bind 127.0.0.1
 	encode zstd br gzip
 
-	# ---- Platform routes (forwarded to the core-engine) ----
-	handle /webhook/* {
-		reverse_proxy 127.0.0.1:3000
+	@operator path /api/v1 /api/v1/* /webhook /webhook/* /logs /logs/* /terminal /terminal/* /healthz /healthz/* /metrics /metrics/*
+	handle @operator {
+		respond 404
 	}
-	handle /healthz {
-		reverse_proxy 127.0.0.1:3000
-	}
-	handle /metrics {
-		reverse_proxy 127.0.0.1:3000
-	}
-	handle /logs/* {
-		# Server-Sent Events build log stream.
-		reverse_proxy 127.0.0.1:3000 {
-			flush_interval -1
-		}
-	}
-	handle /terminal/* {
-		# WebSocket CloudShell (full-duplex).
-		reverse_proxy 127.0.0.1:3000
-	}
-
-	# ---- Deployment traffic (Vercel Build Output v3 router) ----
 	handle {
-		reverse_proxy 127.0.0.1:3000 {
-			# Sub-100ms failure detection so tunnel failover stays snappy.
-			health_uri /healthz
-			health_interval 5s
-			health_timeout 2s
-			fail_duration 10s
+		reverse_proxy 127.0.0.1:3001 {
+			header_up -Authorization
+			header_up -Cookie
+			header_up -X-Api-Key
+			header_up -X-Terminal-Token
+			header_up -X-Hub-Signature-256
 		}
 	}
 
 	header {
-		# HSTS is the edge's job (Cloudflare), but defense in depth is free.
 		Strict-Transport-Security "max-age=15552000;"
 		X-Content-Type-Options "nosniff"
-		Referrer-Policy "strict-origin-when-cross-origin"
+		Referrer-Policy "no-referrer"
 		-Server
 	}
-
-	log {
-		output file /var/mobilecloud/logs/caddy-access.log {
-			roll_size 10MiB
-			roll_keep 3
-		}
-	}
+	# No request access log here: rejected legacy URLs may carry credentials.
 }

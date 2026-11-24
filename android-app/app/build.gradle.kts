@@ -4,16 +4,6 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// Release signing is driven entirely by the environment; no key material or
-// password is committed. The release build is only signed when a keystore can
-// actually be found, otherwise `signingConfig` stays null and Gradle produces
-// an unsigned release APK instead of failing with a made-up password.
-val releaseKeystore: File? = listOfNotNull(
-    System.getenv("KEYSTORE_PATH")?.let { file(it) },
-    file("../../mobilecloud-release.jks"),
-    file("mobilecloud-release.jks"),
-).firstOrNull { it.exists() }
-
 android {
     // The R / BuildConfig classes must live in the root source package
     // (`com.mobilecloud.*`) because every screen and the terminal view import
@@ -27,7 +17,7 @@ android {
         minSdk = 30
         targetSdk = 35
         versionCode = 20261120
-        versionName = "2.4.0-edge"
+        versionName = "2.4.0-console"
 
         ndk {
             abiFilters.addAll(listOf("arm64-v8a"))
@@ -44,27 +34,12 @@ android {
         }
     }
 
-    signingConfigs {
-        releaseKeystore?.let { keystore ->
-            create("release") {
-                storeFile = keystore
-                storePassword = System.getenv("KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("KEY_ALIAS")
-                keyPassword = System.getenv("KEY_PASSWORD")
-                enableV1Signing = true
-                enableV2Signing = true
-                enableV3Signing = true
-                enableV4Signing = true
-            }
-        }
-    }
-
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            // Signed only when a real keystore is present; otherwise unsigned.
-            signingConfig = releaseKeystore?.let { signingConfigs.getByName("release") }
+            // assembleRelease is unsigned. The release script alone aligns,
+            // signs and verifies the distributable APK.
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

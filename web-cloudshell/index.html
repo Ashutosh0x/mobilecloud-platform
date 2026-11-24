@@ -3,6 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="referrer" content="no-referrer" />
+  <script>
+    const params = new URLSearchParams(location.search);
+    if (params.has('token')) {
+      params.delete('token');
+      history.replaceState(null, '', location.pathname + (params.size ? '?' + params : '') + location.hash);
+    }
+  </script>
   <title>MobileCloud CloudShell</title>
   <!-- CIDS baseline (terminal doc §6.2 theme) -->
   <style>
@@ -15,22 +23,19 @@
       border-radius: 999px; background: rgba(30, 41, 59, 0.85); color: #94A3B8;
       border: 1px solid #1E293B; user-select: none;
     }
-    #status-pill[data-status="open"] { color: #10B981; }
-    #status-pill[data-status="reconnecting"],
-    #status-pill[data-status="connecting"] { color: #F59E0B; }
-    #status-pill[data-status="closed"] { color: #EF4444; }
+    #status-pill[data-status="disabled"] { color: #F59E0B; }
   </style>
 </head>
 <body>
   <div id="terminal-container"></div>
-  <div id="status-pill" data-status="connecting">CLOUDSHELL</div>
+  <div id="status-pill" data-status="disabled" role="status">BROWSER CLOUDSHELL DISABLED</div>
 
   <script type="module">
     import { mountTerminal } from '/src/terminal.ts';
     const pill = document.getElementById('status-pill');
     const handle = mountTerminal(
       document.getElementById('terminal-container'),
-      (status) => { pill.dataset.status = status; pill.textContent = status.toUpperCase(); },
+      (status) => { pill.dataset.status = status; },
     );
     window.addEventListener('beforeunload', () => handle.dispose());
   </script>

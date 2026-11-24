@@ -1,174 +1,167 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { handle } from "./api.ts";
+import { openDb, tokenHash } from "./db.ts";
 
-process.env.MOBILECLOUD_DB = join(mkdtempSync(join(tmpdir(), "mc-api-")), "t.db");
+const root = mkdtempSync(join(tmpdir(), "mc-api-"));
+process.env.MOBILECLOUD_DB = join(root, "t.db");
+process.env.MOBILECLOUD_DATA_ROOT = root;
+process.env.MOBILECLOUD_BOOTSTRAP_EMAIL = "operator@example.test";
+process.env.MOBILECLOUD_BOOTSTRAP_PASSWORD = "test-operator-password";
+process.env.MOBILECLOUD_PUBLIC_ORIGIN = "https://console.example.test";
 
-test("signup, project, and deploy stay blocked without a builder", async () => {
-  const { resetDb } = await import("./db.ts");
-  resetDb();
-  const { handle } = await import("./api.ts");
-  const signup = await handle(new Request("http://local/api/auth/signup", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name: "Ada", email: "ada@example.com", password: "correct-horse" }),
-  }), ["auth", "signup"]);
-  assert.equal(signup.status, 200);
-  const cookie = signup.headers.get("set-cookie") ?? "";
-  assert.match(cookie, /mc_session=/);
-  const session = cookie.split(";")[0];
+const origin = process.env.MOBILECLOUD_PUBLIC_ORIGIN;
+const credentials = { email: process.env.MOBILECLOUD_BOOTSTRAP_EMAIL, password: process.env.MOBILECLOUD_BOOTSTRAP_PASSWORD };
 
-  const created = await handle(new Request("http://local/api/projects", {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie: session },
-    body: JSON.stringify({ name: "ledger", framework: "Next.js" }),
-  }), ["projects"]);
-  assert.equal(created.status, 201);
+function request(path: string, method = "GET", body?: object, headers?: HeadersInit) {
+  const all = new Headers(headers);
+  if (body) all.set("content-type", "application/json");
+  return handle(new Request(`${origin}/api/${path}`, { method, headers: all, body: body && JSON.stringify(body) }), path.split("/"));
+}
 
-  const overview = await handle(new Request("http://local/api/overview", { headers: { cookie: session } }), ["overview"]);
-  const body = await overview.json() as { projects: { id: string }[]; deployments: unknown[] };
-  assert.equal(body.projects.length, 1);
-  assert.equal(body.deployments.length, 0);
+async function login() {
+  const response = await request("auth/login", "POST", credentials, { origin });
+  assert.equal(response.status, 200);
+  const cookies = response.headers.getSetCookie();
+  assert.equal(cookies.length, 2);
+  assert.ok(cookies.every((cookie) => cookie.includes("; Secure")));
+  const cookie = cookies.find((value) => value.startsWith("mc_session="))!.split(";")[0];
+  // Native flow can send the token from auth/me even without a CSRF cookie.
+  const me = await request("auth/me", "GET", undefined, { cookie });
+  const { user, csrfToken } = await me.json();
+  assert.ok(user);
+  assert.match(csrfToken, /^[a-f0-9]{64}$/);
+  return { cookie, "x-mc-csrf": csrfToken as string, userId: user.id as string };
+}
 
-  const deploy = await handle(new Request("http://local/api/deployments", {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie: session },
-    body: JSON.stringify({ projectId: body.projects[0].id }),
-  }), ["deployments"]);
-  assert.equal(deploy.status, 201);
-  const recorded = await deploy.json() as { status: string };
-  assert.equal(recorded.status, "blocked");
+test("public signup is disabled while operator provisioning and HTTPS discovery work", async () => {
+  const blocked = await request("auth/signup", "POST", { email: "new@example.test", password: "test-only-example" });
+  assert.equal(blocked.status, 403);
+  const { userId } = await login();
+  assert.ok(userId);
+  const count = openDb().prepare("SELECT COUNT(*) AS n FROM users").get();
+  assert.equal(count?.n, 1);
+  const { realtime } = await (await request("health")).json();
+  assert.equal(realtime.path, "/api/realtime");
+  assert.equal(realtime.url, "wss://console.example.test/api/realtime");
+  assert.ok(realtime.port > 0);
 });
 
-test("access tokens are stored as hashes and device codes stay pending until approved", async () => {
-  const { resetDb, openDb } = await import("./db.ts");
-  resetDb();
-  const { handle } = await import("./api.ts");
-  const signup = await handle(new Request("http://local/api/auth/signup", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name: "Ada", email: "ada2@example.com", password: "correct-horse" }),
-  }), ["auth", "signup"]);
-  const session = (signup.headers.get("set-cookie") ?? "").split(";")[0];
-
-  const created = await handle(new Request("http://local/api/tokens", {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie: session },
-    body: JSON.stringify({ name: "ci", days: 7 }),
-  }), ["tokens"]);
-  assert.equal(created.status, 201);
-  const issued = await created.json() as { token: string };
-  assert.match(issued.token, /^mc_/);
-  const stored = openDb().prepare("SELECT token_hash FROM access_tokens").all() as { token_hash: string }[];
-  assert.equal(stored.some((row) => row.token_hash === issued.token), false);
-
-  const me = await handle(new Request("http://local/api/auth/me", {
-    headers: { authorization: `Bearer ${issued.token}` },
-  }), ["auth", "me"]);
-  assert.equal(me.status, 200);
-
-  const started = await handle(new Request("http://local/api/auth/device/code", { method: "POST" }), ["auth", "device", "code"]);
-  const codes = await started.json() as { userCode: string; deviceCode: string };
-  const pending = await handle(new Request("http://local/api/auth/device/token", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ deviceCode: codes.deviceCode }),
-  }), ["auth", "device", "token"]);
-  assert.equal(pending.status, 202);
-
-  const approved = await handle(new Request("http://local/api/device/approve", {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie: session },
-    body: JSON.stringify({ userCode: codes.userCode }),
-  }), ["device", "approve"]);
-  assert.equal(approved.status, 200);
-
-  const done = await handle(new Request("http://local/api/auth/device/token", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ deviceCode: codes.deviceCode }),
-  }), ["auth", "device", "token"]);
-  assert.equal(done.status, 200);
-  const deviceToken = await done.json() as { token: string };
-  assert.match(deviceToken.token, /^mc_/);
+test("only the actual credential authorizes writes, and logout clears CSRF and revokes the session", async () => {
+  const { userId, ...auth } = await login();
+  const input = { name: "New name" };
+  assert.equal((await request("profile", "POST", input, { cookie: auth.cookie })).status, 403);
+  assert.equal((await request("profile", "POST", input, { ...auth, origin: "https://other.example.test" })).status, 403);
+  assert.equal((await request("profile", "POST", input, { ...auth, authorization: "Bearer invalid" })).status, 401);
+  assert.equal((await request("profile", "POST", input, auth)).status, 200);
+  assert.equal((await request("auth/logout", "POST", undefined, { cookie: auth.cookie })).status, 403);
+  const logout = await request("auth/logout", "POST", undefined, auth);
+  assert.equal(logout.status, 200);
+  for (const name of ["mc_session", "mc_csrf"]) assert.ok(logout.headers.getSetCookie().some((cookie) => cookie.startsWith(`${name}=`) && cookie.includes("Max-Age=0")));
+  assert.equal((await request("overview", "GET", undefined, auth)).status, 401);
 });
 
-test("a JA4 rule matches only a well-formed header and does not invent a digest", async () => {
-  const { resetDb } = await import("./db.ts");
-  resetDb();
-  const { handle } = await import("./api.ts");
-  const signup = await handle(new Request("http://local/api/auth/signup", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name: "Ada", email: "ada3@example.com", password: "correct-horse" }),
-  }), ["auth", "signup"]);
-  const session = (signup.headers.get("set-cookie") ?? "").split(";")[0];
-  const digest = "t13d1516h2_8daaf6152771_02713d6af862";
-  const rule = await handle(new Request("http://local/api/firewall", {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie: session },
-    body: JSON.stringify({ name: "ja4", action: "deny", matchKey: "ja4", matchOp: "equals", matchValue: digest }),
-  }), ["firewall"]);
-  assert.equal(rule.status, 201);
-
-  const probe = (ja4?: string) => handle(new Request("http://local/api/team", {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie: session, ...(ja4 ? { "x-ja4-fingerprint": ja4 } : {}) },
-    body: JSON.stringify({ name: "", email: "" }),
-  }), ["team"]);
-  assert.equal((await probe()).status, 400);
-  assert.equal((await probe(digest)).status, 403);
-  assert.equal((await probe("not-a-digest")).status, 400);
-
-  const overview = await handle(new Request("http://local/api/overview", { headers: { cookie: session } }), ["overview"]);
-  const body = await overview.json() as { firewall: { traffic: { topJa4: { value: string }[]; notes: string[] } } };
-  assert.deepEqual(body.firewall.traffic.topJa4.map((row) => row.value), [digest]);
-  assert.equal(body.firewall.traffic.notes.some((note) => note.includes("ASN")), true);
+test("cross-origin login and non-JSON login do not establish sessions", async () => {
+  const crossOrigin = await request("auth/login", "POST", credentials, { origin: "https://other.example.test" });
+  assert.equal(crossOrigin.status, 403);
+  assert.equal(crossOrigin.headers.getSetCookie().length, 0);
+  const wrongType = await handle(new Request(`${origin}/api/auth/login`, { method: "POST", body: "test", headers: { origin } }), ["auth", "login"]);
+  assert.equal(wrongType.status, 415);
 });
 
-test("an unreachable core engine blocks the deploy and is reported honestly", async () => {
-  const { resetDb } = await import("./db.ts");
-  resetDb();
-  const { handle } = await import("./api.ts");
+test("only development permits default loopback browser origins", async (t) => {
+  const env: Record<string, string | undefined> = process.env;
+  const keys = ["NODE_ENV", "MOBILECLOUD_PUBLIC_ORIGIN", "PORT"];
+  const previous = keys.map((key) => env[key]);
+  t.after(() => keys.forEach((key, index) => {
+    if (previous[index] === undefined) delete env[key]; else env[key] = previous[index];
+  }));
+  const loginFrom = (origin?: string, site?: string) => {
+    const headers = new Headers({ "content-type": "application/json" });
+    if (origin) headers.set("origin", origin);
+    if (site) headers.set("sec-fetch-site", site);
+    return handle(new Request("http://127.0.0.1:3210/api/auth/login", {
+      method: "POST", headers, body: JSON.stringify(credentials),
+    }), ["auth", "login"]);
+  };
+  delete env.MOBILECLOUD_PUBLIC_ORIGIN;
+  env.PORT = "3210";
+  env.NODE_ENV = "development";
+  assert.equal((await loginFrom("http://localhost:3210")).status, 200);
+  assert.equal((await loginFrom("http://localhost:3210", "cross-site")).status, 403);
+  assert.equal((await loginFrom("http://localhost:3211")).status, 403);
+  env.MOBILECLOUD_PUBLIC_ORIGIN = "not-an-origin";
+  assert.equal((await loginFrom("http://localhost:3210")).status, 403);
+  delete env.MOBILECLOUD_PUBLIC_ORIGIN;
+  env.NODE_ENV = "production";
+  assert.equal((await loginFrom("http://127.0.0.1:3210")).status, 403);
+  const native = await loginFrom();
+  assert.equal(native.status, 200);
+  const cookies = native.headers.getSetCookie();
+  assert.equal(cookies.length, 2);
+  assert.ok(cookies.every((cookie) => cookie.includes("; Secure")));
+});
+
+test("configured engine remains disabled for builds, deployments and management", async (t) => {
   const original = process.env.MOBILECLOUD_BUILDER_URL;
   process.env.MOBILECLOUD_BUILDER_URL = "http://127.0.0.1:1";
-  try {
-    const signup = await handle(new Request("http://local/api/auth/signup", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "Ada", email: "ada4@example.com", password: "correct-horse" }),
-    }), ["auth", "signup"]);
-    const session = (signup.headers.get("set-cookie") ?? "").split(";")[0];
-
-    const created = await handle(new Request("http://local/api/projects", {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie: session },
-      body: JSON.stringify({ name: "ledger", framework: "Next.js", repoUrl: "https://github.com/acme/ledger.git" }),
-    }), ["projects"]);
-    assert.equal(created.status, 201);
-    const project = await created.json() as { id: string; repoUrl: string | null };
-    assert.equal(project.repoUrl, "https://github.com/acme/ledger.git");
-
-    const deploy = await handle(new Request("http://local/api/deployments", {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie: session },
-      body: JSON.stringify({ projectId: project.id }),
-    }), ["deployments"]);
-    assert.equal(deploy.status, 201);
-    const recorded = await deploy.json() as { status: string; note: string };
-    assert.equal(recorded.status, "blocked");
-    assert.ok(recorded.note.length > 0);
-    assert.match(recorded.note, /engine/);
-
-    const builder = await handle(new Request("http://local/api/builder", { headers: { cookie: session } }), ["builder"]);
-    assert.equal(builder.status, 200);
-    const info = await builder.json() as { enabled: boolean; reachable: boolean };
-    assert.equal(info.enabled, true);
-    assert.equal(info.reachable, false);
-  } finally {
-    if (original === undefined) delete process.env.MOBILECLOUD_BUILDER_URL;
-    else process.env.MOBILECLOUD_BUILDER_URL = original;
+  t.after(() => { if (original === undefined) delete process.env.MOBILECLOUD_BUILDER_URL; else process.env.MOBILECLOUD_BUILDER_URL = original; });
+  const { userId, ...auth } = await login();
+  const created = await request("projects", "POST", { name: "ledger", framework: "Next.js", repoUrl: "https://github.com/acme/ledger.git" }, auth);
+  assert.equal(created.status, 201);
+  const { id } = await created.json();
+  for (const path of ["builds", "deployments"]) {
+    const result = await request(path, "POST", { projectId: id, target: "web" }, auth);
+    assert.equal(result.status, 201);
+    assert.equal((await result.json()).status, "blocked");
   }
+  const info = await (await request("builder", "GET", undefined, auth)).json();
+  assert.equal(info.enabled, false);
+  assert.equal(info.reachable, false);
+  assert.equal((await request(`builder/deployments/${id}`, "GET", undefined, auth)).status, 503);
+  assert.equal((await request(`deployments/${id}/rollback`, "POST", { deployId: "old" }, auth)).status, 503);
+});
+
+test("access tokens are hashed, time limited and read-only; device codes redeem once", async () => {
+  const { userId, ...auth } = await login();
+  assert.equal((await request("tokens", "POST", { name: "old", days: 0 }, auth)).status, 400);
+  const created = await request("tokens", "POST", { name: "ci", days: 7 }, auth);
+  assert.equal(created.status, 201);
+  const { token } = await created.json();
+  assert.match(token, /^mc_/);
+  const stored = openDb().prepare("SELECT token_hash FROM access_tokens WHERE token_hash = ?").get(tokenHash(token));
+  assert.equal(stored?.token_hash, tokenHash(token));
+  const bearer = { authorization: `Bearer ${token}` };
+  assert.equal((await (await request("auth/me", "GET", undefined, bearer)).json()).user.id, userId);
+  assert.equal((await request("profile", "POST", { name: "No" }, bearer)).status, 403);
+
+  const codes = await (await request("auth/device/code", "POST")).json();
+  const redeem = () => request("auth/device/token", "POST", { deviceCode: codes.deviceCode });
+  assert.equal((await redeem()).status, 202);
+  assert.equal((await request("device/approve", "POST", { userCode: codes.userCode }, auth)).status, 200);
+  const results = await Promise.all([redeem(), redeem()]);
+  assert.deepEqual(results.map((result) => result.status).sort(), [200, 400]);
+});
+
+test("JA4 rules match only well-formed input", async () => {
+  const { userId, ...auth } = await login();
+  const digest = "t13d1516h2_8daaf6152771_02713d6af862";
+  const rule = await request("firewall", "POST", { name: "ja4", action: "deny", matchKey: "ja4", matchOp: "equals", matchValue: digest }, auth);
+  assert.equal(rule.status, 201);
+  const probe = (ja4: string) => request("team", "POST", { name: "", email: "" }, { ...auth, "x-ja4-fingerprint": ja4 });
+  assert.equal((await probe(digest)).status, 403);
+  assert.equal((await probe("not-a-digest")).status, 400);
+});
+
+test("storage keeps distinct object keys in distinct opaque files", async () => {
+  const { userId, ...auth } = await login();
+  const upload = (key: string, content: string) => request("storage", "POST", { bucket: "test", key, contentBase64: Buffer.from(content).toString("base64") }, auth);
+  assert.equal((await upload("a/b", "first")).status, 201);
+  assert.equal((await upload("a__b", "second")).status, 201);
+  assert.equal((await upload("a/b", "replacement")).status, 409);
+  const paths = openDb().prepare("SELECT path FROM objects WHERE owner_id = ? ORDER BY key").all(userId);
+  assert.deepEqual(paths.map((row) => readFileSync(String(row.path), "utf8")), ["first", "second"]);
 });

@@ -2,7 +2,6 @@ package com.mobilecloud.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,7 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -23,9 +21,6 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Icon
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -35,37 +30,30 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
-import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mobilecloud.core.DeviceTelemetry
 import com.mobilecloud.core.TelemetryProvider
-import com.mobilecloud.core.TradingEngineController
 import com.mobilecloud.security.HardwareAttestation
 import com.mobilecloud.ui.components.GlowCard
 import com.mobilecloud.ui.components.IconBadge
 import com.mobilecloud.ui.components.KVRow
 import com.mobilecloud.ui.components.RefSourceChip
 import com.mobilecloud.ui.components.SectionLabel
-import com.mobilecloud.ui.components.StatusPill
+import com.mobilecloud.ui.theme.AppFonts
 import com.mobilecloud.ui.theme.Aurora
 import kotlinx.coroutines.delay
 
 /**
  * Safety — Hardware Protection & Security, Aurora edition (blueprint Screen
- * 6). Real evidence only: BatteryManager + sysfs thermals live, StrongBox-
- * first keystore probe with real rotation, auto-halt wired to the persisted
- * fail-closed TradingEngineController.
+ * 6). Device readings and the local keystore; no node or thermal enforcement.
  */
 @Composable
 fun HardwareSettingsScreen() {
     val context = LocalContext.current
     var telemetry by remember { mutableStateOf<DeviceTelemetry?>(null) }
-    var autoShutdownOverheat by remember { mutableStateOf(TradingEngineController.thermalAutoHalt.value) }
     var keystore by remember {
         mutableStateOf(HardwareAttestation.Result("…", "-", "-", "probing AndroidKeyStore"))
     }
@@ -113,31 +101,17 @@ fun HardwareSettingsScreen() {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconBadge(Icons.Filled.BatteryChargingFull, Aurora.Cyan, size = 28.dp, iconSize = 15.dp)
                         Spacer(Modifier.width(8.dp))
-                        SectionLabel("BATTERY LIFESPAN SHIELD")
-                    }
-                    if (t != null) {
-                        StatusPill(
-                            if (t.battery.bypassActive) "BYPASS" else "NORMAL",
-                            color = if (t.battery.bypassActive) Aurora.GlowGreen else Aurora.Amber,
-                        )
+                        SectionLabel("BATTERY TELEMETRY")
                     }
                 }
                 Spacer(Modifier.height(12.dp))
                 if (t == null) {
                     Text("reading BatteryManager…", color = Aurora.TextLow, fontSize = 12.sp, fontFamily = AppFonts.Mono)
                 } else {
-                    KVRow("Charge state", "${t.battery.batteryStatus} · ${t.battery.batteryPercent}% · ${t.battery.batteryCurrentMicroAmps / 1000} mA")
-                    KVRow("Cell temperature", "%.1f °C".format(t.battery.batteryTempTenthsC / 10.0))
-                    Text(
-                        if (t.battery.bypassActive)
-                            "Bypass charging DETECTED — battery isolated at ~0 mA (zero cell wear)"
-                        else
-                            "Bypass charging NOT DETECTED — cell charges normally (device must support charge separation)",
-                        color = if (t.battery.bypassActive) Aurora.GlowGreen else Aurora.Amber,
-                        fontSize = 11.5.sp, lineHeight = 15.sp,
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    RefSourceChip("BatteryManager + probe")
+                    KVRow("Charge state", "${t.battery.status} · ${t.battery.percentLabel}")
+                    KVRow("Cell current", t.battery.currentLabel)
+                    KVRow("Cell temperature", t.battery.temperatureLabel)
+                    RefSourceChip("BatteryManager · no bypass verification")
                 }
             }
         }
@@ -180,41 +154,16 @@ fun HardwareSettingsScreen() {
 
         Spacer(Modifier.height(13.dp))
 
-        // ---- Emergency failover (wired to persisted controller) ----
+        // ---- Thermal readings ----
         GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Red.copy(alpha = 0.35f), corner = 12.dp) {
             Column(Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconBadge(Icons.Filled.AcUnit, Aurora.Red, size = 28.dp, iconSize = 15.dp)
                     Spacer(Modifier.width(8.dp))
-                    SectionLabel("EMERGENCY FAILOVER", color = Aurora.Red)
+                    SectionLabel("THERMAL TELEMETRY", color = Aurora.Red)
                 }
                 Spacer(Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Auto-Halt on Overheat (>45°C SoC)", color = Aurora.TextHi, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                        Text(
-                            "Supervisor trips the persisted trading-engine halt (fail-closed)",
-                            color = Aurora.TextFaint, fontSize = 10.5.sp,
-                        )
-                    }
-                    Switch(
-                        checked = autoShutdownOverheat,
-                        onCheckedChange = {
-                            autoShutdownOverheat = it
-                            TradingEngineController.setThermalAutoHalt(context, it)
-                        },
-                        colors = SwitchDefaults.colors(
-                            checkedTrackColor = Aurora.Red,
-                            checkedThumbColor = Color.White,
-                            uncheckedTrackColor = Aurora.Track,
-                            uncheckedThumbColor = Aurora.TextLow,
-                        ),
-                    )
-                }
+                Text("Readings only. No local workload or automatic thermal cutoff.", color = Aurora.TextMid, fontSize = 11.5.sp)
                 Spacer(Modifier.height(10.dp))
                 val soc = t?.socTempC
                 Text(
@@ -227,24 +176,8 @@ fun HardwareSettingsScreen() {
                     },
                     fontSize = 12.sp, fontFamily = AppFonts.Mono,
                 )
-                Spacer(Modifier.height(6.dp))
-                val halted = TradingEngineController.state.value.halted
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier.size(8.dp).background(if (halted) Aurora.Red else Aurora.GlowGreen, CircleShape)
-                    )
-                    Spacer(Modifier.width(7.dp))
-                    Text(
-                        if (halted)
-                            "Trading engine: HALTED — ${TradingEngineController.state.value.reason}"
-                        else
-                            "Trading engine state: clear",
-                        color = if (halted) Aurora.Red else Aurora.GlowGreen,
-                        fontSize = 11.5.sp, fontFamily = AppFonts.Mono,
-                    )
-                }
                 Spacer(Modifier.height(8.dp))
-                RefSourceChip("sysfs thermal · TradingEngineController")
+                RefSourceChip("sysfs thermal")
             }
         }
     }

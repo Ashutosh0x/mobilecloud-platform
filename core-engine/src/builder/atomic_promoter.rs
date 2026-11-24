@@ -1,199 +1,263 @@
-//! POSIX atomic symlink promotion (`ln -sfn` semantics, < 15 ms rollback —
-//! research report §8.3).
-//!
-//! Promoting a build is a **single atomic filesystem operation**: write a
-//! temporary symlink then `rename()` it over the `live/<project>` pointer.
-//! Readers never observe a missing or half-written target, and rollback to
-//! any previous immutable deployment is the identical 15-millisecond swap
-//! with zero recompilation and zero network fetch.
+//! Publish immutable static artifacts, then atomically replace the single
+//! manifest used by history, rollback and serving. One engine owns a home.
 
+use std::fs::{self, File};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
-use crate::AppState;
+use super::{valid_deploy_id, valid_project, DeployRecord};
+use crate::proxy::router::RouteTable;
 
-/// Validate the Build Output API v3 contract of a build output directory
-/// (research report §3.1: `config.json`, `static/`, `functions/`).
-pub fn validate_output(output_dir: &Path) -> anyhow::Result<()> {
-    if !output_dir.exists() {
-        anyhow::bail!("build output missing: {}", output_dir.display());
+pub const MAX_STATIC_FILE: u64 = 16 * 1024 * 1024;
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub struct DeploymentSnapshot {
+    pub active: Option<String>,
+    pub history: Vec<DeployRecord>,
+}
+
+pub struct DeploymentStore {
+    root: PathBuf,
+    writers: Mutex<()>,
+}
+
+impl DeploymentStore {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            writers: Mutex::new(()),
+        }
     }
-    let has_static = output_dir.join("static").is_dir();
-    let has_functions = output_dir.join("functions").is_dir();
-    let has_config = output_dir.join("config.json").is_file();
-    if !has_static && !has_functions {
-        anyhow::bail!(
-            "invalid Build Output v3: need static/ or functions/ in {}",
-            output_dir.display()
+
+    fn project_dir(&self, project: &str) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(valid_project(project), "invalid project identifier");
+        let path = self.root.join(project);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) => anyhow::ensure!(meta.is_dir(), "project store is not a directory"),
+            Err(e) if e.kind() == ErrorKind::NotFound => (),
+            Err(e) => return Err(e.into()),
+        }
+        Ok(path)
+    }
+
+    pub fn read(&self, project: &str) -> anyhow::Result<DeploymentSnapshot> {
+        let path = self.project_dir(project)?.join("state.json");
+        match fs::symlink_metadata(&path) {
+            Ok(meta) => anyhow::ensure!(meta.is_file(), "invalid deployment manifest"),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(DeploymentSnapshot::default()),
+            Err(e) => return Err(e.into()),
+        }
+        let snapshot: DeploymentSnapshot = serde_json::from_reader(File::open(path)?)?;
+        anyhow::ensure!(
+            snapshot
+                .history
+                .iter()
+                .all(|r| r.project == project && valid_deploy_id(&r.deploy_id))
+                && snapshot
+                    .active
+                    .as_ref()
+                    .is_none_or(|id| snapshot.history.iter().any(|r| &r.deploy_id == id)),
+            "invalid deployment manifest identifiers"
         );
+        Ok(snapshot)
     }
-    if !has_config {
-        // Legal but rare; the router synthesizes an empty table.
-        tracing::warn!("deployment output has no config.json — static-only serving");
+
+    fn replace(&self, project: &str, snapshot: &DeploymentSnapshot) -> anyhow::Result<()> {
+        let dir = self.project_dir(project)?;
+        let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
+        serde_json::to_writer(&mut temp, snapshot)?;
+        temp.flush()?;
+        temp.as_file().sync_all()?;
+        temp.persist(dir.join("state.json"))?;
+        Ok(())
     }
+
+    fn artifact(&self, project: &str, deploy_id: &str) -> anyhow::Result<Option<PathBuf>> {
+        anyhow::ensure!(valid_deploy_id(deploy_id), "invalid deployment identifier");
+        let deployment = self.project_dir(project)?.join(deploy_id);
+        let output = deployment.join("output");
+        for dir in [&deployment, &output] {
+            match fs::symlink_metadata(dir) {
+                Ok(meta) => anyhow::ensure!(meta.is_dir(), "invalid stored artifact directory"),
+                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(Some(output))
+    }
+
+    pub fn active_output(&self, project: &str) -> anyhow::Result<Option<PathBuf>> {
+        match self.read(project)?.active {
+            Some(id) => self.artifact(project, &id),
+            None => Ok(None),
+        }
+    }
+
+    pub fn rollback(&self, project: &str, deploy_id: &str) -> anyhow::Result<Option<DeployRecord>> {
+        anyhow::ensure!(valid_deploy_id(deploy_id), "invalid deployment identifier");
+        let _guard = self
+            .writers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("deployment store unavailable"))?;
+        let mut snapshot = self.read(project)?;
+        let Some(record) = snapshot
+            .history
+            .iter()
+            .find(|r| r.deploy_id == deploy_id)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let Some(output) = self.artifact(project, deploy_id)? else {
+            return Ok(None);
+        };
+        validate_output(&output)?;
+        snapshot.active = Some(record.deploy_id.clone());
+        self.replace(project, &snapshot)?;
+        Ok(Some(record))
+    }
+}
+
+fn require_dir(path: &Path, message: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()),
+        "{message}"
+    );
     Ok(())
 }
 
-/// Package the validated output into the content-addressed store and swap
-/// the live pointer. Returns the generated `dpl_…` deployment id.
+fn validate_output(output: &Path) -> anyhow::Result<()> {
+    require_dir(
+        &output.join("static"),
+        "static preview requires an output/static directory",
+    )?;
+    match fs::symlink_metadata(output.join("functions")) {
+        Err(e) if e.kind() == ErrorKind::NotFound => (),
+        Err(e) => return Err(e.into()),
+        Ok(_) => anyhow::bail!("function runtimes are not supported in static preview"),
+    }
+    let table = RouteTable::compile(output.to_owned())?;
+    anyhow::ensure!(
+        table.config.crons.is_empty(),
+        "scheduled jobs are not supported in static preview"
+    );
+    Ok(())
+}
+
 pub fn promote(
-    state: &std::sync::Arc<AppState>,
-    project: &str,
-    output_dir: &Path,
+    store: &DeploymentStore,
+    mut record: DeployRecord,
+    checkout: &tempfile::TempDir,
+    preset_output: &str,
 ) -> anyhow::Result<String> {
-    validate_output(output_dir)?;
+    let project_dir = store.project_dir(&record.project)?;
+    fs::create_dir_all(&project_dir)?;
+    let stage = tempfile::tempdir_in(&project_dir)?;
+    let output = stage.path().join("output");
+    let source = checkout.path();
+    let configured = source.join(".mobilecloud");
+    let explicit = match fs::symlink_metadata(&configured) {
+        Ok(meta) => {
+            anyhow::ensure!(meta.is_dir(), ".mobilecloud must be a real directory");
+            let path = configured.join("output");
+            match fs::symlink_metadata(&path) {
+                Ok(meta) => {
+                    anyhow::ensure!(meta.is_dir(), "output must be a real directory");
+                    Some(path)
+                }
+                Err(e) if e.kind() == ErrorKind::NotFound => None,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    let mut hasher = Sha256::new();
+    frame(&mut hasher, b"mobilecloud static artifact v1");
+    frame(&mut hasher, record.project.as_bytes());
+    if let Some(explicit) = explicit {
+        package(&explicit, &output, "", &mut hasher)?;
+    } else {
+        // Do not expose a whole checkout (including .git and build inputs).
+        anyhow::ensure!(
+            preset_output == "dist",
+            "static source must provide .mobilecloud/output/static or a supported dist build"
+        );
+        let dist = source.join("dist");
+        require_dir(&dist, "static build did not produce a dist directory")?;
+        fs::create_dir(&output)?;
+        hasher.update(b"D");
+        frame(&mut hasher, b"");
+        package(&dist, &output.join("static"), "static", &mut hasher)?;
+    }
+    validate_output(&output)?;
+    record.deploy_id = format!("dpl_{}", hex::encode(&hasher.finalize()[..12]));
 
-    // Immutable deployment id: sha256(project || content fingerprint) —
-    // identical builds deduplicate to the same id.
-    let fingerprint = fingerprint_tree(output_dir)?;
-    let deploy_id = format!("dpl_{}", hex::encode(&fingerprint[..12]));
-
-    let target = state
-        .home
-        .join("deployments")
-        .join(project)
-        .join(&deploy_id)
-        .join("output");
-    std::fs::create_dir_all(&target)?;
-    copy_tree(output_dir, &target)?;
-
-    // Atomic promotion: temp symlink → rename over live pointer.
-    atomic_swap(state, project, &deploy_id)?;
-
-    state.deployments.record(crate::builder::DeployRecord {
-        project: project.to_string(),
-        deploy_id: deploy_id.clone(),
-        commit: String::new(),
-        branch: String::new(),
-        framework: String::new(),
-        built_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        ttfb_hint_ms: None,
-        trigger_source: None,
-    });
+    let _guard = store
+        .writers
+        .lock()
+        .map_err(|_| anyhow::anyhow!("deployment store unavailable"))?;
+    let mut snapshot = store.read(&record.project)?;
+    let deploy_id = record.deploy_id.clone();
+    let project = record.project.clone();
+    if store.artifact(&project, &deploy_id)?.is_none() {
+        fs::rename(stage.path(), project_dir.join(&deploy_id))?;
+    }
+    // Do not write through an already published deployment directory. Rebuilds
+    // of identical bytes replace metadata once, not the artifact itself.
+    snapshot.history.retain(|r| r.deploy_id != deploy_id);
+    snapshot.history.push(record);
+    snapshot.active = Some(deploy_id.clone());
+    store.replace(&project, &snapshot)?;
     Ok(deploy_id)
 }
 
-/// One-shot rollback to a previously recorded deployment (< 15 ms).
-pub fn rollback(
-    state: &std::sync::Arc<AppState>,
-    project: &str,
-    deploy_id: &str,
-) -> anyhow::Result<crate::builder::DeployRecord> {
-    let started = std::time::Instant::now();
-    let record = state
-        .deployments
-        .rollback(project, deploy_id)
-        .ok_or_else(|| anyhow::anyhow!("unknown deployment {deploy_id} for {project}"))?;
-    let target = state
-        .home
-        .join("deployments")
-        .join(project)
-        .join(deploy_id)
-        .join("output");
-    if !target.exists() {
-        anyhow::bail!("deployment artifact {deploy_id} no longer stored");
-    }
-    atomic_swap(state, project, deploy_id)?;
-    tracing::info!(
-        "rollback of {project} → {deploy_id} completed in {:.2}ms",
-        started.elapsed().as_secs_f64() * 1000.0
-    );
-    Ok(record)
+fn frame(hasher: &mut Sha256, data: &[u8]) {
+    hasher.update((data.len() as u64).to_be_bytes());
+    hasher.update(data);
 }
 
-/// The atomic swap itself: `symlink(temp) → rename(temp, live)`.
-/// `rename` over an existing symlink is POSIX-atomic.
-pub fn atomic_swap(state: &std::sync::Arc<AppState>, project: &str, deploy_id: &str) -> anyhow::Result<()> {
-    let live_dir = state.home.join("live");
-    std::fs::create_dir_all(&live_dir)?;
-    let live = live_dir.join(project);
-    let temp = live_dir.join(format!(
-        ".{project}.{}.tmp",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&temp);
-    let _ = std::fs::remove_dir_all(&temp);
-    #[cfg(unix)]
-    {
-        // Relative target keeps the symlink valid when `home` moves (AVF mounts).
-        let relative_target = PathBuf::from("..")
-            .join("deployments")
-            .join(project)
-            .join(deploy_id)
-            .join("output");
-        std::os::unix::fs::symlink(&relative_target, &temp)?;
-        std::fs::rename(&temp, &live)?;
-    }
-    #[cfg(not(unix))]
-    {
-        // No portable atomic symlink on Windows/FAT/FUSE storage (junctions are
-        // restricted, symlinks need Developer Mode). Materialize the deployment
-        // as a real directory and swap it in with a rename (non-empty targets
-        // must be removed first, since `rename` will not clobber a directory).
-        let source = state
-            .home
-            .join("deployments")
-            .join(project)
-            .join(deploy_id)
-            .join("output");
-        copy_tree(&source, &temp)?;
-        if live.exists() {
-            std::fs::remove_dir_all(&live)?;
+fn package(source: &Path, dest: &Path, relative: &str, hasher: &mut Sha256) -> anyhow::Result<()> {
+    let meta = fs::symlink_metadata(source)?;
+    if meta.is_dir() {
+        hasher.update(b"D");
+        frame(hasher, relative.as_bytes());
+        fs::create_dir(dest)?;
+        let mut entries = fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            let name = name
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("non-UTF-8 artifact filename"))?;
+            let path = if relative.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{relative}/{name}")
+            };
+            package(&entry.path(), &dest.join(name), &path, hasher)?;
         }
-        std::fs::rename(&temp, &live)?;
-    }
-    Ok(())
-}
-
-/// Deterministic tree fingerprint (stable ordering; metadata-free).
-fn fingerprint_tree(root: &Path) -> anyhow::Result<[u8; 32]> {
-    let mut hasher = Sha256::new();
-    let mut paths: Vec<PathBuf> = Vec::new();
-    collect(root, root, &mut paths)?;
-    paths.sort();
-    for path in paths {
-        let relative = path.strip_prefix(root)?.to_string_lossy();
-        hasher.update(relative.as_bytes());
-        let meta = std::fs::metadata(&path)?;
-        if meta.is_file() {
-            let bytes = std::fs::read(&path)?;
-            hasher.update(&bytes);
-        }
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&hasher.finalize());
-    Ok(out)
-}
-
-fn collect(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect(root, &path, out)?;
-        } else {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// Recursive copy preserving the Build Output v3 layout.
-fn copy_tree(source: &Path, destination: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(destination)?;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = destination.join(entry.file_name());
-        if from.is_dir() {
-            copy_tree(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
+    } else if meta.is_file() {
+        anyhow::ensure!(
+            meta.len() <= MAX_STATIC_FILE,
+            "preview artifact file exceeds size limit"
+        );
+        hasher.update(b"F");
+        frame(hasher, relative.as_bytes());
+        let mut file = File::open(source)?.take(MAX_STATIC_FILE + 1);
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= MAX_STATIC_FILE,
+            "preview artifact file exceeds size limit"
+        );
+        frame(hasher, &bytes);
+        File::create_new(dest)?.write_all(&bytes)?;
+    } else {
+        anyhow::bail!("preview artifacts must not contain symlinks or special files");
     }
     Ok(())
 }
@@ -202,29 +266,92 @@ fn copy_tree(source: &Path, destination: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn rejects_output_without_static_or_functions() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("config.json"), "{}").unwrap();
-        assert!(validate_output(dir.path()).is_err());
+    fn build(store: &DeploymentStore, project: &str, html: &str) -> String {
+        let checkout = tempfile::tempdir().unwrap();
+        fs::create_dir(checkout.path().join("dist")).unwrap();
+        fs::write(checkout.path().join("dist/index.html"), html).unwrap();
+        promote(
+            store,
+            DeployRecord {
+                project: project.into(),
+                deploy_id: String::new(),
+                commit: "commit".into(),
+                branch: "main".into(),
+                framework: "static".into(),
+                built_at: 1,
+                ttfb_hint_ms: None,
+                trigger_source: Some("test".into()),
+            },
+            &checkout,
+            "dist",
+        )
+        .unwrap()
     }
 
     #[test]
-    fn accepts_static_only_output() {
+    fn promotion_and_rollback_share_durable_active_state() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("static")).unwrap();
-        std::fs::write(dir.path().join("static/index.html"), "<html/>").unwrap();
-        assert!(validate_output(dir.path()).is_ok());
+        let store = DeploymentStore::new(dir.path().into());
+        let first = build(&store, "one", "one v1");
+        let second = build(&store, "one", "one v2");
+        let other = build(&store, "two", "one v1");
+        assert_ne!(first, other);
+        assert!(store.rollback("one", &other).unwrap().is_none());
+        assert_eq!(
+            store.read("one").unwrap().active.as_deref(),
+            Some(second.as_str())
+        );
+        assert_eq!(build(&store, "one", "one v2"), second);
+        assert_eq!(store.read("one").unwrap().history.len(), 2);
+        assert!(store.rollback("one", &first).unwrap().is_some());
+        let restarted = DeploymentStore::new(dir.path().into());
+        assert_eq!(
+            fs::read_to_string(
+                restarted
+                    .active_output("one")
+                    .unwrap()
+                    .unwrap()
+                    .join("static/index.html")
+            )
+            .unwrap(),
+            "one v1"
+        );
+        fs::remove_dir_all(dir.path().join("one").join(&second)).unwrap();
+        assert!(store.rollback("one", &second).unwrap().is_none());
+        assert_eq!(
+            restarted.read("one").unwrap().active.as_deref(),
+            Some(first.as_str())
+        );
     }
 
     #[test]
-    fn fingerprint_is_order_stable() {
+    fn rejected_dynamic_output_does_not_replace_live_static_artifact() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("static")).unwrap();
-        std::fs::write(dir.path().join("static/a.txt"), "a").unwrap();
-        std::fs::write(dir.path().join("static/b.txt"), "b").unwrap();
-        let a = fingerprint_tree(dir.path()).unwrap();
-        let b = fingerprint_tree(dir.path()).unwrap();
-        assert_eq!(a, b);
+        let store = DeploymentStore::new(dir.path().into());
+        let active = build(&store, "preview", "working preview");
+        let record = store.read("preview").unwrap().history.pop().unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        let explicit = checkout.path().join(".mobilecloud/output");
+        fs::create_dir_all(explicit.join("static")).unwrap();
+        fs::create_dir(explicit.join("functions")).unwrap();
+        assert!(promote(&store, record, &checkout, "dist").is_err());
+        let snapshot = store.read("preview").unwrap();
+        assert_eq!(snapshot.active.as_deref(), Some(active.as_str()));
+        assert_eq!(snapshot.history.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publishing_does_not_follow_artifact_links() {
+        let stage = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(external.path(), stage.path().join("link")).unwrap();
+        assert!(package(
+            stage.path(),
+            &external.path().join("output"),
+            "",
+            &mut Sha256::new()
+        )
+        .is_err());
     }
 }

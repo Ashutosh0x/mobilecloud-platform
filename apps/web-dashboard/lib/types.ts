@@ -13,6 +13,7 @@ export type Project = {
   name: string;
   framework: string;
   target: string;
+  repoUrl?: string | null;
   createdAt: number;
 };
 
@@ -20,7 +21,7 @@ export type Deployment = {
   id: string;
   projectId: string;
   project: string;
-  status: "blocked" | "failed";
+  status: "blocked" | "failed" | "queued" | "rolled_back";
   note: string;
   createdAt: number;
 };

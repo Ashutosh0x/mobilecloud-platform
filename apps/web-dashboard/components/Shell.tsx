@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useCloud } from "@/lib/store";
+import { request, useCloud } from "@/lib/store";
 import { realtimeLabel } from "@/lib/realtime";
 import { Icon } from "./Icons";
 
@@ -55,9 +55,9 @@ function Gate() {
         setToast(error instanceof Error ? error.message : "Password does not match");
       }
     }}>
-      <h3>Console password</h3>
-      <p className="sub">This browser has not unlocked the password stored for this account.</p>
-      <label className="field">Password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required /></label>
+      <h3>Browser screen lock</h3>
+      <p className="sub">Enter your screen lock password to continue in this browser.</p>
+      <label className="field">Password<input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required /></label>
       <button className="primary" type="submit">Unlock</button>
     </form>
   );
@@ -76,7 +76,23 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [cursor, setCursor] = useState(0);
   const [palette, setPalette] = useState("");
   const [help, setHelp] = useState(false);
+  const jumpDialog = useRef<HTMLDialogElement>(null);
+  const helpDialog = useRef<HTMLDialogElement>(null);
   const go = useRef(false);
+
+  useEffect(() => {
+    const dialog = jumpDialog.current;
+    if (!dialog) return;
+    if (jump) dialog.showModal();
+    else dialog.close();
+  }, [jump]);
+
+  useEffect(() => {
+    const dialog = helpDialog.current;
+    if (!dialog) return;
+    if (help) dialog.showModal();
+    else dialog.close();
+  }, [help]);
   const here = ALL.find((item) => item.href === path);
 
   const hits = useMemo(() => {
@@ -94,6 +110,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (jumpDialog.current?.open || helpDialog.current?.open) return;
       const target = e.target as HTMLElement | null;
       const typing = !!target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -144,10 +161,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
     const send = (metric: string, value: number) => {
       if (posted.has(metric) || !Number.isFinite(value)) return;
       posted.add(metric);
-      fetch("/api/vitals", {
+      void request("vitals", {
         method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
+        keepalive: true,
         body: JSON.stringify({ metric, value, path }),
       }).catch(() => undefined);
     };
@@ -184,10 +200,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (state.status !== "ready" || !state.settings.recordPageViews) return;
-    fetch("/api/events", {
+    void request("events", {
       method: "POST",
-      credentials: "include",
-      headers: { "content-type": "application/json" },
+      keepalive: true,
       body: JSON.stringify({ path }),
     }).catch(() => undefined);
   }, [path, state.status, state.settings.recordPageViews]);
@@ -225,13 +240,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <div className="search">
           <Icon name="search" />
           <input
-            placeholder="Search projects and pages"
+            placeholder="Filter this page"
             value={state.query}
             onChange={(e) => setQuery(e.target.value)}
-            onFocus={() => setJump(true)}
-            aria-label="Search"
+            aria-label="Filter current page"
           />
-          <kbd>Ctrl K</kbd>
+          <button className="ghost" type="button" aria-label="Search pages and projects" aria-haspopup="dialog" onClick={() => setJump(true)}>Ctrl K</button>
         </div>
         <div className="top-actions">
           <button className={rtTone} type="button" title={rtTitle} onClick={() => realtimeRetry()} style={{ background: "transparent", border: 0, cursor: "pointer" }}>
@@ -245,10 +259,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
             <Icon name="user" size={18} />
           </button>
           {notes && (
-            <div className="menu" role="menu">
+            <div className="menu">
               <div className="sub">{unread > 0 ? `${unread} unread` : "Notifications"}</div>
               {state.notifications.slice(0, 8).map((item) => (
-                <button key={item.id} type="button" role="menuitem" onClick={() => {
+                <button key={item.id} type="button" onClick={() => {
                   // Optimistic: mark it read now, roll back if the server rejects it.
                   void call(`notifications/${item.id}`, { method: "PATCH" }, (s) => ({
                     notifications: s.notifications.map((n) => (n.id === item.id ? { ...n, read: true } : n)),
@@ -261,11 +275,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </div>
           )}
           {account && state.user && (
-            <div className="menu" role="menu">
+            <div className="menu">
               <div className="sub">{state.user.name} · {state.user.role}</div>
-              <Link href="/settings" role="menuitem">Settings</Link>
-              <Link href="/billing" role="menuitem">Plan · {state.billing?.plan}</Link>
-              <button type="button" role="menuitem" onClick={() => logout()}>Sign out</button>
+              <Link href="/settings">Settings</Link>
+              <Link href="/billing">Plan · {state.billing?.plan}</Link>
+              <button type="button" onClick={() => logout()}>Sign out</button>
             </div>
           )}
         </div>
@@ -287,7 +301,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <div className="side-spacer" />
         <div className="side-note">
           <strong>Control plane</strong>
-          <span>{state.status === "ready" && state.metrics ? "SQLite on this server." : "Waiting for the API."}</span>
+          <span>{state.error ?? (state.status === "ready" && state.metrics ? "SQLite on this server." : "Waiting for the API.")}</span>
           <em><i className="dot" /> {state.metrics ? `Up ${Math.floor(state.metrics.processUptimeSec / 60)}m` : "No metrics yet"}</em>
         </div>
       </aside>
@@ -312,43 +326,36 @@ export function Shell({ children }: { children: React.ReactNode }) {
         </button>
       </nav>
 
-      {jump && (
-        <div className="modal-back" onClick={() => setJump(false)}>
-          <div className="modal" role="dialog" aria-label="Jump to" onClick={(e) => e.stopPropagation()}>
-            <h3>Jump to</h3>
-            <input
-              autoFocus
-              placeholder="Pages and projects"
-              value={palette}
-              onChange={(e) => { setPalette(e.target.value); setCursor(0); }}
-              onKeyDown={(e) => {
-                if (e.key === "ArrowDown") setCursor((c) => Math.min(hits.length - 1, c + 1));
-                if (e.key === "ArrowUp") setCursor((c) => Math.max(0, c - 1));
-                if (e.key === "Enter" && hits[cursor]) {
-                  router.push(hits[cursor].href);
-                  setJump(false);
-                }
-              }}
-            />
-            {hits.map((h, i) => (
-              <button key={`${h.href}-${h.label}`} className={`hit${i === cursor ? " on" : ""}`} type="button" onClick={() => { router.push(h.href); setJump(false); }}>
-                {h.label}
-              </button>
-            ))}
-            {hits.length === 0 && <p className="empty">Nothing matches.</p>}
-          </div>
-        </div>
-      )}
-      {help && (
-        <div className="modal-back" onClick={() => setHelp(false)}>
-          <div className="modal" role="dialog" aria-label="Keyboard shortcuts" onClick={(e) => e.stopPropagation()}>
-            <h3>Shortcuts</h3>
-            <p className="sub">Ctrl K opens search. Then G followed by a key:</p>
-            <p className="sub">O overview · P projects · D deployments · B builds · L logs · A analytics · F firewall · S settings</p>
-            <button className="ghost" type="button" onClick={() => setHelp(false)}>Close</button>
-          </div>
-        </div>
-      )}
+      <dialog ref={jumpDialog} className="modal" aria-label="Jump to" onCancel={(event) => { event.preventDefault(); setJump(false); }}>
+        <h3>Jump to</h3>
+        <input
+          aria-label="Pages and projects"
+          placeholder="Pages and projects"
+          value={palette}
+          onChange={(e) => { setPalette(e.target.value); setCursor(0); }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") setCursor((c) => Math.min(hits.length - 1, c + 1));
+            if (e.key === "ArrowUp") setCursor((c) => Math.max(0, c - 1));
+            if (e.key === "Enter" && hits[cursor]) {
+              router.push(hits[cursor].href);
+              setJump(false);
+            }
+          }}
+        />
+        {hits.map((h, i) => (
+          <button key={`${h.href}-${h.label}`} className={`hit${i === cursor ? " on" : ""}`} type="button" onClick={() => { router.push(h.href); setJump(false); }}>
+            {h.label}
+          </button>
+        ))}
+        {hits.length === 0 && <p className="empty">Nothing matches.</p>}
+        <button className="ghost" type="button" onClick={() => setJump(false)}>Close</button>
+      </dialog>
+      <dialog ref={helpDialog} className="modal" aria-label="Keyboard shortcuts" onCancel={(event) => { event.preventDefault(); setHelp(false); }}>
+        <h3>Shortcuts</h3>
+        <p className="sub">Ctrl K opens search. Then G followed by a key:</p>
+        <p className="sub">O overview · P projects · D deployments · B builds · L logs · A analytics · F firewall · S settings</p>
+        <button className="ghost" type="button" onClick={() => setHelp(false)}>Close</button>
+      </dialog>
       {state.toast && <div className="toast" role="status">{state.toast}</div>}
     </div>
   );

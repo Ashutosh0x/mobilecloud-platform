@@ -3,12 +3,16 @@ package com.mobilecloud.ui.console
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -22,137 +26,116 @@ import androidx.core.content.ContextCompat
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import com.mobilecloud.BuildConfig
+import com.mobilecloud.console.CloudException
+import com.mobilecloud.console.ConsoleOrigin
 import com.mobilecloud.console.ConsoleStore
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.net.URI
 import java.net.URLDecoder
 
-/**
- * QR pairing — the phone's half of "sign in by scanning the dashboard's code".
- *
- * The dashboard (a signed-in browser) creates a two-minute pairing session and
- * renders it as a QR code. This flow scans that code, registers the scan, waits
- * for the account owner to approve it on the dashboard, then claims the
- * approval. Claiming mints the durable device credential *and* sets the
- * `mc_session` cookie, so the phone ends up signed in without a password ever
- * being typed on it — and, because the realtime socket authenticates with that
- * same cookie, connected in real time.
- */
-
-/** How long the phone waits for the dashboard to approve a scan. Matches the TTL. */
 private const val PAIRING_WAIT_MS = 120_000L
 private const val POLL_MS = 2_000L
+private val ID = Regex("[0-9a-f]{32}")
+private val SECRET = Regex("[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]") // 32 bytes, canonical unpadded base64url.
+private val CODE = Regex("[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}")
 
-/**
- * Payload carried by the dashboard's QR code:
- * `mobilecloud://pair?v=1&api=…&id=…&secret=…&code=…`.
- *
- * The validation mirrors `decodePairingTicket` in `lib/server/qr.ts` exactly, so
- * the only QR codes this app accepts are the ones the dashboard is willing to
- * produce: the right scheme and host, an `http(s)` origin, an id of at least 8
- * characters and a secret of at least 32 (the real secret is 256 bits encoded
- * as base64url).
- */
-data class PairingTicket(val api: String, val id: String, val secret: String, val code: String) {
+/** Version 1 of the existing mobilecloud://pair ticket. Do not stringify the proof. */
+internal class PairingTicket private constructor(val origin: ConsoleOrigin, val id: String, val secret: String, val code: String) {
     companion object {
-        private const val SCHEME = "mobilecloud"
-        private const val HOST = "pair"
-        private val ORIGIN = Regex("^https?://\\S+$")
-        private val NON_ALNUM = Regex("[^A-Za-z0-9]")
-
         fun parse(payload: String): PairingTicket? {
+            if (payload.length !in 1..2048) return null
             val uri = runCatching { URI(payload.trim()) }.getOrNull() ?: return null
-            if (uri.scheme?.lowercase() != SCHEME || uri.host != HOST) return null
-            val params = query(uri.rawQuery)
-            val api = params["api"].orEmpty().trimEnd('/')
-            val id = params["id"].orEmpty()
-            val secret = params["secret"].orEmpty()
-            val code = params["code"].orEmpty().replace(NON_ALNUM, "").uppercase()
-            if (!ORIGIN.matches(api) || id.length < 8 || secret.length < 32) return null
-            return PairingTicket(api, id, secret, code)
-        }
-
-        private fun query(raw: String?): Map<String, String> {
-            if (raw.isNullOrEmpty()) return emptyMap()
-            return raw.split('&').mapNotNull { pair ->
-                val at = pair.indexOf('=')
-                if (at < 0) return@mapNotNull null
-                decode(pair.substring(0, at)) to decode(pair.substring(at + 1))
-            }.toMap()
-        }
-
-        private fun decode(value: String): String =
-            runCatching { URLDecoder.decode(value, "UTF-8") }.getOrDefault(value)
-    }
-}
-
-/** Outcome of a pairing attempt. Transport errors are thrown, not modelled here. */
-private sealed interface PairOutcome {
-    data class Linked(val name: String) : PairOutcome
-    data class Failed(val message: String) : PairOutcome
-}
-
-/**
- * Runs the phone's half of the handshake against the control plane named inside
- * the ticket: scan → wait for approval → claim.
- */
-private suspend fun pairDevice(
-    store: ConsoleStore,
-    ticket: PairingTicket,
-    onStatus: (String) -> Unit,
-): PairOutcome {
-    val payload = JSONObject()
-        .put("name", deviceName())
-        .put("platform", "android")
-        .put("appVersion", BuildConfig.VERSION_NAME)
-        .put("secret", ticket.secret)
-    val secretOnly = jobj("secret" to ticket.secret).toString()
-
-    // The QR carries the origin of the dashboard that produced it, so the phone
-    // talks to that control plane rather than whatever it was pointed at before.
-    store.applyBaseUrl(ticket.api)
-    onStatus("Contacting ${ticket.api}…")
-    store.client.request("device/pairing/${ticket.id}/scan", "POST", payload.toString())
-    onStatus("Code scanned. Approve this device in the dashboard to finish.")
-
-    val deadline = System.currentTimeMillis() + PAIRING_WAIT_MS
-    while (System.currentTimeMillis() < deadline) {
-        delay(POLL_MS)
-        val status = store.client.request("device/pairing/${ticket.id}/status", "POST", secretOnly)
-        when (status.optJSONObject("pairing")?.optString("status")) {
-            "APPROVED" -> {
-                val claim = store.client.request("device/pairing/${ticket.id}/claim", "POST", payload.toString())
-                val name = claim.optJSONObject("device")?.optString("name").orEmpty()
-                // The claim response set the session cookie, so this pulls the
-                // account and opens the realtime socket.
-                store.refresh()
-                return PairOutcome.Linked(name.ifEmpty { deviceName() })
+            if (uri.scheme != "mobilecloud" || uri.rawAuthority != "pair" || uri.rawPath != "" || uri.rawFragment != null) return null
+            val query = uri.rawQuery ?: return null
+            val fields = query.split('&')
+            if (fields.size != 5) return null
+            val params = HashMap<String, String>()
+            for (field in fields) {
+                val at = field.indexOf('=')
+                if (at <= 0) return null
+                val key = field.substring(0, at)
+                if (key !in setOf("v", "api", "id", "secret", "code") || params.containsKey(key)) return null
+                val value = runCatching { URLDecoder.decode(field.substring(at + 1), "UTF-8") }.getOrNull() ?: return null
+                params[key] = value
             }
-            "EXPIRED" -> return PairOutcome.Failed("That code expired. Show a new one in the dashboard.")
-            "REVOKED" -> return PairOutcome.Failed("The dashboard cancelled this pairing.")
-            "FAILED" -> return PairOutcome.Failed("The dashboard could not complete the pairing.")
-            else -> onStatus("Waiting for approval in the dashboard…")
+            if (params["v"] != "1") return null
+            val origin = ConsoleOrigin.parse(params.getValue("api"))?.takeUnless { it.isLocalOnly() } ?: return null
+            val id = params.getValue("id").takeIf(ID::matches) ?: return null
+            val secret = params.getValue("secret").takeIf(SECRET::matches) ?: return null
+            val code = params.getValue("code").takeIf(CODE::matches) ?: return null
+            return PairingTicket(origin, id, secret, code)
         }
     }
-    return PairOutcome.Failed("Timed out waiting for approval. Show a new code and try again.")
+
+    fun verify(response: JSONObject): JSONObject {
+        val pairing = response.optJSONObject("pairing")
+        if (pairing == null || pairing.opt("pairing_id") != id || pairing.opt("verification_code") != code) {
+            throw CloudException("The console did not verify this pairing code.")
+        }
+        return pairing
+    }
 }
 
-/** A human-readable name for this phone, e.g. "Google Pixel 7". */
+/** No existing session or cookie is used in this flow. */
+private suspend fun pairDevice(store: ConsoleStore, ticket: PairingTicket, onStatus: (String) -> Unit) {
+    store.authenticate(ticket.origin) { candidate ->
+        withTimeoutOrNull(PAIRING_WAIT_MS) {
+            val payload = JSONObject().put("name", deviceName()).put("platform", "android")
+                .put("appVersion", BuildConfig.VERSION_NAME).put("secret", ticket.secret).toString()
+            val secretOnly = JSONObject().put("secret", ticket.secret).toString()
+            val path = "device/pairing/${ticket.id}"
+            onStatus("Checking the pairing code…")
+            var pairing = ticket.verify(candidate.request("$path/scan", "POST", payload))
+            var deadline = SystemClock.elapsedRealtime() + PAIRING_WAIT_MS
+            var approval: Boolean
+            do {
+                val ttl = (pairing.opt("expires_in_ms") as? Number)?.toLong()
+                    ?: throw CloudException("The console returned an invalid pairing status.")
+                val now = SystemClock.elapsedRealtime()
+                deadline = minOf(deadline, now + ttl.coerceIn(0L, PAIRING_WAIT_MS))
+                approval = when (pairing.opt("status")) {
+                    "APPROVED" -> true
+                    "SCANNED", "AWAITING_APPROVAL" -> false
+                    "EXPIRED" -> throw CloudException("That code expired. Show a new one in the dashboard.")
+                    "REVOKED" -> throw CloudException("The dashboard cancelled this pairing.")
+                    "CONNECTED" -> throw CloudException("This code was already used. Show a new one in the dashboard.")
+                    else -> throw CloudException("The dashboard did not approve this pairing.")
+                }
+                if (now >= deadline) throw CloudException("That code expired. Show a new one in the dashboard.")
+                if (!approval) {
+                    onStatus("Compare ${ticket.code} in the dashboard and approve this phone there.")
+                    delay(minOf(POLL_MS, deadline - now))
+                    if (SystemClock.elapsedRealtime() >= deadline) throw CloudException("That code expired. Show a new one in the dashboard.")
+                    pairing = ticket.verify(candidate.request("$path/status", "POST", secretOnly))
+                }
+            } while (!approval)
+            onStatus("Verifying the new session…")
+            val claim = candidate.request("$path/claim", "POST", payload)
+            val connected = ticket.verify(claim)
+            val deviceId = claim.optJSONObject("device")?.opt("id") as? String
+            val accountId = claim.opt("account_id") as? String
+            if (deviceId == null || !ID.matches(deviceId) || accountId == null || !ID.matches(accountId) ||
+                connected.opt("status") != "CONNECTED" || connected.opt("connected_device_id") != deviceId
+            ) throw CloudException("The console did not confirm the pairing claim.")
+            // The device credential is deliberately not retained. Only the in-memory HTTP session is used.
+            Unit to accountId
+        } ?: throw CloudException("Timed out waiting for pairing. Check the dashboard before trying a new code.")
+    }
+}
+
 private fun deviceName(): String {
     val maker = Build.MANUFACTURER.orEmpty().trim().replaceFirstChar { it.uppercase() }
     val model = Build.MODEL.orEmpty().trim()
-    val modelCarriesMaker = maker.isNotEmpty() && model.startsWith(maker, ignoreCase = true)
-    val parts = if (modelCarriesMaker || maker.isEmpty()) listOf(model) else listOf(maker, model)
+    val parts = if (maker.isEmpty() || model.startsWith(maker, ignoreCase = true)) listOf(model) else listOf(maker, model)
     return parts.filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { "Android device" }
 }
 
-/**
- * "Link this phone by QR code" control, shared by the login card and the
- * console's device page. Requests the camera permission, opens the scanner, and
- * then runs the pairing handshake, reporting progress inline.
- */
+/** Scans, confirms the destination and comparison code, then starts the pairing flow. */
 @Composable
 fun ScanToLinkButton(
     store: ConsoleStore,
@@ -162,45 +145,52 @@ fun ScanToLinkButton(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    var ticket by remember { mutableStateOf<PairingTicket?>(null) }
+    var attempt by remember { mutableStateOf<Job?>(null) }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
-        val contents = result.contents
-        if (contents.isNullOrBlank()) return@rememberLauncherForActivityResult
-        val ticket = PairingTicket.parse(contents)
-        if (ticket == null) {
-            error = "That QR code is not a MobileCloud pairing code."
-            return@rememberLauncherForActivityResult
-        }
-        error = null
-        busy = true
-        scope.launch {
-            try {
-                when (val outcome = pairDevice(store, ticket) { status = it }) {
-                    is PairOutcome.Linked -> {
-                        status = null
-                        store.notify("Linked ${outcome.name}")
-                        onLinked()
-                    }
-                    is PairOutcome.Failed -> {
-                        status = null
-                        error = outcome.message
-                    }
-                }
-            } catch (e: Exception) {
-                status = null
-                error = e.message ?: "Pairing failed."
-            } finally {
-                busy = false
-            }
-        }
+        val contents = result.contents ?: return@rememberLauncherForActivityResult
+        ticket = PairingTicket.parse(contents)
+        error = if (ticket == null) "Use a valid MobileCloud QR code from a phone-reachable HTTPS console." else null
     }
 
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) scanner.launch(scanOptions())
         else error = "Camera access is needed to scan the code."
+    }
+
+    ticket?.let { selected ->
+        AlertDialog(
+            onDismissRequest = { ticket = null },
+            title = { Text("Confirm pairing") },
+            text = {
+                Text("Server: ${selected.origin.url}\n\nComparison code: ${selected.code}\n\nContinue only if both match the dashboard you opened.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    ticket = null
+                    busy = true
+                    attempt = scope.launch {
+                        try {
+                            pairDevice(store, selected) { status = it }
+                            store.notify("Signed in on this phone")
+                            onLinked()
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (failure: Exception) {
+                            error = ConsoleStore.safeError(failure, "Pairing could not be verified. Check the dashboard before trying again.")
+                        } finally {
+                            status = null
+                            busy = false
+                        }
+                    }
+                }) { Text("Continue") }
+            },
+            dismissButton = { TextButton(onClick = { ticket = null }) { Text("Cancel") } },
+        )
     }
 
     Column(modifier.fillMaxWidth()) {
@@ -217,6 +207,7 @@ fun ScanToLinkButton(
             enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
         )
+        if (busy) CButton("Cancel pairing", onClick = { attempt?.cancel() }, kind = BtnKind.GHOST)
         status?.let {
             Spacer(Modifier.height(8.dp))
             Hint(it)

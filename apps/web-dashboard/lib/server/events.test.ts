@@ -8,7 +8,7 @@ process.env.MOBILECLOUD_DB = join(mkdtempSync(join(tmpdir(), "mc-events-")), "t.
 
 type SyncPage = {
   cursor: number;
-  events: { event_type: string; sequence: number; account_id: string; resource_id: string | null }[];
+  events: { event_type: string; sequence: number; previous_sequence: number; account_id: string; resource_id: string | null }[];
   more: boolean;
   latest: number;
   account_id: string;
@@ -16,18 +16,19 @@ type SyncPage = {
 
 async function signup(email: string, name: string): Promise<string> {
   const { handle } = await import("./api.ts");
+  const { hashPassword, newId, openDb } = await import("./db.ts");
+  openDb().prepare("INSERT INTO users (id,email,name,password_hash,role,created_at) VALUES (?,?,?,?,'member',?)")
+    .run(newId(), email, name, hashPassword("correct-horse"), Date.now());
   const res = await handle(
-    new Request("http://local/api/auth/signup", {
+    new Request("http://local/api/auth/login", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, email, password: "correct-horse" }),
+      body: JSON.stringify({ email, password: "correct-horse" }),
     }),
-    ["auth", "signup"],
+    ["auth", "login"],
   );
   assert.equal(res.status, 200);
-  const cookie = (res.headers.get("set-cookie") ?? "").split(";")[0];
-  assert.match(cookie, /mc_session=/);
-  return cookie;
+  return res.headers.getSetCookie().map((cookie) => cookie.split(";")[0]).join("; ");
 }
 
 async function sync(cookie: string, cursor = 0, limit = 500): Promise<SyncPage> {
@@ -45,7 +46,7 @@ async function createProject(cookie: string, name: string): Promise<string> {
   const res = await handle(
     new Request("http://local/api/projects", {
       method: "POST",
-      headers: { "content-type": "application/json", cookie },
+      headers: { "content-type": "application/json", cookie, "x-mc-csrf": /mc_csrf=([a-f0-9]{64})/.exec(cookie)?.[1] ?? "" },
       body: JSON.stringify({ name, framework: "Next.js" }),
     }),
     ["projects"],
@@ -147,6 +148,7 @@ test("cross-account isolation: a client only ever reads its own outbox", async (
   await createProject(alice, "alice-app");
   await createProject(bob, "bob-app");
   await createProject(bob, "bob-app-two");
+  await createProject(alice, "alice-after-bob");
 
   const aliceView = await sync(alice, 0);
   const bobView = await sync(bob, 0);
@@ -154,8 +156,15 @@ test("cross-account isolation: a client only ever reads its own outbox", async (
   const aliceProjects = aliceView.events.filter((event) => event.event_type === "project.created");
   const bobProjects = bobView.events.filter((event) => event.event_type === "project.created");
 
-  assert.equal(aliceProjects.length, 1);
+  assert.equal(aliceProjects.length, 2);
   assert.equal(bobProjects.length, 2);
+  assert.ok(aliceProjects[1].sequence > aliceProjects[0].sequence + 1);
+  assert.equal(aliceProjects[1].previous_sequence, aliceProjects[0].sequence);
+  const { handle } = await import("./api.ts");
+  const overview = await handle(new Request("http://local/api/overview", { headers: { cookie: alice } }), ["overview"]);
+  const snapshot = await overview.json() as { cursor: number; projects: unknown[] };
+  assert.equal(snapshot.cursor, aliceProjects[1].sequence);
+  assert.equal(snapshot.projects.length, 2);
 
   // Every delivered row belongs to the caller — never to the other account.
   const { openDb } = await import("./db.ts");

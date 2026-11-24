@@ -91,7 +91,8 @@ class RealtimeClient {
   private endpoint: string | null = null;
   private started = false;
   private stopped = true;
-  private syncing = false;
+  private recovery: AbortController | null = null;
+  private connectionAttempt = 0;
   private failing = 0;
   private seen = new Set<string>();
   private seenOrder: string[] = [];
@@ -123,12 +124,14 @@ class RealtimeClient {
     return { ...this.state };
   }
 
-  start() {
+  start(accountId: string) {
     if (typeof window === "undefined") return;
-    if (this.started) return;
+    if (this.started && this.state.accountId === accountId) return;
+    if (this.state.accountId !== accountId) this.reset();
     this.started = true;
     this.stopped = false;
     this.attachNetworkListeners();
+    this.state.accountId = accountId;
     this.state.cursor = this.readCursor();
     void this.connect();
   }
@@ -136,11 +139,13 @@ class RealtimeClient {
   stop() {
     this.stopped = true;
     this.started = false;
+    this.connectionAttempt += 1;
+    this.recovery?.abort();
+    this.recovery = null;
     this.clearTimers();
     this.closeSocket();
   }
 
-  /** Full reset — used on logout so the next account starts from cursor 0. */
   reset() {
     this.stop();
     this.endpoint = null;
@@ -148,11 +153,6 @@ class RealtimeClient {
     this.seen.clear();
     this.seenOrder = [];
     this.state = emptyState();
-    try {
-      window.localStorage.removeItem(CURSOR_KEY);
-    } catch {
-      /* storage unavailable */
-    }
     this.emit();
   }
 
@@ -167,19 +167,20 @@ class RealtimeClient {
 
   // ---- connection lifecycle ----------------------------------------------
 
-  private async connect() {
-    if (this.stopped) return;
+  private async connect(probe = false) {
+    if (this.stopped || this.socket) return;
+    const attempt = ++this.connectionAttempt;
     this.set({
       status: this.state.attempts > 0 ? "reconnecting" : "connecting",
     });
 
-    if (typeof window !== "undefined" && this.shouldPoll()) {
+    if (!probe && this.shouldPoll()) {
       this.startPolling();
       return;
     }
 
     const url = await this.resolveEndpoint();
-    if (this.stopped) return;
+    if (this.stopped || this.connectionAttempt !== attempt || this.socket) return;
     if (!url) {
       this.fail("Realtime endpoint could not be resolved from /api/health.");
       return;
@@ -199,9 +200,9 @@ class RealtimeClient {
     this.socket = socket;
     this.lastMessageAt = Date.now();
     this.connectTimer = setTimeout(() => {
-      if (this.socket === socket && this.state.status !== "connected") {
+      if (this.socket === socket) {
+        this.closeSocket();
         this.fail("The realtime handshake timed out.");
-        socket.close();
       }
     }, CONNECT_TIMEOUT_MS);
 
@@ -242,10 +243,15 @@ class RealtimeClient {
       case "welcome": {
         this.clearConnectTimer();
         const serverCursor = Number(message.cursor ?? 0);
+        if (message.account_id !== this.state.accountId || !Number.isSafeInteger(serverCursor) || serverCursor < 0) {
+          this.closeSocket();
+          this.fail("The realtime server returned an unexpected account or cursor.");
+          return;
+        }
+        this.stopPolling();
         this.failing = 0;
         this.set({
           status: "connected",
-          accountId: typeof message.account_id === "string" ? message.account_id : null,
           accountName: typeof message.account_name === "string" ? message.account_name : null,
           attempts: 0,
           lastError: null,
@@ -255,29 +261,33 @@ class RealtimeClient {
         // No `types` means "every event type" (the gateway default).
         this.send({ type: "subscribe" });
         this.startHeartbeat();
-        // A stored cursor that is behind the server means we were away: replay
-        // the gap. With no stored cursor we are starting fresh (the store has
-        // just pulled a full snapshot), so we simply adopt the server cursor.
-        if (this.state.cursor > 0 && serverCursor > this.state.cursor) {
-          void this.recover();
-        } else {
-          this.set({ cursor: Math.max(this.state.cursor, serverCursor) });
+        if (this.state.cursor > 0 && serverCursor > this.state.cursor) void this.recover();
+        else if (this.state.cursor === 0) {
+          this.set({ cursor: serverCursor });
           this.writeCursor();
         }
         break;
       }
       case "event": {
         const envelope = (message.event ?? message.payload) as RealtimeEvent | undefined;
-        if (envelope && typeof envelope.event_id === "string") this.apply(envelope);
+        if (envelope && typeof envelope.event_id === "string") {
+          if (envelope.event_type === "server.status_changed") {
+            this.set({ serverStatus: envelope.payload.status === "online" ? "online" : "offline" });
+          } else {
+            this.apply(envelope);
+          }
+        }
         break;
       }
       case "replay_start":
         this.set({ status: "syncing" });
         break;
       case "replay_complete": {
-        const latest = Number(message.latest ?? this.state.cursor);
-        this.set({ status: "connected", cursor: Math.max(this.state.cursor, latest), lastSyncAt: Date.now() });
-        this.writeCursor();
+        const cursor = Number(message.cursor);
+        if (!this.recovery && Number.isSafeInteger(cursor) && cursor >= this.state.cursor) {
+          this.set({ status: "connected", cursor, lastSyncAt: Date.now() });
+          this.writeCursor();
+        }
         break;
       }
       case "replay_incomplete":
@@ -309,7 +319,7 @@ class RealtimeClient {
 
   /** Ordering + duplicate protection, then fan-out to subscribers. */
   private apply(envelope: RealtimeEvent) {
-    if (this.seen.has(envelope.event_id)) return; // idempotent: duplicates are ignored
+    if (envelope.account_id !== this.state.accountId || this.seen.has(envelope.event_id)) return;
     this.seen.add(envelope.event_id);
     this.seenOrder.push(envelope.event_id);
     if (this.seenOrder.length > SEEN_LIMIT) {
@@ -318,13 +328,7 @@ class RealtimeClient {
     }
 
     const sequence = Number(envelope.sequence ?? 0);
-    // A hole in the sequence means we missed something (e.g. the socket dropped
-    // mid-stream). Recover from the durable log rather than staying wrong.
-    if (this.state.cursor > 0 && sequence > this.state.cursor + 1) {
-      void this.recover();
-    }
-
-    if (sequence > this.state.cursor) {
+    if (!this.recovery && Number.isSafeInteger(sequence) && sequence > this.state.cursor) {
       this.set({ cursor: sequence, pending: this.state.pending + 1, lastSyncAt: Date.now() });
       this.writeCursor();
     }
@@ -340,36 +344,45 @@ class RealtimeClient {
     this.send({ type: "ack", sequence });
   }
 
-  /** Cursor-based catch-up from the durable outbox — the offline safety net. */
   private async recover() {
-    if (this.syncing || this.stopped) return;
-    this.syncing = true;
-    this.set({ status: "syncing" });
+    if (this.recovery || this.stopped) return;
+    const controller = new AbortController();
+    this.recovery = controller;
+    let cursor = this.state.cursor;
+    if (this.state.transport !== "poll" || this.state.lastSyncAt === null) this.set({ status: "syncing" });
     try {
       for (let guard = 0; guard < 40; guard += 1) {
-        const res = await fetch(`/api/sync/changes?cursor=${this.state.cursor}&limit=${RECOVERY_PAGE}`, {
+        const res = await fetch(`/api/sync/changes?cursor=${cursor}&limit=${RECOVERY_PAGE}`, {
           credentials: "include",
+          signal: controller.signal,
         });
+        if (controller.signal.aborted) return;
         if (res.status === 401) {
-          this.set({ status: "sync_error", lastError: "Your session expired. Sign in again." });
           this.stop();
+          this.set({ status: "sync_error", lastError: "Your session expired. Sign in again." });
           return;
         }
         if (!res.ok) throw new Error(`Sync failed (${res.status})`);
         const page = (await res.json()) as { events: RealtimeEvent[]; cursor: number; more: boolean; latest: number };
-        for (const event of page.events ?? []) this.apply(event);
-        this.set({ cursor: Math.max(this.state.cursor, Number(page.cursor ?? 0)) });
+        if (controller.signal.aborted) return;
+        if (!Number.isSafeInteger(page.cursor) || page.cursor < cursor || (page.more && page.cursor === cursor)) throw new Error("Invalid replay cursor.");
+        for (const event of page.events) this.apply(event);
+        cursor = page.cursor;
+        this.set({ cursor });
         this.writeCursor();
-        if (!page.more) break;
+        if (!page.more) {
+          this.set({ status: "connected", lastError: null, lastSyncAt: Date.now(), pending: 0 });
+          return;
+        }
       }
-      this.set({ status: "connected", lastError: null, lastSyncAt: Date.now(), pending: 0 });
+      throw new Error("A replay backlog remains; retrying from the last page.");
     } catch (error) {
-      this.set({
+      if (!controller.signal.aborted) this.set({
         status: "sync_error",
         lastError: error instanceof Error ? error.message : "Could not synchronise missed changes.",
       });
     } finally {
-      this.syncing = false;
+      if (this.recovery === controller) this.recovery = null;
     }
   }
 
@@ -382,28 +395,17 @@ class RealtimeClient {
   private startPolling() {
     if (this.pollTimer) return;
     this.set({ transport: "poll", status: "syncing" });
-    const tick = async () => {
+    let nextProbeAt = Date.now() + POLL_MS * 6;
+    const tick = () => {
       if (this.stopped) return;
-      try {
-        await this.recover();
-        this.set({ status: "connected", pending: 0 });
-      } catch {
-        /* recover() already records the error */
+      void this.recover();
+      if (!this.socket && typeof WebSocket !== "undefined" && Date.now() >= nextProbeAt) {
+        nextProbeAt = Date.now() + POLL_MS * 6;
+        void this.connect(true);
       }
     };
-    void tick();
-    // Bounded interval: fast for the first minutes, then relax.
-    let slow = false;
-    let ticks = 0;
-    this.pollTimer = setInterval(() => {
-      ticks += 1;
-      if (ticks > 60 && !slow) {
-        slow = true;
-        if (this.pollTimer) clearInterval(this.pollTimer);
-        this.pollTimer = setInterval(tick, POLL_MS * 6);
-      }
-      void tick();
-    }, POLL_MS);
+    this.pollTimer = setInterval(tick, POLL_MS);
+    tick();
   }
 
   private stopPolling() {
@@ -512,16 +514,13 @@ class RealtimeClient {
       const res = await fetch("/api/health", { credentials: "include" });
       if (!res.ok) return null;
       const data = (await res.json()) as { realtime?: { path?: string; port?: number } };
-      const path = typeof data.realtime?.path === "string" ? data.realtime.path : "/api/realtime";
+      const endpoint = new URL(window.location.origin);
+      endpoint.pathname = data.realtime?.path ?? "/api/realtime";
+      const secure = endpoint.protocol === "https:";
+      endpoint.protocol = secure ? "wss:" : "ws:";
       const port = Number(data.realtime?.port ?? 0);
-      const secure = window.location.protocol === "https:";
-      const samePort =
-        !port ||
-        String(port) === window.location.port ||
-        (secure && port === 443) ||
-        (!secure && port === 80);
-      const proto = secure ? "wss:" : "ws:";
-      const url = samePort ? `${proto}//${window.location.host}${path}` : `${proto}//${window.location.hostname}:${port}${path}`;
+      if (!secure && Number.isInteger(port) && port > 0 && port <= 65535) endpoint.port = String(port);
+      const url = endpoint.toString();
       this.endpoint = url;
       return url;
     } catch {
@@ -531,7 +530,7 @@ class RealtimeClient {
 
   private readCursor(): number {
     try {
-      const value = Number(window.localStorage.getItem(CURSOR_KEY) ?? 0);
+      const value = Number(window.localStorage.getItem(`${CURSOR_KEY}.${this.state.accountId}`) ?? 0);
       return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
     } catch {
       return 0;
@@ -540,7 +539,7 @@ class RealtimeClient {
 
   private writeCursor() {
     try {
-      window.localStorage.setItem(CURSOR_KEY, String(this.state.cursor));
+      if (this.state.accountId) window.localStorage.setItem(`${CURSOR_KEY}.${this.state.accountId}`, String(this.state.cursor));
     } catch {
       /* storage unavailable */
     }

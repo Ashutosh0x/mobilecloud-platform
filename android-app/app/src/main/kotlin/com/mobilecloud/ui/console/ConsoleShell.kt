@@ -284,18 +284,18 @@ private fun TopBar(
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconBare(Icons.Filled.Menu, onMenu)
-        Spacer(Modifier.width(10.dp))
+        IconBare(Icons.Filled.Menu, "Open navigation", onMenu)
+        Spacer(Modifier.width(6.dp))
         LogoMark(30.dp, 16.sp)
         Spacer(Modifier.width(9.dp))
         Column(Modifier.weight(1f)) {
             Text("MobileCloud", color = Aurora.TextHi, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.3).sp)
             Text("Build. Ship. Scale.", color = Aurora.TextMid, fontSize = 10.sp)
         }
-        IconBare(Icons.Filled.Search, onSearch)
-        Spacer(Modifier.width(6.dp))
+        IconBare(Icons.Filled.Search, "Search", onSearch)
+        Spacer(Modifier.width(4.dp))
         Box {
-            IconBare(Icons.Filled.Notifications, onBell)
+            IconBare(Icons.Filled.Notifications, if (unread == 0) "Notifications" else "Notifications, $unread unread", onBell)
             if (unread > 0) {
                 Box(Modifier.align(Alignment.TopEnd).size(7.dp).background(Aurora.Red, CircleShape))
             }
@@ -323,16 +323,16 @@ private fun TopBar(
 }
 
 @Composable
-private fun IconBare(icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
+private fun IconBare(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
     Box(
         Modifier
-            .size(34.dp)
+            .size(48.dp)
             .clip(RoundedCornerShape(8.dp))
             .border(1.dp, Aurora.Border, RoundedCornerShape(8.dp))
             .clickable { onClick() },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, contentDescription = null, tint = Aurora.TextHi, modifier = Modifier.size(17.dp))
+        Icon(icon, contentDescription = label, tint = Aurora.TextHi, modifier = Modifier.size(17.dp))
     }
 }
 
@@ -359,7 +359,7 @@ private fun Sidebar(
             LogoMark(28.dp, 15.sp)
             Spacer(Modifier.width(9.dp))
             Text("Console", color = Aurora.TextHi, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            IconBare(Icons.Filled.Close) { unpadded() }
+            IconBare(Icons.Filled.Close, "Close navigation") { unpadded() }
         }
         Spacer(Modifier.height(12.dp))
         ConsoleGroups.forEach { group ->

@@ -1,16 +1,16 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { CSRF_COOKIE, CSRF_HEADER } from "../csrf.ts";
 import type { RangeKey, User } from "../types.ts";
-import { builderEnabled, dispatchDeploy, dispatchRollback, fetchEngineDeployments, probeBuilder } from "./builder.ts";
-import { dataRoot, hashPassword, newId, openDb, tokenHash, verifyPassword } from "./db.ts";
+import { BUILDER_DISABLED } from "./builder.ts";
+import { dataRoot, isRetiredPassword, newId, openDb, tokenHash, verifyPassword } from "./db.ts";
 import { collectAnalytics, collectHost, collectMetrics } from "./metrics.ts";
 import { capabilities, collectObservability, inspectRequest, listBuilds, listDrives, listFirewallEvents, listRules, listWorkflows, observedJa4, summarizeVitals, trafficSummary } from "./platform.ts";
 import { approveDevice, clearProtection, createToken, gateCookie, identityProviders, listNotifications, listSessions, listTokens, listWebhooks, notify, pollDevice, protectionStatus, readGate, setProtection, startDevice, unlockProtection, userFromBearer } from "./identity.ts";
-import { changesSince, publish, tx } from "./events.ts";
-import { approveFromBrowser, approvePairing, closePairing, createPairing, expireStale, listDevices, markAwaitingApproval, publicPairing, readPairing, renameDevice, revokeDevice, scanPairing, secretMatches } from "./pairing.ts";
+import { changesSince, latestSeq, publish, snapshot, tx } from "./events.ts";
+import { approveFromBrowser, approvePairing, closePairing, createPairing, expireStale, listDevices, markAwaitingApproval, publicPairing, readPairing, renameDevice, revokeDevice, scanPairing, scanProofMatches, secretMatches } from "./pairing.ts";
 import { encodePairingTicket, renderPairingQr } from "./qr.ts";
 
 const COOKIE = "mc_session";
@@ -23,7 +23,17 @@ function realtimePort(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 3211;
 }
 
-type SessionUser = User & { password_hash?: string };
+type Authentication =
+  | { user: User; via: "bearer"; tokenId: string; deviceId: string | null }
+  | { user: User; via: "cookie"; hash: string; csrf: string; deviceId: string | null; createdAt: number | null };
+
+class RequestError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
 
 function json(body: unknown, status = 200, headers?: Headers) {
   const h = headers ?? new Headers();
@@ -32,26 +42,45 @@ function json(body: unknown, status = 200, headers?: Headers) {
   return new Response(JSON.stringify(body), { status, headers: h });
 }
 
-function cookieHeader(token: string, maxAge: number) {
-  return `${COOKIE}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
+function publicOrigin(): string | null {
+  try {
+    const url = new URL(process.env.MOBILECLOUD_PUBLIC_ORIGIN ?? "");
+    const schemeAllowed = url.protocol === "https:" || (process.env.NODE_ENV !== "production" && url.protocol === "http:");
+    return schemeAllowed && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash ? url.origin : null;
+  } catch {
+    return null;
+  }
 }
 
-function readCookie(req: Request): string | null {
-  const raw = req.headers.get("cookie") ?? "";
-  const hit = raw.split(";").map((p) => p.trim()).find((p) => p.startsWith(`${COOKIE}=`));
-  return hit ? decodeURIComponent(hit.slice(COOKIE.length + 1)) : null;
+function secureCookie(req: Request): boolean {
+  return process.env.NODE_ENV === "production" || publicOrigin()?.startsWith("https://") === true || new URL(req.url).protocol === "https:";
 }
 
-/** Sets the non-httpOnly CSRF cookie so browser JavaScript can echo it back. */
-function csrfCookieHeader(token: string, maxAge: number) {
-  return `${CSRF_COOKIE}=${token}; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
+function cookieHeader(req: Request, token: string, maxAge: number) {
+  return `${COOKIE}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}${secureCookie(req) ? "; Secure" : ""}`;
 }
 
-/** Reads the CSRF token from the raw cookie header, mirroring `readCookie`. */
-function csrfCookie(req: Request): string | null {
-  const raw = req.headers.get("cookie") ?? "";
-  const hit = raw.split(";").map((p) => p.trim()).find((p) => p.startsWith(`${CSRF_COOKIE}=`));
-  return hit ? decodeURIComponent(hit.slice(CSRF_COOKIE.length + 1)) : null;
+function readCookie(req: Request, name = COOKIE): string | null {
+  const hits = (req.headers.get("cookie") ?? "").split(";").map((p) => p.trim()).filter((p) => p.startsWith(`${name}=`));
+  if (hits.length !== 1) return null;
+  const token = hits[0].slice(name.length + 1);
+  return /^[a-f0-9]{64}$/.test(token) ? token : null;
+}
+
+// Reuse the native client's session cookie jar, but a scan capability is
+// neither a login token (different value format) nor sent outside this ticket.
+function pairingCookie(req: Request, id: string, proof: string, maxAge: number) {
+  return `${COOKIE}=${proof}; HttpOnly; Path=/api/device/pairing/${id}; SameSite=Strict; Max-Age=${maxAge}${secureCookie(req) ? "; Secure" : ""}`;
+}
+
+function readScanProof(req: Request): string | null {
+  const hits = (req.headers.get("cookie") ?? "").split(";").map((p) => p.trim()).filter((p) => /^mc_session=scan_[a-f0-9]{64}$/.test(p));
+  return hits.length === 1 ? hits[0].slice(COOKIE.length + 1) : null;
+}
+
+/** The browser echoes this session-bound token; native clients can read auth/me. */
+function csrfCookieHeader(req: Request, token: string, maxAge: number) {
+  return `${CSRF_COOKIE}=${token}; Path=/; SameSite=Lax; Max-Age=${maxAge}${secureCookie(req) ? "; Secure" : ""}`;
 }
 
 /** Constant-time string comparison over equal-length byte arrays. */
@@ -62,56 +91,64 @@ function timingSafeEq(a: string, b: string): boolean {
   return timingSafeEqual(left, right);
 }
 
-/**
- * Origin-gated double-submit CSRF check. A cookie-authenticated state-changing
- * request that carries an `Origin` header came from a browser and must echo a
- * token matching both the `mc_csrf` cookie and the value stored on its session
- * row. Native clients (no `Origin`) and bearer-authenticated requests are exempt.
- */
-function requireCsrf(req: Request, db: DatabaseSync): void {
-  const method = req.method.toUpperCase();
-  if (method !== "POST" && method !== "PUT" && method !== "PATCH" && method !== "DELETE") return;
-  // Bearer tokens are never attached automatically by a browser: not CSRF-susceptible.
-  if (req.headers.get("authorization")) return;
-  // No Origin header: native clients, curl, and the test suite are exempt.
-  if (!req.headers.get("origin")) return;
-
-  const token = readCookie(req);
-  const header = req.headers.get(CSRF_HEADER);
-  const cookie = csrfCookie(req);
-  const stored = token
-    ? (db.prepare("SELECT csrf FROM sessions WHERE token_hash = ?").get(tokenHash(token)) as { csrf: string | null } | undefined)?.csrf ?? null
-    : null;
-
-  if (header && cookie && stored && timingSafeEq(header, cookie) && timingSafeEq(header, stored)) return;
-
-  const error = new Error("Cross-site request blocked: the CSRF token is missing or invalid.");
-  (error as Error & { status: number }).status = 403;
-  throw error;
+function requireOrigin(req: Request): void {
+  const origin = req.headers.get("origin");
+  let allowed = origin === null || origin === publicOrigin();
+  // Match the gateway's dev allowlist without trusting a request-derived host.
+  if (!allowed && process.env.NODE_ENV !== "production" && !process.env.MOBILECLOUD_PUBLIC_ORIGIN) {
+    const port = Number(process.env.PORT ?? 3210);
+    if (Number.isInteger(port) && port > 0 && port <= 65535) {
+      allowed = ["localhost", "127.0.0.1", "[::1]"].some((host) => origin === new URL(`http://${host}:${port}`).origin);
+    }
+  }
+  if (!allowed || req.headers.get("sec-fetch-site") === "cross-site") {
+    throw new RequestError(403, "Request origin is not allowed");
+  }
 }
 
-function userFromRequest(req: Request): User | null {
-  const bearer = userFromBearer(openDb(), req.headers.get("authorization"));
-  if (bearer) return bearer;
+function requireCsrf(req: Request, auth: Authentication | null): void {
+  if (auth?.via !== "cookie" || req.method === "GET" || req.method === "HEAD") return;
+  const header = req.headers.get(CSRF_HEADER);
+  if (!header || !timingSafeEq(header, auth.csrf)) throw new RequestError(403, "The CSRF token is missing or invalid");
+}
+
+function authenticate(req: Request, db: DatabaseSync): Authentication | null {
+  const authorization = req.headers.get("authorization");
+  if (authorization !== null) {
+    const bearer = userFromBearer(db, authorization);
+    return bearer ? { ...bearer, via: "bearer" } : null;
+  }
   const token = readCookie(req);
   if (!token) return null;
-  const db = openDb();
+  const hash = tokenHash(token);
+  const now = Date.now();
   const row = db.prepare(
-    `SELECT u.id, u.email, u.name, u.role, u.plan
+    `SELECT u.id, u.email, u.name, u.role, u.plan, s.csrf, s.device_id AS deviceId, s.created_at AS createdAt
      FROM sessions s JOIN users u ON u.id = s.user_id
-     WHERE s.token_hash = ? AND s.expires_at > ?`,
-  ).get(tokenHash(token), Date.now()) as User | undefined;
-  if (row) {
-    const agent = (req.headers.get("user-agent") ?? "unknown").slice(0, 180);
-    db.prepare("UPDATE sessions SET user_agent = ? WHERE token_hash = ? AND (user_agent IS NULL OR user_agent = '')").run(agent, tokenHash(token));
+     WHERE s.token_hash = ? AND s.expires_at > ? AND s.csrf IS NOT NULL
+       AND (s.device_id IS NULL OR EXISTS (
+         SELECT 1 FROM connected_devices d JOIN access_tokens t ON t.id = d.token_id AND t.owner_id = d.owner_id
+         WHERE d.id = s.device_id AND d.owner_id = s.user_id AND d.revoked = 0 AND t.expires_at > ?
+       ))`,
+  ).get(hash, now, now) as (User & { csrf: string; deviceId: string | null; createdAt: number | null }) | undefined;
+  if (!row) return null;
+  const { csrf, deviceId, createdAt, ...user } = row;
+  return { user, csrf, hash, via: "cookie", deviceId, createdAt };
+}
+
+function requireRecentLogin(auth: Authentication) {
+  if (auth.via !== "cookie" || auth.deviceId || !auth.createdAt || Date.now() - auth.createdAt > 15 * 60_000) {
+    throw new RequestError(403, "Sign in again with your password to perform this action");
   }
-  return row ?? null;
 }
 
 function log(ownerId: string, level: "info" | "warn" | "error", source: string, message: string) {
-  openDb().prepare(
-    "INSERT INTO logs (id, owner_id, level, source, message, at) VALUES (?, ?, ?, ?, ?, ?)",
-  ).run(newId(), ownerId, level, source, message, Date.now());
+  try {
+    openDb().prepare("INSERT INTO logs (id, owner_id, level, source, message, at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(newId(), ownerId, level, source, message.slice(0, 500), Date.now());
+  } catch {
+    console.warn("Control-plane activity log write failed");
+  }
 }
 
 function record(ownerId: string | null, path: string, status: number, started: number, req: Request) {
@@ -130,63 +167,70 @@ function record(ownerId: string | null, path: string, status: number, started: n
   );
 }
 
-function clientIp(req: Request) {
-  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "local";
-}
-
-function limited(ip: string) {
+// The route has no trusted peer address. Do not accept forwarded headers as
+// a rate-limit identity; apply an operation-wide budget and a target budget.
+function throttle(operation: string, target?: string, targetLimit = 12) {
   const now = Date.now();
-  const row = attempts.get(ip);
-  if (!row || row.reset < now) {
-    attempts.set(ip, { n: 1, reset: now + 60_000 });
-    return false;
+  for (const [key, row] of attempts) if (row.reset <= now) attempts.delete(key);
+  function consume(key: string, allowance: number) {
+    let row = attempts.get(key);
+    if (!row) {
+      if (attempts.size >= 2048) return false;
+      row = { n: 0, reset: now + 60_000 };
+      attempts.set(key, row);
+    }
+    return ++row.n <= allowance;
   }
-  row.n += 1;
-  return row.n > 12;
+  if (!consume(operation, 240) || (target && !consume(`${operation}:${target}`, targetLimit))) {
+    throw new RequestError(429, "Too many attempts");
+  }
 }
 
 function safeSlug(input: string, label: string) {
   const name = input.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-|-$/g, "");
-  if (!name || name.length > 48) throw new Error(`${label} must be 1-48 letters, numbers, or hyphens`);
+  if (!name || name.length > 48) throw new RequestError(400, `${label} must be 1-48 letters, numbers, or hyphens`);
   return name;
 }
 
-function requireUser(req: Request): User {
-  const user = userFromRequest(req);
-  if (!user) {
-    const error = new Error("Sign in required");
-    (error as Error & { status: number }).status = 401;
-    throw error;
+function requireJson(req: Request) {
+  if (req.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
+    throw new RequestError(415, "Content-Type must be application/json");
   }
-  return user;
 }
 
-async function body(req: Request): Promise<Record<string, unknown>> {
-  if (req.headers.get("content-length") === "0") return {};
-  try {
-    const value = await req.json();
-    return value && typeof value === "object" ? value as Record<string, unknown> : {};
-  } catch {
-    return {};
+async function body(req: Request, maxBytes = 64 * 1024): Promise<Record<string, unknown>> {
+  requireJson(req);
+  if (Number(req.headers.get("content-length")) > maxBytes) throw new RequestError(413, "Request body is too large");
+  const reader = req.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  if (reader) {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > maxBytes) {
+        void reader.cancel().catch(() => undefined);
+        throw new RequestError(413, "Request body is too large");
+      }
+      chunks.push(value);
+    }
   }
+  try {
+    const value = JSON.parse(Buffer.concat(chunks, length).toString("utf8"));
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  } catch { /* rejected below */ }
+  throw new RequestError(400, "Provide a valid JSON object");
 }
 
 function str(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-/**
- * The control-plane origin a pairing QR code should send the phone back to.
- *
- * The browser is the only party that knows the address the phone can actually
- * reach (LAN IP, tunnel hostname, adb-reverse port), so it is taken from the
- * request the browser made rather than guessed from server configuration.
- */
 function originOf(req: Request) {
-  const origin = req.headers.get("origin");
-  if (origin) return origin.replace(/\/+$/, "");
-  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
-  if (host) return `${req.headers.get("x-forwarded-proto") ?? "http"}://${host}`;
+  const configured = publicOrigin();
+  if (configured) return configured;
+  if (process.env.NODE_ENV === "production") throw new RequestError(503, "Configure the public HTTPS origin before starting pairing");
   return new URL(req.url).origin;
 }
 
@@ -201,7 +245,7 @@ function pairingError(reason: string) {
     case "closed":
       return "This pairing was cancelled on the dashboard.";
     case "already_connected":
-      return "This QR code has already been used.";
+      return "This QR code was already used. If the phone did not receive its session, revoke the linked device and start a new pairing.";
     case "already_approved":
       return "This QR code was already approved. Ask the dashboard to show a new one.";
     case "not_approved":
@@ -215,10 +259,15 @@ function pairingError(reason: string) {
 
 /** A repository URL must look like a git remote the builder can clone. */
 function isGitUrl(value: string) {
-  return /^(https:\/\/|http:\/\/|git@|ssh:\/\/)/.test(value);
+  try {
+    const url = new URL(value);
+    return value.length <= 2048 && url.protocol === "https:" && !url.username && !url.password && !url.hash && !url.search && url.pathname !== "/";
+  } catch {
+    return false;
+  }
 }
 
-const NO_REPO_NOTE = "Add a Git repository URL to this project before it can be built.";
+const NO_REPO_NOTE = "No repository is configured for this project. Engine dispatch is also disabled.";
 
 /** Records a deployment row and publishes `deployment.updated` atomically. */
 function recordDeployment(
@@ -236,25 +285,6 @@ function recordDeployment(
     publish(db, owner, "deployment.updated", id, { id, projectId: project.id, project: project.name, status, note });
   });
   return id;
-}
-
-/**
- * Sends a web deployment to the core engine and reports the honest outcome:
- * `queued` when the engine accepted it (HTTP 202), `blocked` with the engine's
- * own error text otherwise.
- */
-async function runWebDeploy(
-  project: { id: string; name: string },
-  repoUrl: string,
-): Promise<{ status: "queued" | "blocked"; note: string }> {
-  const result = await dispatchDeploy({ project: project.name, cloneUrl: repoUrl, agentId: "web-dashboard" });
-  if (result.ok) {
-    return {
-      status: "queued",
-      note: `Queued on the core engine (${result.detail}); build logs stream from /logs/${project.name}.`,
-    };
-  }
-  return { status: "blocked", note: result.detail };
 }
 
 /** Records a build row and publishes `build.updated` atomically. */
@@ -287,68 +317,83 @@ export async function handle(req: Request, parts: string[]): Promise<Response> {
     status = result.status;
     return new Response(result.response.body, { status: result.status, headers: result.response.headers });
   } catch (error) {
-    const statusCode = (error as { status?: number }).status ?? 400;
-    status = statusCode;
-    const message = error instanceof Error ? error.message : "Request failed";
-    return json({ error: message }, statusCode);
+    status = error instanceof RequestError ? error.status : 500;
+    if (status === 500) console.warn("Unexpected control-plane request failure");
+    return json({ error: error instanceof RequestError ? error.message : "Request failed" }, status);
   } finally {
-    if (path !== "events") record(owner, `/${path}`, status, started, req);
+    if (owner && path !== "events" && path !== "health") {
+      try { record(owner, `/${path}`.slice(0, 180), status, started, req); }
+      catch { console.warn("Control-plane request telemetry write failed"); }
+    }
   }
 }
 
 async function route(req: Request, parts: string[]): Promise<{ response: Response; status: number; owner: string | null }> {
   const method = req.method;
   const key = `${method} ${parts.join("/")}`;
+  if (method !== "GET" && method !== "HEAD") requireOrigin(req);
+  if (key === "POST auth/signup") throw new RequestError(403, "Public registration is disabled. Contact your MobileCloud operator.");
+  if (key === "GET health") {
+    return {
+      response: json({
+        service: "MobileCloud",
+        apiVersion: 1,
+        status: "ok",
+        environment: process.env.NODE_ENV ?? "development",
+        time: new Date().toISOString(),
+        signupEnabled: false,
+        realtime: {
+          transport: "websocket",
+          path: "/api/realtime",
+          port: realtimePort(),
+          url: publicOrigin()?.replace(/^http/, "ws")?.concat("/api/realtime") ?? null,
+          fallback: "/api/sync/changes",
+          schemaVersion: 1,
+        },
+      }),
+      status: 200,
+      owner: null,
+    };
+  }
   const db = openDb();
 
-  if (key === "POST auth/signup" || key === "POST auth/login") {
-    if (limited(clientIp(req))) return { response: json({ error: "Too many attempts" }, 429), status: 429, owner: null };
-    const input = await body(req);
+  if (key === "POST auth/login") {
+    const input = await body(req, 4096);
     const email = str(input.email).toLowerCase();
     const password = str(input.password);
-    if (!email.includes("@") || password.length < 8) {
-      return { response: json({ error: "Email and a password of at least 8 characters are required" }, 400), status: 400, owner: null };
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+$/.test(email) || password.length < 8 || password.length > 256) {
+      throw new RequestError(400, "A valid email and password are required");
     }
-    if (key.endsWith("signup")) {
-      const name = str(input.name);
-      if (name.length < 1 || name.length > 80) return { response: json({ error: "Name is required" }, 400), status: 400, owner: null };
-      const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
-      if (existing) return { response: json({ error: "An account with that email already exists" }, 409), status: 409, owner: null };
-      const id = newId();
-      const count = db.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number };
-      tx(db, () => {
-        db.prepare(
-          "INSERT INTO users (id, email, name, password_hash, role, plan, created_at) VALUES (?, ?, ?, ?, ?, 'community', ?)",
-        ).run(id, email, name, hashPassword(password), count.n === 0 ? "owner" : "member", Date.now());
-        publish(db, id, "account.updated", id, { id, email, name, created: true });
-      });
-      log(id, "info", "auth", "account created");
-      return issueSession(id, req);
-    }
+    throttle("login", email);
     const row = db.prepare("SELECT id, password_hash FROM users WHERE email = ?").get(email) as { id: string; password_hash: string } | undefined;
-    if (!row || !verifyPassword(password, row.password_hash)) {
-      return { response: json({ error: "Email or password is wrong" }, 401), status: 401, owner: null };
+    // Run the same costly verifier for missing and reset-required accounts.
+    const stored = row?.password_hash.includes(":") ? row.password_hash : `00000000000000000000000000000000:${"0".repeat(64)}`;
+    if (!verifyPassword(password, stored) || !row || isRetiredPassword(password)) {
+      throw new RequestError(401, "Email or password is wrong");
     }
     log(row.id, "info", "auth", "signed in");
-    return issueSession(row.id, req);
+    return issueSession(db, row.id, req);
   }
 
   if (key === "POST auth/device/code") {
+    throttle("device-code");
     const started = startDevice(db);
     return { response: json(started), status: 200, owner: null };
   }
   if (key === "POST auth/device/token") {
-    const result = pollDevice(db, str((await body(req)).deviceCode));
+    const deviceCode = str((await body(req, 4096)).deviceCode);
+    throttle("device-token", /^[a-f0-9]{48}$/.test(deviceCode) ? tokenHash(deviceCode) : undefined, 30);
+    const result = pollDevice(db, deviceCode);
     const status = result.status === "approved" ? 200 : result.status === "expired" ? 400 : 202;
     return { response: json(result, status), status, owner: null };
   }
 
   // ---- QR device pairing: the scanning device's half ---------------------
-  // The phone starts with no session, so these three calls are authorised by
-  // possession of the 256-bit secret carried only inside the QR code. That is
-  // deliberately not enough on its own to link a device: the account-scoped
-  // browser approval (`POST device/pairing/{id}/approve`) is the other half,
-  // and only the two together produce a credential.
+  // After the first scan, only the client holding the scoped scan cookie may
+  // follow or claim this ticket. A QR copy alone cannot claim that approval.
+  if (parts[0] === "device" && parts[1] === "pairing" && parts[2] && !/^[a-f0-9]{32}$/.test(parts[2])) {
+    throw new RequestError(404, "Pairing session not found");
+  }
 
   if (method === "POST" && parts[0] === "device" && parts[1] === "pairing" && parts[2] && parts[3] === "scan") {
     const input = await body(req);
@@ -359,24 +404,31 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       platform: str(input.platform) || undefined,
       appVersion: str(input.appVersion) || undefined,
     };
-    const result = scanPairing(db, parts[2], secret, device, clientIp(req));
+    throttle("pairing-scan", parts[2].slice(0, 64));
+    const proof = `scan_${randomBytes(32).toString("hex")}`;
+    const result = tx(db, () => {
+      const outcome = scanPairing(db, parts[2], secret, device, proof, readScanProof(req));
+      if (!outcome.ok || outcome.duplicate) return outcome;
+      publish(db, outcome.row.owner_id, "device.pairing.scanned", outcome.row.id, publicPairing(outcome.row));
+      markAwaitingApproval(db, parts[2]);
+      const row = readPairing(db, parts[2]) ?? outcome.row;
+      publish(db, row.owner_id, "device.pairing.approval_requested", row.id, publicPairing(row));
+      return { ...outcome, row };
+    });
     if (!result.ok) {
       const status = result.reason === "unknown_session" || result.reason === "invalid_secret" ? 404 : 409;
       return { response: json({ error: pairingError(result.reason), reason: result.reason }, status), status, owner: null };
     }
-    markAwaitingApproval(db, parts[2]);
-    const scanned = readPairing(db, parts[2]) ?? result.row;
-    // Fan out so the browser flips to the approval screen without polling.
-    publish(db, scanned.owner_id, "device.pairing.scanned", scanned.id, publicPairing(scanned));
-    if (scanned.status === "AWAITING_APPROVAL") {
-      publish(db, scanned.owner_id, "device.pairing.approval_requested", scanned.id, publicPairing(scanned));
-    }
-    return { response: json({ pairing: publicPairing(scanned), duplicate: result.duplicate }), status: 200, owner: null };
+    const headers = new Headers();
+    if (!result.duplicate) headers.append("set-cookie", pairingCookie(req, parts[2], proof, 240));
+    return { response: json({ pairing: publicPairing(result.row), duplicate: result.duplicate }, 200, headers), status: 200, owner: null };
   }
 
   if (method === "POST" && parts[0] === "device" && parts[1] === "pairing" && parts[2] && parts[3] === "status") {
+    throttle("pairing-status", parts[2].slice(0, 64), 100);
+    const secret = str((await body(req, 4096)).secret);
     const row = readPairing(db, parts[2]);
-    if (!row || !secretMatches(row, str((await body(req)).secret))) {
+    if (!row || !secretMatches(row, secret) || (row.scan_hash && !scanProofMatches(row, readScanProof(req)))) {
       return { response: json({ error: pairingError("unknown_session"), reason: "unknown_session" }, 404), status: 404, owner: null };
     }
     return { response: json({ pairing: publicPairing(row) }), status: 200, owner: null };
@@ -385,37 +437,31 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   if (method === "POST" && parts[0] === "device" && parts[1] === "pairing" && parts[2] && parts[3] === "claim") {
     const input = await body(req);
     const row = readPairing(db, parts[2]);
-    if (!row || !secretMatches(row, str(input.secret))) {
+    if (!row || !secretMatches(row, str(input.secret)) || (row.scan_hash && !scanProofMatches(row, readScanProof(req)))) {
       return { response: json({ error: pairingError("unknown_session"), reason: "unknown_session" }, 404), status: 404, owner: null };
     }
-    const device = {
-      name: str(input.name) || undefined,
-      platform: str(input.platform) || undefined,
-      appVersion: str(input.appVersion) || undefined,
-    };
-    // One transaction: the session is consumed if and only if the device row
-    // and its durable credential are both created.
-    const claimed = tx(db, () => approvePairing(db, row, row.owner_id, device, clientIp(req)));
+    throttle("pairing-claim", parts[2].slice(0, 64));
+    const claimed = tx(db, () => {
+      const outcome = approvePairing(db, row, row.owner_id);
+      if (!outcome.ok) return outcome;
+      const pairing = publicPairing(outcome.row);
+      publish(db, row.owner_id, "device.pairing.connected", row.id, pairing);
+      publish(db, row.owner_id, "device.connected", outcome.device.id, {
+        device_id: outcome.device.id,
+        device_name: outcome.device.name,
+        platform: outcome.device.platform,
+        method: "qr",
+      });
+      const headers = startSession(db, row.owner_id, req, outcome.device.id);
+      return { ...outcome, headers, pairing };
+    });
     if (!claimed.ok) {
       const status = claimed.reason === "not_approved" || claimed.reason === "race" ? 409 : 410;
       return { response: json({ error: pairingError(claimed.reason), reason: claimed.reason }, status), status, owner: null };
     }
-    const pairing = publicPairing(claimed.row);
-    publish(db, claimed.row.owner_id, "device.pairing.connected", claimed.row.id, pairing);
-    publish(db, claimed.row.owner_id, "device.connected", claimed.device.id, {
-      device_id: claimed.device.id,
-      device_name: claimed.device.name,
-      platform: claimed.device.platform,
-      method: "qr",
-    });
-    log(claimed.row.owner_id, "info", "device", `linked ${claimed.device.name} (${claimed.device.platform}) with a QR code`);
-    // The phone proved the 256-bit secret *and* the account owner approved it,
-    // so this is now that account's device: sign it in. Issuing a session here
-    // is what lets the app talk to the API and open the realtime socket
-    // (which authenticates with the `mc_session` cookie) without a password
-    // ever being typed on the phone. Called after the claim transaction so the
-    // two transactions never nest.
-    const headers = startSession(claimed.row.owner_id, req);
+    log(row.owner_id, "info", "device", `linked ${claimed.device.name} (${claimed.device.platform}) with a QR code`);
+    const { headers, pairing } = claimed;
+    headers.append("set-cookie", pairingCookie(req, parts[2], "", 0));
     return {
       response: json({
         account_id: claimed.row.owner_id,
@@ -436,55 +482,60 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   }
 
   if (key === "POST auth/logout") {
-    const token = readCookie(req);
-    if (token) {
-      const hash = tokenHash(token);
-      const row = db.prepare("SELECT id, user_id AS userId FROM sessions WHERE token_hash = ?").get(hash) as
-        | { id: string | null; userId: string }
-        | undefined;
-      tx(db, () => {
-        db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(hash);
-        if (row) publish(db, row.userId, "session.revoked", row.id ?? hash, { sessionId: row.id ?? hash, reason: "signed_out" });
-      });
-    }
+    if (req.body && req.headers.get("content-length") !== "0") await body(req, 4096);
+    const auth = authenticate(req, db);
+    if (req.headers.has("authorization") && !auth) throw new RequestError(401, "Sign in required");
+    requireCsrf(req, auth);
+    if (auth) tx(db, () => {
+      const owner = auth.user.id;
+      if (auth.via === "cookie") {
+        const row = db.prepare("SELECT id FROM sessions WHERE token_hash = ?").get(auth.hash) as { id: string } | undefined;
+        db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(auth.hash);
+        if (row) publish(db, owner, "session.revoked", row.id, { sessionId: row.id, reason: "signed_out" });
+      }
+      if (auth.deviceId) {
+        if (revokeDevice(db, owner, auth.deviceId).ok) {
+          publish(db, owner, "device.disconnected", auth.deviceId, { device_id: auth.deviceId, reason: "signed_out" });
+        }
+      } else if (auth.via === "bearer") {
+        db.prepare("DELETE FROM access_tokens WHERE owner_id = ? AND id = ?").run(owner, auth.tokenId);
+        publish(db, owner, "configuration.updated", auth.tokenId, { resource: "token", id: auth.tokenId, deleted: true });
+      }
+    });
     const headers = new Headers();
-    headers.append("set-cookie", cookieHeader("", 0));
-    return { response: json({ ok: true }, 200, headers), status: 200, owner: null };
+    if (!auth || auth.via === "cookie") {
+      headers.append("set-cookie", cookieHeader(req, "", 0));
+      headers.append("set-cookie", csrfCookieHeader(req, "", 0));
+      headers.append("set-cookie", gateCookie("", 0, secureCookie(req)));
+    }
+    return { response: json({ ok: true }, 200, headers), status: 200, owner: auth?.user.id ?? null };
   }
 
   if (key === "GET auth/me") {
-    const user = userFromRequest(req);
-    return { response: json({ user }), status: 200, owner: user?.id ?? null };
+    requireOrigin(req);
+    const auth = authenticate(req, db);
+    const headers = new Headers();
+    const csrfToken = auth?.via === "cookie" ? auth.csrf : null;
+    if (csrfToken && readCookie(req, CSRF_COOKIE) !== csrfToken) {
+      headers.append("set-cookie", csrfCookieHeader(req, csrfToken, WEEK / 1000));
+    }
+    return { response: json({ user: auth?.user ?? null, csrfToken }, 200, headers), status: 200, owner: auth?.user.id ?? null };
   }
 
-  // Public service-identity probe. Lets a client confirm it found a MobileCloud
-  // control plane before trusting the endpoint. No secrets, no auth required.
-  // It also advertises where the realtime gateway lives so a client never has
-  // to guess a port.
-  if (key === "GET health") {
-    return {
-      response: json({
-        service: "MobileCloud",
-        apiVersion: 1,
-        status: "ok",
-        environment: process.env.NODE_ENV ?? "development",
-        time: new Date().toISOString(),
-        realtime: {
-          transport: "websocket",
-          path: "/api/realtime",
-          port: realtimePort(),
-          fallback: "/api/sync/changes",
-          schemaVersion: 1,
-        },
-      }),
-      status: 200,
-      owner: null,
-    };
-  }
-
-  const user = requireUser(req);
+  const auth = authenticate(req, db);
+  if (!auth) throw new RequestError(401, "Sign in required");
+  const user = auth.user;
   const owner = user.id;
-  requireCsrf(req, db);
+  const operatorMetrics = user.role === "owner" && auth.via === "cookie" && auth.deviceId === null;
+  requireCsrf(req, auth);
+  if (auth.via === "bearer" && method !== "GET" && method !== "HEAD") {
+    throw new RequestError(403, "Bearer credentials are read-only; use an authenticated session for changes");
+  }
+  if (method !== "GET" && (parts[0] === "tokens" || parts[0] === "sessions" || parts[0] === "webhooks" || parts[0] === "devices"
+    || key === "POST device/approve" || (parts[0] === "device" && parts[1] === "pairing")
+    || key === "POST protection" || key === "DELETE protection")) {
+    requireRecentLogin(auth);
+  }
   const blocked = inspectRequest(db, owner, req, parts.join("/"));
   if (blocked) {
     notify(db, owner, "firewall.denied", "Request blocked", blocked.error);
@@ -497,16 +548,17 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   if (key === "GET sync/changes") {
     const params = new URL(req.url).searchParams;
     const rawCursor = Number(params.get("cursor") ?? 0);
-    const cursor = Number.isFinite(rawCursor) && rawCursor > 0 ? Math.floor(rawCursor) : 0;
+    const cursor = Number.isSafeInteger(rawCursor) && rawCursor > 0 ? rawCursor : 0;
     const rawLimit = Number(params.get("limit") ?? 500);
-    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(1000, Math.floor(rawLimit)) : 500;
-    const page = changesSince(db, owner, cursor, limit);
+    const limit = Number.isSafeInteger(rawLimit) && rawLimit > 0 ? Math.min(1000, rawLimit) : 500;
+    const page = snapshot(db, () => changesSince(db, owner, cursor, limit));
     return { response: json({ ...page, account_id: owner }), status: 200, owner };
   }
 
   if (key === "GET overview") {
-    return { response: json({
-      user,
+    const result = snapshot(db, () => ({
+      cursor: latestSeq(db, owner),
+      user: db.prepare("SELECT id, email, name, role, plan FROM users WHERE id = ?").get(owner) ?? user,
       projects: listProjects(owner),
       deployments: listDeployments(owner),
       domains: listDomains(owner),
@@ -516,8 +568,8 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       logs: listLogs(owner),
       team: listTeam(owner),
       settings: listSettings(owner),
-      metrics: collectMetrics(db, owner),
-      host: collectHost(),
+      metrics: collectMetrics(db, owner, operatorMetrics),
+      host: collectHost(operatorMetrics),
       billing: billing(user),
       firewall: { rules: listRules(db, owner), events: listFirewallEvents(db, owner), traffic: trafficSummary(db, owner) },
       observability: collectObservability(db, owner),
@@ -527,16 +579,17 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       drives: listDrives(db, owner),
       capabilities: capabilities(),
       notifications: listNotifications(db, owner),
-      sessions: listSessions(db, owner, readCookie(req) ? tokenHash(readCookie(req) as string) : null),
+      sessions: listSessions(db, owner, auth.via === "cookie" ? auth.hash : null),
       tokens: listTokens(db, owner),
       webhooks: listWebhooks(db, owner),
       protection: protectionStatus(db, owner, readGate(req)),
       identity: identityProviders(),
-    }), status: 200, owner };
+    }));
+    return { response: json(result), status: 200, owner };
   }
 
-  if (key === "GET metrics") return { response: json(collectMetrics(db, owner)), status: 200, owner };
-  if (key === "GET host") return { response: json(collectHost()), status: 200, owner };
+  if (key === "GET metrics") return { response: json(collectMetrics(db, owner, operatorMetrics)), status: 200, owner };
+  if (key === "GET host") return { response: json(collectHost(operatorMetrics)), status: 200, owner };
   if (parts[0] === "analytics" && method === "GET") {
     const range = (new URL(req.url).searchParams.get("range") ?? "24h") as RangeKey;
     if (!["1h", "24h", "7d", "30d"].includes(range)) return { response: json({ error: "Unknown range" }, 400), status: 400, owner };
@@ -564,7 +617,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     }
     const repoUrl = str(input.repoUrl);
     if (repoUrl && !isGitUrl(repoUrl)) {
-      return { response: json({ error: "Repository URL must start with https://, http://, git@, or ssh://" }, 400), status: 400, owner };
+      return { response: json({ error: "Enter an HTTPS repository URL without embedded credentials, query, or fragment" }, 400), status: 400, owner };
     }
     const id = newId();
     tx(db, () => {
@@ -575,6 +628,18 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     });
     log(owner, "info", "projects", `created ${name}`);
     return { response: json({ ok: true, id, repoUrl: repoUrl || null }), status: 201, owner };
+  }
+  if (method === "PATCH" && parts[0] === "projects" && parts.length === 2) {
+    const input = await body(req);
+    if (input.repoUrl !== null && typeof input.repoUrl !== "string") throw new RequestError(400, "Provide a repository URL or null");
+    const repoUrl = str(input.repoUrl) || null;
+    if (repoUrl && !isGitUrl(repoUrl)) throw new RequestError(400, "Enter an HTTPS repository URL without embedded credentials, query, or fragment");
+    tx(db, () => {
+      const changed = db.prepare("UPDATE projects SET repo_url = ? WHERE owner_id = ? AND id = ?").run(repoUrl, owner, parts[1]);
+      if (!changed.changes) throw new RequestError(404, "Project not found");
+      publish(db, owner, "project.updated", parts[1], { id: parts[1], repoUrl });
+    });
+    return { response: json({ ok: true, id: parts[1], repoUrl }), status: 200, owner };
   }
   if (method === "DELETE" && parts[0] === "projects" && parts[1]) {
     const existing = db.prepare("SELECT name FROM projects WHERE owner_id = ? AND id = ?").get(owner, parts[1]) as
@@ -599,7 +664,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
 
     const override = str(input.repoUrl);
     if (override && !isGitUrl(override)) {
-      return { response: json({ error: "Repository URL must start with https://, http://, git@, or ssh://" }, 400), status: 400, owner };
+      return { response: json({ error: "Enter an HTTPS repository URL without embedded credentials, query, or fragment" }, 400), status: 400, owner };
     }
     if (override && override !== project.repoUrl) {
       tx(db, () => {
@@ -616,54 +681,20 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       return { response: json({ ok: true, status: "blocked", note: NO_REPO_NOTE }), status: 201, owner };
     }
 
-    if (!builderEnabled()) {
-      const note = "No build runner is configured. Set MOBILECLOUD_BUILDER_URL to a reachable builder.";
-      recordDeployment(db, owner, project, "blocked", note);
-      log(owner, "warn", "builder", `${project.name}: ${note}`);
-      notify(db, owner, "deployment.blocked", "Deployment not built", `${project.name}: ${note}`);
-      return { response: json({ ok: true, status: "blocked", note }), status: 201, owner };
-    }
-
-    const outcome = await runWebDeploy(project, repoUrl);
-    recordDeployment(db, owner, project, outcome.status, outcome.note);
-    log(owner, outcome.status === "queued" ? "info" : "error", "builder", `${project.name}: ${outcome.note}`);
-    if (outcome.status === "blocked") notify(db, owner, "deployment.blocked", "Deployment not built", `${project.name}: ${outcome.note}`);
-    return { response: json({ ok: true, status: outcome.status, note: outcome.note }), status: 201, owner };
+    recordDeployment(db, owner, project, "blocked", BUILDER_DISABLED);
+    log(owner, "warn", "builder", `${project.name}: ${BUILDER_DISABLED}`);
+    return { response: json({ ok: true, status: "blocked", note: BUILDER_DISABLED }), status: 201, owner };
   }
 
   if (method === "POST" && parts[0] === "deployments" && parts[2] === "rollback") {
-    const deployment = db.prepare(
-      `SELECT d.id, d.project_id AS projectId, p.name AS project
-       FROM deployments d JOIN projects p ON p.id = d.project_id
-       WHERE d.owner_id = ? AND d.id = ?`,
-    ).get(owner, parts[1]) as { id: string; projectId: string; project: string } | undefined;
-    if (!deployment) return { response: json({ error: "Deployment not found" }, 404), status: 404, owner };
-    const deployId = str((await body(req)).deployId);
-    if (!deployId) return { response: json({ error: "deployId is required" }, 400), status: 400, owner };
-
-    const result = await dispatchRollback({ project: deployment.project, deployId });
-    const note = result.ok ? `Rolled back to ${deployId} on the core engine.` : result.detail;
-    const outcome = result.ok ? "rolled_back" : "failed";
-    recordDeployment(db, owner, { id: deployment.projectId, name: deployment.project }, outcome, note);
-    log(owner, result.ok ? "info" : "error", "builder", `${deployment.project}: ${note}`);
-    return { response: json({ ok: result.ok, status: outcome, note }), status: result.ok ? 200 : 502, owner };
+    return { response: json({ ok: false, status: "blocked", note: BUILDER_DISABLED }), status: 503, owner };
   }
 
   if (key === "GET builder") {
-    const probe = await probeBuilder();
-    return {
-      response: json({ enabled: builderEnabled(), baseUrl: probe.baseUrl, reachable: probe.reachable, detail: probe.detail }),
-      status: 200,
-      owner,
-    };
+    return { response: json({ enabled: false, baseUrl: "", reachable: false, detail: BUILDER_DISABLED }), status: 200, owner };
   }
   if (method === "GET" && parts[0] === "builder" && parts[1] === "deployments" && parts[2]) {
-    const project = db.prepare("SELECT id, name FROM projects WHERE owner_id = ? AND (id = ? OR name = ?)")
-      .get(owner, parts[2], parts[2]) as { id: string; name: string } | undefined;
-    if (!project) return { response: json({ error: "Project not found" }, 404), status: 404, owner };
-    const result = await fetchEngineDeployments(project.name);
-    if (!result.ok) return { response: json({ error: result.detail }, 502), status: 502, owner };
-    return { response: json(result.body), status: 200, owner };
+    throw new RequestError(503, BUILDER_DISABLED);
   }
 
   if (key === "POST domains") {
@@ -733,30 +764,44 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   }
 
   if (key === "POST storage") {
-    const input = await body(req);
+    const input = await body(req, 1_350_000);
     const bucket = safeSlug(str(input.bucket), "Bucket");
-    const keyName = str(input.key).replace(/\\/g, "/");
-    if (!keyName || keyName.includes("..") || keyName.startsWith("/")) {
-      return { response: json({ error: "Object key is invalid" }, 400), status: 400, owner };
+    const keyName = str(input.key);
+    if (keyName.length > 240 || !keyName.split("/").every((part) => /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}$/.test(part))) {
+      throw new RequestError(400, "Object key is invalid");
     }
-    const bytes = Buffer.from(str(input.contentBase64), "base64");
-    if (!str(input.contentBase64) || bytes.length > 1_000_000) {
-      return { response: json({ error: "Provide base64 content up to 1 MB" }, 400), status: 400, owner };
-    }
-    const dir = join(dataRoot(), "objects", owner, bucket);
-    mkdirSync(dir, { recursive: true });
-    const file = join(dir, keyName.replace(/\//g, "__"));
-    writeFileSync(file, bytes);
-    const size = statSync(file).size;
+    const content = str(input.contentBase64);
+    if (!content || content.length > 1_333_336) throw new RequestError(400, "Provide base64 content up to 1 MB");
+    const bytes = Buffer.from(content, "base64");
+    if (bytes.length > 1_000_000 || bytes.toString("base64") !== content) throw new RequestError(400, "Provide base64 content up to 1 MB");
     const id = newId();
-    tx(db, () => {
-      db.prepare(
-        "INSERT INTO objects (id, owner_id, bucket, key, path, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      ).run(id, owner, bucket, keyName, file, size, Date.now());
-      publish(db, owner, "configuration.updated", id, { resource: "object", id, bucket, key: keyName, bytes: size });
-    });
-    log(owner, "info", "storage", `wrote ${bucket}/${keyName} (${size} bytes)`);
-    return { response: json({ ok: true, bytes: size }), status: 201, owner };
+    const dir = join(dataRoot(), "objects", owner, "opaque");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${id}.blob`);
+    const temporary = join(dir, `${id}.tmp`);
+    let staged = false;
+    let promoted = false;
+    try {
+      tx(db, () => {
+        if (db.prepare("SELECT 1 FROM objects WHERE owner_id = ? AND bucket = ? AND key = ? LIMIT 1").get(owner, bucket, keyName)) {
+          throw new RequestError(409, "An object with this key already exists");
+        }
+        const usage = db.prepare("SELECT COALESCE(SUM(bytes), 0) AS bytes FROM objects WHERE owner_id = ?").get(owner) as { bytes: number };
+        if (usage.bytes + bytes.length > 100_000_000) throw new RequestError(413, "Account object storage limit reached");
+        writeFileSync(temporary, bytes, { flag: "wx" });
+        staged = true;
+        renameSync(temporary, file);
+        promoted = true;
+        db.prepare("INSERT INTO objects (id, owner_id, bucket, key, path, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+          .run(id, owner, bucket, keyName, file, bytes.length, Date.now());
+        publish(db, owner, "configuration.updated", id, { resource: "object", id, bucket, key: keyName, bytes: bytes.length });
+      });
+    } catch (error) {
+      if (staged) try { rmSync(promoted ? file : temporary, { force: true }); } catch { /* Leave orphan for maintenance. */ }
+      throw error;
+    }
+    log(owner, "info", "storage", `wrote ${bucket}/${keyName} (${bytes.length} bytes)`);
+    return { response: json({ ok: true, bytes: bytes.length }), status: 201, owner };
   }
 
   if (key === "POST team") {
@@ -807,8 +852,12 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const name = str(input.name);
     const days = Number(input.days ?? 30);
     if (!name) return { response: json({ error: "Name is required" }, 400), status: 400, owner };
-    if (![7, 30, 90, 0].includes(days)) return { response: json({ error: "Expiry must be 7, 30, 90, or 0 for no expiry" }, 400), status: 400, owner };
-    const issued = createToken(db, owner, name, days);
+    if (![7, 30, 90].includes(days)) return { response: json({ error: "Expiry must be 7, 30, or 90 days" }, 400), status: 400, owner };
+    const issued = tx(db, () => {
+      const credential = createToken(db, owner, name, days);
+      publish(db, owner, "configuration.updated", credential.id, { resource: "token", id: credential.id, name: name.slice(0, 60) });
+      return { token: credential.token, expiresAt: credential.expiresAt };
+    });
     return { response: json(issued), status: 201, owner };
   }
 
@@ -826,9 +875,12 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
 
   if (key === "POST device/approve") {
     const code = str((await body(req)).userCode);
-    if (!approveDevice(db, owner, code)) return { response: json({ error: "Code is unknown, expired, or already used" }, 404), status: 404, owner };
-    publish(db, owner, "configuration.updated", code.toUpperCase(), { resource: "device", code: code.toUpperCase(), approved: true });
-    notify(db, owner, "auth.device", "Device approved", `Approved device code ${code.toUpperCase()}`);
+    throttle("device-approve", owner);
+    tx(db, () => {
+      if (!approveDevice(db, owner, code)) throw new RequestError(404, "Code is unknown, expired, or already used");
+      publish(db, owner, "configuration.updated", null, { resource: "device", approved: true });
+      notify(db, owner, "auth.device", "Device approved", "Approved a device code");
+    });
     return { response: json({ ok: true }), status: 200, owner };
   }
 
@@ -838,23 +890,22 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   // account already had open is superseded, so a screenshot of an old code can
   // never be reused.
   if (key === "POST device/pairing") {
-    const input = await body(req);
-    const created = createPairing(db, owner, {
-      name: str(input.name) || undefined,
-      platform: str(input.platform) || undefined,
-      userAgent: req.headers.get("user-agent") ?? undefined,
-      ip: clientIp(req),
+    throttle("pairing-create", owner);
+    const input = await body(req, 4096);
+    const origin = originOf(req);
+    const { created, row } = tx(db, () => {
+      const created = createPairing(db, owner, {
+        name: str(input.name) || undefined,
+        platform: str(input.platform) || undefined,
+        userAgent: req.headers.get("user-agent") ?? undefined,
+      });
+      const row = readPairing(db, created.id);
+      if (!row) throw new Error("Pairing insert not found");
+      publish(db, owner, "device.pairing.created", created.id, publicPairing(row));
+      return { created, row };
     });
-    const row = readPairing(db, created.id);
-    if (!row) return { response: json({ error: "Could not start a pairing session" }, 500), status: 500, owner };
-    const payload = encodePairingTicket({
-      api: originOf(req),
-      id: created.id,
-      secret: created.secret,
-      code: created.verificationCode,
-    });
+    const payload = encodePairingTicket({ api: origin, id: created.id, secret: created.secret, code: created.verificationCode });
     const qr = await renderPairingQr(payload);
-    publish(db, owner, "device.pairing.created", created.id, publicPairing(row));
     log(owner, "info", "device", "started a QR pairing session");
     // The secret and the PNG are returned once, to the browser that asked for
     // them. It is the only moment the secret exists outside the QR image.
@@ -863,10 +914,12 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
 
   // The browser polls this while the QR is on screen.
   if (method === "GET" && parts[0] === "device" && parts[1] === "pairing" && parts[2]) {
-    for (const stale of expireStale(db)) {
-      publish(db, stale.owner_id, "device.pairing.expired", stale.id, { pairing_id: stale.id, status: "EXPIRED" });
-    }
-    const row = readPairing(db, parts[2]);
+    const row = tx(db, () => {
+      for (const stale of expireStale(db, owner)) {
+        publish(db, owner, "device.pairing.expired", stale.id, { pairing_id: stale.id, status: "EXPIRED" });
+      }
+      return readPairing(db, parts[2]);
+    });
     if (!row || row.owner_id !== owner) return { response: json({ error: "Pairing session not found" }, 404), status: 404, owner };
     return { response: json({ pairing: publicPairing(row) }), status: 200, owner };
   }
@@ -876,12 +929,14 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   if (method === "POST" && parts[0] === "device" && parts[1] === "pairing" && parts[2] && parts[3] === "approve") {
     const row = readPairing(db, parts[2]);
     if (!row || row.owner_id !== owner) return { response: json({ error: "Pairing session not found" }, 404), status: 404, owner };
-    if (!approveFromBrowser(db, parts[2], owner)) {
-      return { response: json({ error: pairingError("not_approved"), reason: "not_approved" }, 409), status: 409, owner };
-    }
-    const approved = readPairing(db, parts[2]) ?? row;
-    publish(db, owner, "device.pairing.approved", parts[2], publicPairing(approved));
-    notify(db, owner, "auth.device", "Device approved", `Approved ${approved.scan_device_name ?? "a device"} over QR`);
+    const approved = tx(db, () => {
+      if (!approveFromBrowser(db, parts[2], owner)) return null;
+      const updated = readPairing(db, parts[2]) ?? row;
+      publish(db, owner, "device.pairing.approved", parts[2], publicPairing(updated));
+      notify(db, owner, "auth.device", "Device approved", `Approved ${updated.scan_device_name ?? "a device"} over QR`);
+      return updated;
+    });
+    if (!approved) return { response: json({ error: pairingError("not_approved"), reason: "not_approved" }, 409), status: 409, owner };
     log(owner, "info", "device", `approved QR pairing for ${approved.scan_device_name ?? "a device"}`);
     return { response: json({ pairing: publicPairing(approved) }), status: 200, owner };
   }
@@ -890,9 +945,11 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   if (method === "DELETE" && parts[0] === "device" && parts[1] === "pairing" && parts[2]) {
     const row = readPairing(db, parts[2]);
     if (!row || row.owner_id !== owner) return { response: json({ error: "Pairing session not found" }, 404), status: 404, owner };
-    if (closePairing(db, parts[2], "cancelled")) {
-      publish(db, owner, "device.pairing.revoked", parts[2], { pairing_id: parts[2], reason: "cancelled" });
-    }
+    tx(db, () => {
+      if (closePairing(db, parts[2], "cancelled")) {
+        publish(db, owner, "device.pairing.revoked", parts[2], { pairing_id: parts[2], reason: "cancelled" });
+      }
+    });
     return { response: json({ ok: true }), status: 200, owner };
   }
 
@@ -903,49 +960,70 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   if (method === "PATCH" && parts[0] === "devices" && parts[1]) {
     const name = str((await body(req)).name);
     if (!name) return { response: json({ error: "A device name is required" }, 400), status: 400, owner };
-    if (!renameDevice(db, owner, parts[1], name)) return { response: json({ error: "Device not found" }, 404), status: 404, owner };
-    publish(db, owner, "device.updated", parts[1], { device_id: parts[1], name });
+    tx(db, () => {
+      if (!renameDevice(db, owner, parts[1], name)) throw new RequestError(404, "Device not found");
+      publish(db, owner, "device.updated", parts[1], { device_id: parts[1], name: name.slice(0, 60) });
+    });
     return { response: json({ ok: true }), status: 200, owner };
   }
 
   if (method === "DELETE" && parts[0] === "devices" && parts[1]) {
-    const revoked = revokeDevice(db, owner, parts[1]);
-    if (!revoked.ok) return { response: json({ error: "Device not found" }, 404), status: 404, owner };
-    publish(db, owner, "device.disconnected", parts[1], { device_id: parts[1], name: revoked.device?.name ?? null, reason: "revoked" });
+    const revoked = tx(db, () => {
+      const changed = revokeDevice(db, owner, parts[1]);
+      if (!changed.ok) throw new RequestError(404, "Device not found");
+      publish(db, owner, "device.disconnected", parts[1], { device_id: parts[1], name: changed.device?.name ?? null, reason: "revoked" });
+      return changed;
+    });
     log(owner, "info", "device", `revoked ${revoked.device?.name ?? "a device"}`);
     return { response: json({ ok: true }), status: 200, owner };
   }
 
   if (key === "POST protection") {
-    const password = String((await body(req)).password ?? "");
-    if (password.length < 8) return { response: json({ error: "Password must be at least 8 characters" }, 400), status: 400, owner };
-    const gate = setProtection(db, owner, password);
-    publish(db, owner, "configuration.updated", owner, { resource: "protection", required: true });
+    const input = await body(req, 4096);
+    const password = typeof input.password === "string" ? input.password : "";
+    if (password.length < 8 || password.length > 256) throw new RequestError(400, "Password must be 8–256 characters");
+    const gate = tx(db, () => {
+      if (!protectionStatus(db, owner, readGate(req)).unlocked) throw new RequestError(403, "Unlock screen privacy before changing its password");
+      const token = setProtection(db, owner, password);
+      publish(db, owner, "configuration.updated", owner, { resource: "protection", required: true });
+      return token;
+    });
     const headers = new Headers();
-    headers.append("set-cookie", gateCookie(gate, WEEK / 1000));
+    headers.append("set-cookie", gateCookie(gate, WEEK / 1000, secureCookie(req)));
     return { response: json({ ok: true }, 200, headers), status: 200, owner };
   }
 
   if (key === "POST protection/unlock") {
-    const gate = unlockProtection(db, owner, String((await body(req)).password ?? ""));
+    throttle("protection", owner);
+    const input = await body(req, 4096);
+    const password = typeof input.password === "string" ? input.password : "";
+    const gate = password.length <= 256 ? unlockProtection(db, owner, password) : null;
     if (!gate) return { response: json({ error: "Password does not match" }, 401), status: 401, owner };
     const headers = new Headers();
-    headers.append("set-cookie", gateCookie(gate, WEEK / 1000));
+    headers.append("set-cookie", gateCookie(gate, WEEK / 1000, secureCookie(req)));
     return { response: json({ ok: true }, 200, headers), status: 200, owner };
   }
 
   if (key === "DELETE protection") {
-    clearProtection(db, owner);
-    publish(db, owner, "configuration.updated", owner, { resource: "protection", required: false });
+    tx(db, () => {
+      if (!protectionStatus(db, owner, readGate(req)).unlocked) throw new RequestError(403, "Unlock screen privacy before removing its password");
+      clearProtection(db, owner);
+      publish(db, owner, "configuration.updated", owner, { resource: "protection", required: false });
+    });
     const headers = new Headers();
-    headers.append("set-cookie", gateCookie("", 0));
+    headers.append("set-cookie", gateCookie("", 0, secureCookie(req)));
     return { response: json({ ok: true }, 200, headers), status: 200, owner };
   }
 
   if (key === "POST webhooks") {
     const input = await body(req);
     const url = str(input.url);
-    if (!/^https?:\/\//.test(url)) return { response: json({ error: "Enter an http or https URL" }, 400), status: 400, owner };
+    try {
+      const target = new URL(url);
+      if (url.length > 2048 || target.protocol !== "https:" || target.username || target.password || target.hash || target.search) throw new Error();
+    } catch {
+      throw new RequestError(400, "Enter an HTTPS webhook URL without credentials, query, or fragment");
+    }
     const secret = randomBytes(16).toString("hex");
     const id = newId();
     tx(db, () => {
@@ -954,7 +1032,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       );
       publish(db, owner, "configuration.updated", id, { resource: "webhook", id, url });
     });
-    return { response: json({ secret }, 201), status: 201, owner };
+    return { response: json({ secret, deliveryEnabled: false }, 201), status: 201, owner };
   }
 
   if (method === "DELETE" && parts[0] === "webhooks" && parts[1]) {
@@ -970,9 +1048,11 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   }
 
   if (method === "PATCH" && parts[0] === "notifications" && parts[1]) {
-    const result = db.prepare("UPDATE notifications SET read = 1 WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
-    if (Number(result.changes) === 0) return { response: json({ error: "Notification not found" }, 404), status: 404, owner };
-    publish(db, owner, "notification.read", parts[1], { id: parts[1], read: true });
+    tx(db, () => {
+      const result = db.prepare("UPDATE notifications SET read = 1 WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
+      if (!result.changes) throw new RequestError(404, "Notification not found");
+      publish(db, owner, "notification.read", parts[1], { id: parts[1], read: true });
+    });
     return { response: json({ ok: true }), status: 200, owner };
   }
 
@@ -1060,22 +1140,10 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       return { response: json({ ok: true, status: "blocked", note }), status: 201, owner };
     }
 
-    const repoUrl = project.repoUrl || "";
-    if (!repoUrl || !builderEnabled()) {
-      const note = repoUrl
-        ? "No build runner is configured. Set MOBILECLOUD_BUILDER_URL to a reachable builder."
-        : NO_REPO_NOTE;
-      recordBuild(db, owner, project, target, "blocked", note);
-      log(owner, "warn", "builds", `${project.name} ${target}: ${note}`);
-      return { response: json({ ok: true, status: "blocked", note }), status: 201, owner };
-    }
-
-    const outcome = await runWebDeploy(project, repoUrl);
-    recordBuild(db, owner, project, target, outcome.status, outcome.note);
-    recordDeployment(db, owner, project, outcome.status, outcome.note);
-    log(owner, outcome.status === "queued" ? "info" : "error", "builds", `${project.name} ${target}: ${outcome.note}`);
-    if (outcome.status === "blocked") notify(db, owner, "deployment.blocked", "Deployment not built", `${project.name}: ${outcome.note}`);
-    return { response: json({ ok: true, status: outcome.status, note: outcome.note }), status: 201, owner };
+    const note = project.repoUrl ? BUILDER_DISABLED : NO_REPO_NOTE;
+    recordBuild(db, owner, project, target, "blocked", note);
+    log(owner, "warn", "builds", `${project.name} ${target}: ${note}`);
+    return { response: json({ ok: true, status: "blocked", note }), status: 201, owner };
   }
 
   if (key === "POST workflows") {
@@ -1128,7 +1196,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       const rows = listDeployments(owner);
       output = rows.length ? rows.map((d) => `${d.project} ${d.status}`).join("\n") : "no deployments";
     } else if (bin === "metrics") {
-      const m = collectMetrics(db, owner);
+      const m = collectMetrics(db, owner, operatorMetrics);
       output = `uptime ${m.processUptimeSec}s\nmemory ${m.memoryUsedPct ?? "n/a"}%\nresponse ${m.responseAvgMs ?? "n/a"} ms (${m.responseSamples} samples)`;
     } else if (bin === "deploy" && arg) {
       output = "refused: deploy from the shell is not wired to a build runner";
@@ -1140,33 +1208,27 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   return { response: json({ error: "Not found" }, 404), status: 404, owner };
 }
 
-/**
- * Creates a session row and returns the `Set-Cookie` headers for it. Callers
- * must not already hold a write transaction: this opens its own.
- */
-function startSession(userId: string, req: Request): Headers {
+/** Caller holds the transaction for credential issuance and its outbox rows. */
+function startSession(db: DatabaseSync, userId: string, req: Request, deviceId: string | null = null): Headers {
   const token = randomBytes(32).toString("hex");
   const csrf = randomBytes(32).toString("hex");
   const agent = (req.headers.get("user-agent") ?? "unknown").slice(0, 180);
   const sessionId = newId();
-  const db = openDb();
-  tx(db, () => {
-    db.prepare(
-      "INSERT INTO sessions (id, token_hash, user_id, expires_at, user_agent, created_at, csrf) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).run(sessionId, tokenHash(token), userId, Date.now() + WEEK, agent, Date.now(), csrf);
-    // Other signed-in devices learn about the new session in real time.
-    publish(db, userId, "session.created", sessionId, { sessionId, userAgent: agent });
-  });
+  const now = Date.now();
+  db.prepare(
+    "INSERT INTO sessions (id, token_hash, user_id, expires_at, user_agent, created_at, csrf, device_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(sessionId, tokenHash(token), userId, now + WEEK, agent, now, csrf, deviceId);
+  publish(db, userId, "session.created", sessionId, { sessionId, userAgent: agent });
   notify(db, userId, "auth.session", "New session", agent);
   const headers = new Headers();
-  headers.append("set-cookie", cookieHeader(token, WEEK / 1000));
-  headers.append("set-cookie", csrfCookieHeader(csrf, WEEK / 1000));
+  headers.append("set-cookie", cookieHeader(req, token, WEEK / 1000));
+  headers.append("set-cookie", csrfCookieHeader(req, csrf, WEEK / 1000));
   return headers;
 }
 
-function issueSession(userId: string, req: Request) {
-  const headers = startSession(userId, req);
-  const user = openDb().prepare("SELECT id, email, name, role, plan FROM users WHERE id = ?").get(userId);
+function issueSession(db: DatabaseSync, userId: string, req: Request) {
+  const headers = tx(db, () => startSession(db, userId, req));
+  const user = db.prepare("SELECT id, email, name, role, plan FROM users WHERE id = ?").get(userId);
   return { response: json({ user }, 200, headers), status: 200, owner: userId };
 }
 

@@ -21,21 +21,12 @@ import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.mobilecloud.core.OperatingMode
-import com.mobilecloud.work.CoreEngineProbe
 import com.mobilecloud.ui.components.GlowCard
 import com.mobilecloud.ui.components.IconBadge
 import com.mobilecloud.ui.components.KVRow
@@ -50,13 +41,6 @@ import com.mobilecloud.ui.theme.Aurora
  */
 @Composable
 fun ProofOfReserveScreen() {
-    val context = LocalContext.current
-    var daemonReachable by remember { mutableStateOf<Boolean?>(null) }
-
-    LaunchedEffect(Unit) {
-        daemonReachable = CoreEngineProbe.get("/api/por/attestation") != null
-    }
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -84,10 +68,7 @@ fun ProofOfReserveScreen() {
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    if (daemonReachable == true)
-                        "Reconciliation daemon reachable, but custody evidence is unverified below. No ratio is claimed."
-                    else
-                        "Reconciliation daemon (127.0.0.1:3000) unreachable on this device. No verified reserves can be claimed; figures below are specimen data only.",
+                    "This console ships no local reconciliation daemon. Reserve figures below are examples, not verified evidence.",
                     color = Aurora.TextMid, fontSize = 11.5.sp, lineHeight = 16.sp,
                 )
             }

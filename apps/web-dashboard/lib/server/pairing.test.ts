@@ -18,18 +18,23 @@ function cookieFor(headers: Headers, name: string): string | null {
 }
 
 async function signUp(handle: typeof import("./api.ts").handle, email: string): Promise<string> {
+  const { hashPassword, newId, openDb } = await import("./db.ts");
+  openDb().prepare("INSERT INTO users (id,email,name,password_hash,role,created_at) VALUES (?,?,'Ada',?,'member',?)")
+    .run(newId(), email, hashPassword("correct-horse"), Date.now());
   const response = await handle(
-    new Request("http://local/api/auth/signup", {
+    new Request("http://local/api/auth/login", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "Ada", email, password: "correct-horse" }),
+      body: JSON.stringify({ email, password: "correct-horse" }),
     }),
-    ["auth", "signup"],
+    ["auth", "login"],
   );
   assert.equal(response.status, 200);
-  const session = cookieFor(response.headers, "mc_session");
-  assert.ok(session, "signup must set a session cookie");
-  return session;
+  return response.headers.getSetCookie().map((cookie) => cookie.split(";")[0]).join("; ");
+}
+
+function csrf(cookie: string): string {
+  return /mc_csrf=([a-f0-9]{64})/.exec(cookie)?.[1] ?? "";
 }
 
 /** Starts a pairing from the browser half and returns the decoded QR ticket. */
@@ -40,7 +45,7 @@ async function startPairing(
   const response = await handle(
     new Request("http://local/api/device/pairing", {
       method: "POST",
-      headers: { "content-type": "application/json", cookie: session, host: "local" },
+      headers: { "content-type": "application/json", cookie: session, "x-mc-csrf": csrf(session), host: "local" },
       body: JSON.stringify({ name: "Web Dashboard", platform: "web" }),
     }),
     ["device", "pairing"],
@@ -67,11 +72,12 @@ function phone(
   id: string,
   step: "scan" | "status" | "claim",
   body: Record<string, unknown>,
+  scanCookie?: string,
 ) {
   return handle(
     new Request(`http://local/api/device/pairing/${id}/${step}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...(scanCookie ? { cookie: scanCookie } : {}) },
       body: JSON.stringify(body),
     }),
     ["device", "pairing", id, step],
@@ -94,22 +100,25 @@ test("scanning, approving, and claiming links the device and signs the phone in"
   assert.equal(scanned.status, 200);
   const scannedBody = (await scanned.json()) as { pairing: { status: string } };
   assert.equal(scannedBody.pairing.status, "AWAITING_APPROVAL");
+  const scanCookie = cookieFor(scanned.headers, "mc_session");
+  assert.ok(scanCookie);
 
   // The phone cannot finish on its own: an unapproved session has no credential.
-  const early = await phone(handle, ticket.id, "claim", phoneBody(ticket.secret));
+  const early = await phone(handle, ticket.id, "claim", phoneBody(ticket.secret), scanCookie);
   assert.equal(early.status, 409);
   assert.equal(((await early.json()) as { reason: string }).reason, "not_approved");
 
   const approved = await handle(
     new Request(`http://local/api/device/pairing/${ticket.id}/approve`, {
       method: "POST",
-      headers: { "content-type": "application/json", cookie: session },
+      headers: { "content-type": "application/json", cookie: session, "x-mc-csrf": csrf(session) },
     }),
     ["device", "pairing", ticket.id, "approve"],
   );
   assert.equal(approved.status, 200);
 
-  const claimed = await phone(handle, ticket.id, "claim", phoneBody(ticket.secret));
+  assert.equal((await phone(handle, ticket.id, "claim", phoneBody(ticket.secret))).status, 404);
+  const claimed = await phone(handle, ticket.id, "claim", phoneBody(ticket.secret), scanCookie);
   assert.equal(claimed.status, 200);
   const claim = (await claimed.json()) as {
     credential: string;
@@ -148,7 +157,7 @@ test("scanning, approving, and claiming links the device and signs the phone in"
   assert.equal(stored.some((row) => row.token_hash === claim.credential), false);
 
   // Single use: a replay of the same claim cannot mint a second device.
-  const replay = await phone(handle, ticket.id, "claim", phoneBody(ticket.secret));
+  const replay = await phone(handle, ticket.id, "claim", phoneBody(ticket.secret), scanCookie);
   assert.equal(replay.status, 410);
   assert.equal(((await replay.json()) as { reason: string }).reason, "already_connected");
   const after = await handle(
@@ -168,7 +177,7 @@ test("the dashboard can only approve a session a device has actually scanned", a
   const approved = await handle(
     new Request(`http://local/api/device/pairing/${ticket.id}/approve`, {
       method: "POST",
-      headers: { "content-type": "application/json", cookie: session },
+      headers: { "content-type": "application/json", cookie: session, "x-mc-csrf": csrf(session) },
     }),
     ["device", "pairing", ticket.id, "approve"],
   );
@@ -195,7 +204,7 @@ test("a pairing belongs to the account that created it", async () => {
   const steal = await handle(
     new Request(`http://local/api/device/pairing/${ticket.id}/approve`, {
       method: "POST",
-      headers: { "content-type": "application/json", cookie: stranger },
+      headers: { "content-type": "application/json", cookie: stranger, "x-mc-csrf": csrf(stranger) },
     }),
     ["device", "pairing", ticket.id, "approve"],
   );
@@ -238,7 +247,7 @@ test("an expired pairing is refused for both the phone and the dashboard", async
   const approved = await handle(
     new Request(`http://local/api/device/pairing/${ticket.id}/approve`, {
       method: "POST",
-      headers: { "content-type": "application/json", cookie: session },
+      headers: { "content-type": "application/json", cookie: session, "x-mc-csrf": csrf(session) },
     }),
     ["device", "pairing", ticket.id, "approve"],
   );
@@ -268,11 +277,13 @@ test("showing a new QR code revokes the previous one", async () => {
   const revoking = await handle(
     new Request(`http://local/api/device/pairing/${second.id}`, {
       method: "DELETE",
-      headers: { cookie: session },
+      headers: { cookie: session, "x-mc-csrf": csrf(session) },
     }),
     ["device", "pairing", second.id],
   );
   assert.equal(revoking.status, 200);
-  const cancelled = await phone(handle, second.id, "status", { secret: second.secret });
+  const scanCookie = cookieFor(live.headers, "mc_session");
+  assert.ok(scanCookie);
+  const cancelled = await phone(handle, second.id, "status", { secret: second.secret }, scanCookie);
   assert.equal(((await cancelled.json()) as { pairing: { status: string } }).pairing.status, "REVOKED");
 });

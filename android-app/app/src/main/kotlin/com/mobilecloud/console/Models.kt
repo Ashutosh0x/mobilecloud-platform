@@ -10,7 +10,7 @@ import org.json.JSONObject
  * ========================================================================= */
 
 data class User(val id: String, val email: String, val name: String, val role: String, val plan: String)
-data class Project(val id: String, val name: String, val framework: String, val target: String, val createdAt: Long)
+data class Project(val id: String, val name: String, val framework: String, val target: String, val createdAt: Long, val repoUrl: String)
 data class Deployment(val id: String, val projectId: String, val project: String, val status: String, val note: String, val createdAt: Long)
 data class Domain(val id: String, val host: String, val project: String, val status: String, val detail: String)
 data class DbFile(val id: String, val name: String, val engine: String, val bytes: Long?, val path: String)
@@ -139,7 +139,7 @@ private inline fun <T> JSONArray.map(transform: (JSONObject) -> T): List<T> =
     List(length()) { i -> transform(optJSONObject(i) ?: JSONObject()) }
 
 private fun parseUser(o: JSONObject) = User(o.s("id"), o.s("email"), o.s("name"), o.s("role"), o.s("plan"))
-private fun parseProject(o: JSONObject) = Project(o.s("id"), o.s("name"), o.s("framework"), o.s("target"), o.l("createdAt"))
+private fun parseProject(o: JSONObject) = Project(o.s("id"), o.s("name"), o.s("framework"), o.s("target"), o.l("createdAt"), o.s("repoUrl"))
 private fun parseDeployment(o: JSONObject) = Deployment(o.s("id"), o.s("projectId"), o.s("project"), o.s("status"), o.s("note"), o.l("createdAt"))
 private fun parseDomain(o: JSONObject) = Domain(o.s("id"), o.s("host"), o.s("project"), o.s("status"), o.s("detail"))
 private fun parseDb(o: JSONObject) = DbFile(o.s("id"), o.s("name"), o.s("engine", "sqlite"), o.ln("bytes"), o.s("path"))

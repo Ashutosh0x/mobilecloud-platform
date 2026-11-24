@@ -20,11 +20,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -36,10 +38,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.mobilecloud.console.ConsoleOrigin
 import com.mobilecloud.console.ConsoleStatus
 import com.mobilecloud.console.ConsoleStore
 import com.mobilecloud.ui.theme.AppFonts
 import com.mobilecloud.ui.theme.Aurora
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /**
@@ -50,51 +57,76 @@ import kotlinx.coroutines.launch
 @Composable
 fun ConsoleRoot(prefs: SharedPreferences? = null) {
     val scope = rememberCoroutineScope()
-    // The store needs a Context to watch connectivity changes, so a Wi-Fi ↔
-    // mobile-data switch reconnects the socket instead of looking "offline".
     val context = LocalContext.current.applicationContext
-    val store = remember { ConsoleStore(scope, prefs, context) }
-    LaunchedEffect(Unit) { store.start() }
-    DisposableEffect(Unit) { onDispose { store.stop() } }
+    val store = remember(prefs, context) { ConsoleStore(scope, prefs, context) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(store, lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> store.start()
+                Lifecycle.Event.ON_STOP -> store.pause()
+                else -> Unit
+            }
+        }
+        lifecycle.addObserver(observer)
+        onDispose {
+            lifecycle.removeObserver(observer)
+            store.pause()
+        }
+    }
+    DisposableEffect(store) { onDispose { store.stop() } }
 
     when {
         store.status == ConsoleStatus.LOADING -> LoadingSplash()
         store.snapshot == null -> ConsoleLogin(store)
-        else -> ConsoleShell(store)
+        else -> key(store.client) { ConsoleShell(store) }
     }
 }
 
 @Composable
 fun ConsoleLogin(store: ConsoleStore) {
     val scope = rememberCoroutineScope()
-    var mode by remember { mutableStateOf("login") }
     var url by remember { mutableStateOf(store.baseUrl) }
-    var name by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var showPassword by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var pending by remember { mutableStateOf(false) }
+    var confirmation by remember { mutableStateOf<ConsoleOrigin?>(null) }
 
-    fun submit() {
+    fun submit(origin: ConsoleOrigin) {
         if (pending) return
+        val submittedEmail = email
+        val submittedPassword = password
         pending = true
         error = null
         scope.launch {
             try {
-                if (url.isNotBlank()) store.applyBaseUrl(url)
-                // No address (or a stale one)? Find the control plane before signing in.
-                if (store.baseUrl.isBlank() && store.autoDetect() == null) {
-                    error = ConsoleStore.NO_PLANE
-                    return@launch
-                }
-                store.login(if (mode == "signup") "auth/signup" else "auth/login", email, password, name)
-            } catch (e: Exception) {
-                error = e.message ?: "Sign-in failed"
+                store.login(origin, submittedEmail, submittedPassword)
+                password = ""
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                error = ConsoleStore.safeError(failure, "Sign-in could not be verified. Check the server and try again.")
             } finally {
                 pending = false
             }
         }
+    }
+
+    confirmation?.let { origin ->
+        AlertDialog(
+            onDismissRequest = { confirmation = null },
+            title = { Text("Confirm sign-in server") },
+            text = { Text("Only continue if you intend to send your credentials to ${origin.url}.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmation = null
+                    submit(origin)
+                }) { Text("Continue") }
+            },
+            dismissButton = { TextButton(onClick = { confirmation = null }) { Text("Cancel") } },
+        )
     }
 
     Column(
@@ -125,25 +157,12 @@ fun ConsoleLogin(store: ConsoleStore) {
                 .padding(18.dp),
         ) {
             Text(
-                "Create an account on this server. The first account is the owner. Nothing here is billed.",
+                "Sign in with an account provisioned by your MobileCloud operator.",
                 color = Aurora.TextMid, fontSize = 12.sp,
             )
             Spacer(Modifier.height(14.dp))
-            RangeTabs(listOf("Create account", "Sign in"), if (mode == "signup") "Create account" else "Sign in", {
-                mode = if (it == "Create account") "signup" else "login"
-            })
-            Spacer(Modifier.height(14.dp))
-
-            CField("Control-plane URL (optional)", url, { url = it }, placeholder = "Auto-detected — leave blank", mono = true)
-            store.baseUrl.takeIf { it.isNotBlank() }?.let {
-                Spacer(Modifier.height(6.dp))
-                Text("Detected $it", color = Aurora.TextLow, fontSize = 11.sp, fontFamily = AppFonts.Mono)
-            }
+            CField("Console HTTPS address", url, { url = it }, placeholder = "https://console.example.com", mono = true)
             Spacer(Modifier.height(10.dp))
-            if (mode == "signup") {
-                CField("Name", name, { name = it }, placeholder = "Your name")
-                Spacer(Modifier.height(10.dp))
-            }
             CField("Email", email, { email = it }, placeholder = "you@example.com")
             Spacer(Modifier.height(10.dp))
             CField("Password", password, { password = it }, placeholder = "••••••••", password = !showPassword)
@@ -156,36 +175,23 @@ fun ConsoleLogin(store: ConsoleStore) {
                 )
             }
 
-            error?.let {
+            (error ?: store.error)?.let {
                 Spacer(Modifier.height(8.dp))
                 CNotice(it, Tone.BAD)
-            }
-            if (store.status == ConsoleStatus.ERROR) {
-                Spacer(Modifier.height(8.dp))
-                CNotice(store.error ?: "The control plane is unreachable.", Tone.BAD)
             }
 
             Spacer(Modifier.height(14.dp))
             CButton(
-                text = if (pending) "Working…" else if (mode == "signup") "Create account" else "Sign in",
-                onClick = { submit() },
+                text = if (pending) "Signing in…" else "Sign in",
+                onClick = {
+                    val origin = ConsoleOrigin.parse(url)
+                    error = if (origin == null) ConsoleStore.NO_PLANE else null
+                    confirmation = origin
+                },
                 loading = pending,
+                enabled = !pending,
                 modifier = Modifier.fillMaxWidth(),
             )
-            if (store.status == ConsoleStatus.ERROR) {
-                Spacer(Modifier.height(8.dp))
-                CButton(
-                    "Auto-detect & retry",
-                    onClick = {
-                        scope.launch {
-                            error = null
-                            if (store.autoDetect() == null) error = ConsoleStore.NO_PLANE else store.refresh()
-                        }
-                    },
-                    kind = BtnKind.GHOST,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
         }
 
         Spacer(Modifier.height(16.dp))

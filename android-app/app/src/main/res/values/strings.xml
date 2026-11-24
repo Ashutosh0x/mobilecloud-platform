@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="widget_edge_status_description">Live node health: SoC thermals, USB-PD bypass state and mesh peers.</string>
-    <string name="widget_por_solvency_description">FurlPay Proof-of-Reserve backing ratio with the five-tier governance badge.</string>
+    <string name="app_name">MobileCloud Console</string>
+    <string name="widget_edge_status_label">MobileCloud Device Telemetry</string>
+    <string name="widget_edge_status_description">Timestamped phone temperature and battery readings when available.</string>
+    <string name="widget_por_solvency_label">Proof of Reserves Status</string>
+    <string name="widget_por_solvency_description">Shows that reserve evidence is unverified by this client.</string>
 </resources>

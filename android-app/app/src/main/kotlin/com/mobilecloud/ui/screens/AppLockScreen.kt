@@ -14,8 +14,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
-import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -24,13 +22,7 @@ import androidx.fragment.app.FragmentActivity
 import com.mobilecloud.ui.theme.*
 import kotlinx.coroutines.delay
 
-/**
- * Edge security gate (GitHub AppLockActivity pattern → CIDS lock surface).
- *
- * Outermost render condition of MainActivity: biometric / device-credential
- * prompt against the FragmentActivity host. The node holds trade authority
- * and PoR signer material, so the prompt is auto-fired on gate entry.
- */
+/** Prompts for device authentication when the console's local privacy gate locks. */
 @Composable
 fun AppLockScreen(activity: FragmentActivity, onUnlocked: () -> Unit) {
     val context = LocalContext.current
@@ -59,8 +51,7 @@ fun AppLockScreen(activity: FragmentActivity, onUnlocked: () -> Unit) {
                     }
                 )
                 val info = BiometricPrompt.PromptInfo.Builder()
-                    .setTitle("Unlock MobileCloud Node")
-                    .setSubtitle("Edge financial compute · trading · PoR attestation")
+                    .setTitle("Unlock MobileCloud Console")
                     .setAllowedAuthenticators(authenticators)
                     .build()
                 prompt.authenticate(info)
@@ -86,14 +77,14 @@ fun AppLockScreen(activity: FragmentActivity, onUnlocked: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text("EDGE SECURITY GATE", color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.5.sp)
+        Text("APP LOCK", color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.5.sp)
         Spacer(modifier = Modifier.height(24.dp))
-        Icon(Icons.Filled.Lock, contentDescription = "Node locked", tint = PrimaryCyan, modifier = Modifier.size(48.dp))
+        Icon(Icons.Filled.Lock, contentDescription = null, tint = PrimaryCyan, modifier = Modifier.size(48.dp))
         Spacer(modifier = Modifier.height(16.dp))
-        Text("NODE LOCKED", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text("CONSOLE LOCKED", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(8.dp))
         Text(
-            "Biometric authorization is required before trading, PoR attestation and CloudShell access.",
+            "Authenticate with your biometrics or device credential to open the console.",
             color = TextSecondary, fontSize = 13.sp, lineHeight = 18.sp,
             modifier = Modifier.padding(horizontal = 16.dp),
         )
@@ -108,12 +99,7 @@ fun AppLockScreen(activity: FragmentActivity, onUnlocked: () -> Unit) {
                 Text("RETRY AUTHENTICATION", fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
         } else {
-            Text("Awaiting hardware TEE prompt…", color = TextSecondary, fontSize = 12.sp, fontFamily = AppFonts.Mono)
+            Text("Awaiting system authentication…", color = TextSecondary, fontSize = 12.sp, fontFamily = AppFonts.Mono)
         }
-        Spacer(modifier = Modifier.height(48.dp))
-        Text(
-            "StrongBox-backed · zero-transfer to host apps",
-            color = AccentIndigo, fontSize = 11.sp, fontFamily = AppFonts.Mono,
-        )
     }
 }

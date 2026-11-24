@@ -1,21 +1,15 @@
 // MobileCloud JNI bridge (master blueprint; APK build spec section 2).
 //
-// Library: libmobilecloud_native.so (loaded by MobileCloudApp).
-//
-// Surfaces:
-//  1. Unix PTY master/slave spawner for the inbuilt CloudShell
-//     (NativePtyController): forkpty + non-blocking master fd.
-//  2. sysfs SoC thermal reader for the supervisor governor loop
-//     (CloudSupervisorService).
+// Library: libmobilecloud_native.so (loaded by NativePtyController).
+// Dormant local PTY support: forkpty + non-blocking master fd.
 //
 // StrongBox KeyStore operations stay on the Kotlin side: the TEE keymaster
 // is a Binder service, not reachable from native code.
 
 #include <jni.h>
 #include <cerrno>
-#include <cstdio>
+#include <cstdlib>
 #include <cstring>
-#include <string>
 #include <fcntl.h>
 #include <unistd.h>
 #include <termios.h>
@@ -69,8 +63,8 @@ Java_com_mobilecloud_terminal_NativePtyController_nativeSpawnPty(
     }
 
     if (child == 0) {
-        // Child: sandboxed userland session. TERM/HOME/PATH only - no
-        // Android app environment leaks into the shell.
+        // These preferences do not isolate the child from the app UID or
+        // its resources. The local PTY is not a security boundary.
         setenv("TERM", "xterm-256color", 1);
         setenv("HOME", home, 1);
         setenv("PATH", path, 1);
@@ -92,6 +86,8 @@ Java_com_mobilecloud_terminal_NativePtyController_nativeSpawnPty(
 extern "C" JNIEXPORT jint JNICALL
 Java_com_mobilecloud_terminal_NativePtyController_nativeReadPty(
         JNIEnv *env, jclass, jint fd, jbyteArray buffer, jint maxBytes) {
+    if (buffer == nullptr || maxBytes < 0 || maxBytes > env->GetArrayLength(buffer)) return -EINVAL;
+    if (maxBytes == 0) return 0;
     jbyte buf[4096];
     int to_read = maxBytes < 4096 ? maxBytes : 4096;
     ssize_t n = read(fd, buf, to_read);
@@ -100,15 +96,18 @@ Java_com_mobilecloud_terminal_NativePtyController_nativeReadPty(
     }
     if (n == 0) return -EIO; // EOF - slave closed
     env->SetByteArrayRegion(buffer, 0, n, buf);
-    return static_cast<jint>(n);
+    return env->ExceptionCheck() ? -EIO : static_cast<jint>(n);
 }
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_mobilecloud_terminal_NativePtyController_nativeWritePty(
         JNIEnv *env, jclass, jint fd, jbyteArray buffer, jint length) {
+    if (buffer == nullptr || length < 0 || length > env->GetArrayLength(buffer)) return -EINVAL;
+    if (length == 0) return 0;
     jbyte buf[4096];
     int to_write = length < 4096 ? length : 4096;
     env->GetByteArrayRegion(buffer, 0, to_write, buf);
+    if (env->ExceptionCheck()) return -EIO;
     ssize_t n = write(fd, buf, to_write);
     return n < 0 ? -errno : static_cast<jint>(n);
 }
@@ -128,60 +127,6 @@ Java_com_mobilecloud_terminal_NativePtyController_nativeClosePty(
     close(fd);
     int status;
     waitpid(-1, &status, WNOHANG); // best-effort reap
-}
-
-// ---------------------------------------------------------------------------
-// Thermal governor feed (com.mobilecloud.service.CloudSupervisorService)
-// ---------------------------------------------------------------------------
-
-// Longest temperature any real SoC reports (milli-°C). Above this the value is
-// a kernel constant, not a measurement.
-static const int kMaxPlausibleMilli = 120000;
-
-// Kernel trip-point zones are named "<zone>-step", "-usr", "-lowf", "-high",
-// "-crit" or "-max*": their temps are CONFIG constants (e.g. 44600), not live
-// readings. Reporting one would show a throttle threshold as temperature.
-static bool isTripPointName(const char *type) {
-    static const char *kTripSuffixes[] = {
-        "-step", "-usr", "-lowf", "-high", "-crit", "-max",
-    };
-    size_t len = strlen(type);
-    for (const char *suffix : kTripSuffixes) {
-        size_t slen = strlen(suffix);
-        if (len >= slen && strncmp(type + (len - slen), suffix, slen) == 0) return true;
-    }
-    return false;
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_mobilecloud_service_CloudSupervisorService_nativeReadSocTempMilli(
-        JNIEnv *, jclass) {
-    // -1 means "no CPU/SoC thermal zone could be read". Callers MUST treat that
-    // as unknown and skip the thermal guard — never substitute a made-up value.
-    int best = -1;
-    for (int zone = 0; zone < 32; ++zone) {
-        char typePath[96];
-        snprintf(typePath, sizeof(typePath), "/sys/class/thermal/thermal_zone%d/type", zone);
-        FILE *tf = fopen(typePath, "re");
-        if (!tf) continue;
-        char type[64] = {0};
-        bool readType = fscanf(tf, "%63s", type) == 1;
-        fclose(tf);
-        if (!readType) continue;
-        if (strncmp(type, "cpu", 3) != 0 && strncmp(type, "soc", 3) != 0) continue;
-        if (isTripPointName(type)) continue;
-
-        char tempPath[96];
-        snprintf(tempPath, sizeof(tempPath), "/sys/class/thermal/thermal_zone%d/temp", zone);
-        FILE *f = fopen(tempPath, "re");
-        if (!f) continue;
-        int milli = 0;
-        if (fscanf(f, "%d", &milli) == 1 && milli > best && milli < kMaxPlausibleMilli) {
-            best = milli;
-        }
-        fclose(f);
-    }
-    return best;
 }
 
 } // extern "C"

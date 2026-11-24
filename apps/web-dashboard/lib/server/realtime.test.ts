@@ -75,9 +75,11 @@ function recorder(ws: WebSocket) {
   };
 }
 
-function open(url: string): Promise<WebSocket> {
+function open(url: string, headers: Record<string, string> = {}): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
+    // Node WebSocket (Undici) accepts headers; the DOM declaration does not model them.
+    const NodeSocket = WebSocket as unknown as new (url: string, options: { headers: Record<string, string> }) => WebSocket;
+    const ws = new NodeSocket(url, { headers });
     const timer = setTimeout(() => reject(new Error("websocket did not open")), 8_000);
     ws.addEventListener("open", () => {
       clearTimeout(timer);
@@ -90,33 +92,41 @@ function open(url: string): Promise<WebSocket> {
   });
 }
 
+const WS = `ws://127.0.0.1:${PORT}/api/realtime`;
+const WEB_ORIGIN = "https://console.example.test";
+
+function csrf(cookie: string) {
+  return /mc_csrf=([a-f0-9]{64})/.exec(cookie)?.[1] ?? "";
+}
+
 async function signup(email: string, name: string): Promise<{ cookie: string; token: string; id: string }> {
   const { handle } = await import("./api.ts");
+  const { openDb, newId, hashPassword } = await import("./db.ts");
+  const id = newId();
+  openDb().prepare("INSERT INTO users (id,email,name,password_hash,role,created_at) VALUES (?,?,?,?,'member',?)")
+    .run(id, email, name, hashPassword("correct-horse"), Date.now());
   const res = await handle(
-    new Request("http://local/api/auth/signup", {
+    new Request("http://local/api/auth/login", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, email, password: "correct-horse" }),
+      body: JSON.stringify({ email, password: "correct-horse" }),
     }),
-    ["auth", "signup"],
+    ["auth", "login"],
   );
   assert.equal(res.status, 200);
-  const cookie = (res.headers.get("set-cookie") ?? "").split(";")[0];
+  const cookie = res.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
 
   const tokenRes = await handle(
     new Request("http://local/api/tokens", {
       method: "POST",
-      headers: { "content-type": "application/json", cookie },
+      headers: { "content-type": "application/json", cookie, "x-mc-csrf": csrf(cookie) },
       body: JSON.stringify({ name: "realtime-test", days: 7 }),
     }),
     ["tokens"],
   );
   assert.equal(tokenRes.status, 201);
   const { token } = (await tokenRes.json()) as { token: string };
-
-  const { openDb } = await import("./db.ts");
-  const row = openDb().prepare("SELECT id FROM users WHERE email = ?").get(email) as { id: string };
-  return { cookie, token, id: row.id };
+  return { cookie, token, id };
 }
 
 async function createProject(cookie: string, name: string) {
@@ -124,7 +134,7 @@ async function createProject(cookie: string, name: string) {
   const res = await handle(
     new Request("http://local/api/projects", {
       method: "POST",
-      headers: { "content-type": "application/json", cookie },
+      headers: { "content-type": "application/json", cookie, "x-mc-csrf": csrf(cookie) },
       body: JSON.stringify({ name, framework: "Next.js" }),
     }),
     ["projects"],
@@ -145,6 +155,7 @@ before(async () => {
       MOBILECLOUD_DB: DB,
       MOBILECLOUD_REALTIME_PORT: String(PORT),
       MOBILECLOUD_REALTIME_HOST: "127.0.0.1",
+      MOBILECLOUD_PUBLIC_ORIGIN: WEB_ORIGIN,
       MOBILECLOUD_REALTIME_POLL_MS: "80",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -170,7 +181,7 @@ test("a mutation on the API reaches a connected WebSocket client in real time", 
   resetDb();
   const alice = await signup("rt-alice@example.com", "Alice");
 
-  const ws = await open(`ws://127.0.0.1:${PORT}/api/realtime?token=${alice.token}`);
+  const ws = await open(WS, { authorization: `Bearer ${alice.token}` });
   const rx = recorder(ws);
   const welcome = await rx.waitFor((m) => m.type === "welcome");
   assert.equal((welcome as { account_id: string }).account_id, alice.id);
@@ -191,7 +202,7 @@ test("a client only receives events for its own account", async () => {
   const alice = await signup("rt-a2@example.com", "Alice");
   const bob = await signup("rt-b2@example.com", "Bob");
 
-  const ws = await open(`ws://127.0.0.1:${PORT}/api/realtime?token=${bob.token}`);
+  const ws = await open(WS, { authorization: `Bearer ${bob.token}` });
   const rx = recorder(ws);
   await rx.waitFor((m) => m.type === "welcome");
 
@@ -212,7 +223,12 @@ test("a client only receives events for its own account", async () => {
 });
 
 test("an unauthenticated upgrade is rejected with 401 rather than silently accepted", async () => {
-  await assert.rejects(() => open(`ws://127.0.0.1:${PORT}/api/realtime`), /websocket error|did not open/);
+  await assert.rejects(() => open(WS), /websocket error|did not open/);
+  const client = await signup("rt-origin@example.test", "Origin fixture");
+  await assert.rejects(() => open(WS, { cookie: client.cookie, origin: "https://other.example.test" }), /websocket error/);
+  await assert.rejects(() => open(WS, { cookie: client.cookie }), /websocket error/);
+  const approved = await open(WS, { cookie: client.cookie, origin: WEB_ORIGIN });
+  approved.close();
 });
 
 test("a reconnecting client replays the changes it missed while offline", async () => {
@@ -221,7 +237,7 @@ test("a reconnecting client replays the changes it missed while offline", async 
   const carol = await signup("rt-carol@example.com", "Carol");
 
   // First connection: note where we are, then disconnect (simulated outage).
-  const first = await open(`ws://127.0.0.1:${PORT}/api/realtime?token=${carol.token}`);
+  const first = await open(WS, { authorization: `Bearer ${carol.token}` });
   const firstRx = recorder(first);
   const welcome = (await firstRx.waitFor((m) => m.type === "welcome")) as { cursor: number };
   const cursor = welcome.cursor;
@@ -233,7 +249,7 @@ test("a reconnecting client replays the changes it missed while offline", async 
 
   // Reconnect and replay from the stored cursor — exactly what a client does
   // with GET /api/sync/changes or a `hello`/`sync` frame.
-  const second = await open(`ws://127.0.0.1:${PORT}/api/realtime?token=${carol.token}`);
+  const second = await open(WS, { authorization: `Bearer ${carol.token}` });
   const secondRx = recorder(second);
   await secondRx.waitFor((m) => m.type === "welcome");
   second.send(JSON.stringify({ type: "sync", cursor }));
@@ -250,4 +266,70 @@ test("a reconnecting client replays the changes it missed while offline", async 
   assert.equal(replayed.length, 2);
 
   second.close();
+});
+
+function awaitClose(ws: WebSocket) {
+  return new Promise<CloseEvent>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("socket stayed open")), 3000);
+    ws.addEventListener("close", (event) => { clearTimeout(timer); resolve(event); }, { once: true });
+  });
+}
+
+test("logout terminates an active native session socket; expiry terminates a bearer socket", async () => {
+  const { handle } = await import("./api.ts");
+  const { openDb, tokenHash } = await import("./db.ts");
+  const account = await signup("rt-expiry@example.test", "Expiry fixture");
+  const session = /mc_session=([a-f0-9]{64})/.exec(account.cookie)?.[1];
+  assert.ok(session);
+  const native = { authorization: `Session ${session}` };
+  const nativeSocket = await open(WS, native);
+  const closed = awaitClose(nativeSocket);
+  const logout = await handle(new Request("http://local/api/auth/logout", {
+    method: "POST", headers: { cookie: account.cookie, "x-mc-csrf": csrf(account.cookie) },
+  }), ["auth", "logout"]);
+  assert.equal(logout.status, 200);
+  assert.equal((await closed).code, 1008);
+  await assert.rejects(() => open(WS, native), /websocket error/);
+
+  const bearer = { authorization: `Bearer ${account.token}` };
+  const bearerSocket = await open(WS, bearer);
+  const expired = awaitClose(bearerSocket);
+  openDb().prepare("UPDATE access_tokens SET expires_at = ? WHERE token_hash = ?").run(Date.now() - 1, tokenHash(account.token));
+  assert.equal((await expired).code, 1008);
+  await assert.rejects(() => open(WS, bearer), /websocket error/);
+});
+
+test("device revocation closes both credential forms and denies subsequent HTTP and sockets", async () => {
+  const { handle } = await import("./api.ts");
+  const owner = await signup("rt-device@example.test", "Device fixture");
+  const api = (path: string[], method: string, input?: object, headers?: HeadersInit) => {
+    const all = new Headers(headers);
+    if (input) all.set("content-type", "application/json");
+    return handle(new Request(`http://local/api/${path.join("/")}`, { method, headers: all, body: input && JSON.stringify(input) }), path);
+  };
+  const ownerHeaders = { cookie: owner.cookie, "x-mc-csrf": csrf(owner.cookie) };
+  const pairing = ["device", "pairing"];
+  const created = await api(pairing, "POST", { name: "Dashboard" }, ownerHeaders);
+  assert.equal(created.status, 201);
+  const payload = new URL((await created.json()).payload);
+  const ticket = [...pairing, payload.searchParams.get("id")!];
+  const input = { secret: payload.searchParams.get("secret"), name: "Phone" };
+  const scan = await api([...ticket, "scan"], "POST", input);
+  assert.equal(scan.status, 200);
+  const scanCookie = scan.headers.getSetCookie()[0].split(";")[0];
+  assert.equal((await api([...ticket, "approve"], "POST", undefined, ownerHeaders)).status, 200);
+  const claim = await api([...ticket, "claim"], "POST", input, { cookie: scanCookie });
+  assert.equal(claim.status, 200);
+  const { credential, device } = await claim.json();
+  const cookie = claim.headers.getSetCookie().find((c) => c.startsWith("mc_session=") && c.includes("Path=/;"))!.split(";")[0];
+  const deviceSession = { cookie, origin: WEB_ORIGIN };
+  const bearer = { authorization: `Bearer ${credential}` };
+  const sockets = await Promise.all([open(WS, deviceSession), open(WS, bearer)]);
+  const closed = sockets.map(awaitClose);
+  assert.equal((await api(["devices", device.id], "DELETE", undefined, ownerHeaders)).status, 200);
+  assert.deepEqual((await Promise.all(closed)).map((event) => event.code), [1008, 1008]);
+  for (const headers of [deviceSession, bearer]) {
+    assert.equal((await api(["overview"], "GET", undefined, headers)).status, 401);
+    await assert.rejects(() => open(WS, headers), /websocket error/);
+  }
 });
