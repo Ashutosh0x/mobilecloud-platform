@@ -9,6 +9,18 @@
     <!-- Biometric App Lock gate (GitHub AppLockActivity pattern) -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
+    <!-- Keeps a CloudShell session alive while the app is backgrounded: the
+         foreground service pins the app UID so the tmux server is not
+         reclaimed, and the partial wake lock keeps the CPU out of deep sleep
+         while a build runs. `specialUse` is declared because the work is a
+         user-started shell session rather than a data sync. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- The session notification is the user-visible proof that the service
+         is running; it is requested at runtime on Android 13+. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- QR pairing: the scanner library also declares this, kept explicit so the
          permission the app actually depends on is visible in the manifest. -->
     <uses-permission android:name="android.permission.CAMERA" />
@@ -55,6 +67,7 @@
 
         <activity
             android:name="com.mobilecloud.ui.MainActivity"
+            android:windowSoftInputMode="adjustResize"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -64,5 +77,16 @@
         <!-- The QR scanner screen (`com.journeyapps.barcodescanner.CaptureActivity`)
              is declared by the zxing-android-embedded manifest and merged in,
              so it needs no entry here. -->
+
+        <!-- Keeps the CloudShell session (and the tmux server behind it) alive
+             while the app is in the background. -->
+        <service
+            android:name="com.mobilecloud.terminal.TerminalSessionService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps a user-started developer terminal session and its long-running shell commands alive while the app is backgrounded." />
+        </service>
     </application>
 </manifest>

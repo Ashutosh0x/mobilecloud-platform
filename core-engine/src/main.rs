@@ -101,6 +101,14 @@ pub struct AppState {
     operator_token: Vec<u8>,
     webhook_secret: Vec<u8>,
     terminal_token: Vec<u8>,
+    /// Origins allowed to open a browser CloudShell WebSocket. Same-origin
+    /// handshakes are always allowed; this list covers split deployments
+    /// (for example a Vite dev server on port 5173).
+    terminal_origins: Vec<String>,
+    /// Short-lived single-use browser connection tickets.
+    terminal_tickets: terminal_gateway::ws_handler::TerminalTickets,
+    /// Preview sessions that let a browser reach a loopback dev server.
+    pub preview_sessions: terminal_gateway::preview::PreviewSessions,
     requests_total: AtomicU64,
     builds_total: AtomicU64,
     agent_builds_total: AtomicU64,
@@ -132,6 +140,9 @@ impl AppState {
             operator_token: Vec::new(),
             webhook_secret: Vec::new(),
             terminal_token: Vec::new(),
+            terminal_origins: Vec::new(),
+            terminal_tickets: terminal_gateway::ws_handler::TerminalTickets::default(),
+            preview_sessions: terminal_gateway::preview::PreviewSessions::default(),
             requests_total: AtomicU64::new(0),
             builds_total: AtomicU64::new(0),
             agent_builds_total: AtomicU64::new(0),
@@ -163,6 +174,51 @@ fn credential(name: &str) -> Vec<u8> {
         .into_bytes()
 }
 
+/// Origin allowlist for browser WebSocket handshakes. Values must be bare
+/// origins (`https://admin.phone.mobilecloud.live`, `http://localhost:5173`).
+///
+/// A split deployment (Vite dev server talking to the engine on another port)
+/// is cross-origin and needs its origin listed. When nothing is configured the
+/// loopback development ports are allowed so `npm run dev` works; production
+/// installations should set `MOBILECLOUD_TERMINAL_ORIGINS` explicitly.
+fn terminal_origins() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |raw: &str| {
+        for part in raw.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            match terminal_gateway::ws_handler::normalize_origin(part) {
+                Some(origin) if !out.contains(&origin) => out.push(origin),
+                Some(_) => {}
+                None => warn!(origin = %part, "ignoring invalid terminal origin"),
+            }
+        }
+    };
+    if let Ok(raw) = std::env::var("MOBILECLOUD_TERMINAL_ORIGINS") {
+        add(&raw);
+    }
+    if let Ok(public) = std::env::var("MOBILECLOUD_PUBLIC_ORIGIN") {
+        add(&public);
+    }
+    if out.is_empty() {
+        for port in [3000, 4173, 5173] {
+            for host in ["localhost", "127.0.0.1", "[::1]"] {
+                for scheme in ["http", "https"] {
+                    let origin = format!("{scheme}://{host}:{port}");
+                    if let Some(origin) =
+                        terminal_gateway::ws_handler::normalize_origin(&origin)
+                    {
+                        out.push(origin);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 // An empty expected credential never authenticates. Verify a fixed-size MAC so
 // matching a prefix of the configured credential gives no comparison signal.
 fn token_matches(expected: &[u8], presented: &[u8]) -> bool {
@@ -184,20 +240,59 @@ fn bearer(headers: &HeaderMap) -> Option<&[u8]> {
         .strip_prefix(b"Bearer ")
 }
 
+/// True when a browser `Origin` refers to the same host that answered.
+///
+/// The operator API is authenticated by a bearer credential, so a
+/// cross-origin page cannot forge a request — but a *same-origin* browser
+/// request is legitimate (the CloudShell calls `/terminal/ticket` and the
+/// transfer API from the page itself). Rejecting every `Origin` header
+/// blocked those calls, so the rule is now "same origin or no browser".
+fn same_origin(origin: &str, headers: &HeaderMap) -> bool {
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let host = host.trim();
+    if host.is_empty() || host.contains(['/', '\\', '@', '?', '#']) {
+        return false;
+    }
+    let origin = origin.trim().trim_end_matches('/').to_ascii_lowercase();
+    [
+        format!("http://{host}"),
+        format!("https://{host}"),
+        format!("http://{host}:80"),
+        format!("https://{host}:443"),
+    ]
+    .iter()
+    .any(|candidate| candidate.eq_ignore_ascii_case(&origin))
+}
+
 async fn operator_auth(
     State(state): State<Arc<AppState>>,
     request: Request,
     next: Next,
 ) -> Response {
     let headers = request.headers();
-    if headers.contains_key(header::ORIGIN)
-        || !bearer(headers).is_some_and(|value| token_matches(&state.operator_token, value))
-    {
+    if !bearer(headers).is_some_and(|value| token_matches(&state.operator_token, value)) {
         return (
             StatusCode::UNAUTHORIZED,
             "operator bearer credential required",
         )
             .into_response();
+    }
+    // CSRF boundary for browser callers: the credential is present, so the
+    // request is authenticated, but a page on another origin must not be
+    // able to spend it.
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        if !same_origin(origin, headers) {
+            return (
+                StatusCode::FORBIDDEN,
+                "cross-origin request refused for the operator API",
+            )
+                .into_response();
+        }
     }
     let mut response = next.run(request).await;
     response.headers_mut().insert(
@@ -612,6 +707,11 @@ fn operator_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/deployments/:project", get(get_project_deployments))
         .route("/metrics", get(metrics))
         .route("/logs/:project", get(build_logs_sse))
+        .route(
+            "/terminal/ticket",
+            post(terminal_gateway::issue_ticket),
+        )
+        .merge(terminal_gateway::transfer_router())
         .route_layer(middleware::from_fn_with_state(state.clone(), operator_auth));
     Router::new()
         .merge(protected)
@@ -620,7 +720,7 @@ fn operator_router(state: Arc<AppState>) -> Router {
             post(github_webhook).layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .route("/healthz", get(healthz))
-        .merge(terminal_gateway::ws_router())
+        .merge(terminal_gateway::router())
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(state)
 }
@@ -686,6 +786,15 @@ async fn run() -> anyhow::Result<()> {
     }
     if env_flag("MOBILECLOUD_ENABLE_LOCAL_TERMINAL") {
         state.terminal_token = terminal_token;
+    }
+    state.terminal_origins = terminal_origins();
+    if state.terminal_token.is_empty() {
+        info!("local terminal disabled (set MOBILECLOUD_ENABLE_LOCAL_TERMINAL=1 and MOBILECLOUD_TERMINAL_TOKEN)");
+    } else {
+        info!(
+            origins = %state.terminal_origins.join(","),
+            "browser CloudShell enabled with one-use tickets"
+        );
     }
     if state.preview_enabled() {
         warn!("trusted local preview enabled: builds run as the engine user, with no sandbox or tenant isolation");
@@ -889,6 +998,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_ticket_endpoint_is_operator_only_and_single_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        state.terminal_token = b"terminal-test".to_vec();
+        let state = Arc::new(state);
+        let router = operator_router(state.clone());
+
+        let (status, _) = request(router.clone(), "POST", "/terminal/ticket", "", "").await;
+        assert_eq!(status, 401, "ticket minting must require the operator token");
+
+        let (status, raw) = request(router, "POST", "/terminal/ticket", AUTH, "").await;
+        assert_eq!(status, 200);
+        let body = raw.split("\r\n\r\n").nth(1).unwrap_or_default();
+        let payload: serde_json::Value = serde_json::from_str(body).unwrap();
+        let ticket = payload["ticket"].as_str().expect("ticket field");
+        assert_eq!(ticket.len(), 64);
+        assert!(state.terminal_tickets.redeem(ticket));
+        assert!(!state.terminal_tickets.redeem(ticket), "tickets are one-use");
+    }
+
+    #[tokio::test]
+    async fn transfer_routes_stay_inside_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_state(dir.path()));
+        let router = operator_router(state.clone());
+
+        // Every transfer route is behind the operator credential.
+        for (method, path) in [
+            ("GET", "/api/v1/terminal/files?path="),
+            ("POST", "/api/v1/terminal/upload?path=notes.txt"),
+            ("GET", "/api/v1/terminal/download?path=notes.txt"),
+            ("POST", "/api/v1/preview/session?port=5173"),
+        ] {
+            let (status, _) = request(router.clone(), method, path, "", "").await;
+            assert_eq!(status, 401, "{method} {path}");
+        }
+
+        // A file can be written and read back.
+        let (status, _) = request(
+            router.clone(),
+            "POST",
+            "/api/v1/terminal/upload?path=notes.txt",
+            AUTH,
+            "hello terminal",
+        )
+        .await;
+        assert_eq!(status, 200);
+        let (status, raw) = request(
+            router.clone(),
+            "GET",
+            "/api/v1/terminal/download?path=notes.txt",
+            AUTH,
+            "",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(raw.ends_with("hello terminal"));
+
+        // A traversal out of the workspace is refused, not silently clamped.
+        let (status, _) = request(
+            router.clone(),
+            "GET",
+            "/api/v1/terminal/download?path=../../etc/passwd",
+            AUTH,
+            "",
+        )
+        .await;
+        assert_eq!(status, 400);
+    }
+
+    #[tokio::test]
+    async fn preview_sessions_are_bound_to_one_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_state(dir.path()));
+        let router = operator_router(state.clone());
+
+        let (status, raw) = request(
+            router.clone(),
+            "POST",
+            "/api/v1/preview/session?port=5173",
+            AUTH,
+            "",
+        )
+        .await;
+        assert_eq!(status, 200);
+        let body = raw.split("\r\n\r\n").nth(1).unwrap_or_default();
+        let payload: serde_json::Value = serde_json::from_str(body).unwrap();
+        let url = payload["url"].as_str().expect("url field");
+        assert!(url.starts_with("/preview/5173/?token="));
+
+        let token = url.rsplit("token=").next().unwrap_or_default();
+        assert!(state.preview_sessions.allows(token, 5173));
+        assert!(
+            !state.preview_sessions.allows(token, 3000),
+            "a preview session must not open another port"
+        );
+
+        // The engine's own ports are never previewable.
+        let (status, _) = request(
+            router,
+            "POST",
+            "/api/v1/preview/session?port=2222",
+            AUTH,
+            "",
+        )
+        .await;
+        assert_eq!(status, 400);
+    }
+
+    #[tokio::test]
     async fn private_operator_routes_authenticate_before_reading_payload() {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(test_state(dir.path()));
@@ -897,6 +1116,7 @@ mod tests {
             ("POST", AGENT_PATH),
             ("POST", "/api/v1/deploy/rollback"),
             ("POST", "/api/v1/cache/revalidate"),
+            ("POST", "/terminal/ticket"),
             ("GET", "/logs/demo"),
             ("GET", "/api/v1/deployments/demo"),
             ("GET", "/metrics"),
@@ -916,6 +1136,8 @@ mod tests {
             .0,
             401
         );
+        // A browser request that carries a valid credential but a foreign
+        // Origin is refused before the handler runs.
         assert_eq!(
             request(
                 router.clone(),
@@ -926,7 +1148,21 @@ mod tests {
             )
             .await
             .0,
-            401
+            403
+        );
+        // The same call from the page's own origin is allowed, which is what
+        // the browser CloudShell does when it redeems a terminal ticket.
+        assert_eq!(
+            request(
+                router.clone(),
+                "GET",
+                "/api/v1/deployments/demo",
+                &format!("{AUTH}Origin: http://demo.example.test\r\n"),
+                ""
+            )
+            .await
+            .0,
+            200
         );
         let (status, response) =
             request(router.clone(), "GET", "/api/v1/deployments/demo", AUTH, "").await;

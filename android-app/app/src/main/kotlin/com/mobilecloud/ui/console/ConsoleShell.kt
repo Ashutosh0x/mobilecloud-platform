@@ -64,6 +64,7 @@ import com.mobilecloud.console.ConnectionState
 import com.mobilecloud.console.RealtimeStatus
 import com.mobilecloud.ui.theme.AppFonts
 import com.mobilecloud.ui.theme.Aurora
+import com.mobilecloud.ui.screens.CloudShellScreen
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -134,36 +135,45 @@ fun ConsoleShell(store: ConsoleStore) {
                 onAccount = { account = !account; notes = false; diagnostics = false },
             )
 
-            Column(
-                Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 14.dp)
-                    .padding(top = 6.dp, bottom = 96.dp),
-            ) {
-                Text(navLabel(route), color = Aurora.TextLow, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp)
-                Spacer(Modifier.height(10.dp))
+            val protection = snap?.protection
+            val needsUnlock = protection != null && protection.required && !protection.unlocked
 
-                val degraded = !live || store.realtimeState.status == RealtimeStatus.SYNC_ERROR
-                if (degraded) {
-                    ConnectionBanner(store, onDetails = { diagnostics = true })
-                    Spacer(Modifier.height(12.dp))
-                }
+            // The terminal is a viewport, not a document: giving it the
+            // vertical-scroll parent used by every other page collapses the
+            // canvas to zero height. It gets the whole content slot instead.
+            if (route == "/shell" && !needsUnlock) {
+                CloudShellScreen(modifier = Modifier.weight(1f).fillMaxWidth())
+            } else {
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 14.dp)
+                        .padding(top = 6.dp, bottom = 96.dp),
+                ) {
+                    Text(navLabel(route), color = Aurora.TextLow, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp)
+                    Spacer(Modifier.height(10.dp))
 
-                val protection = snap?.protection
-                if (protection != null && protection.required && !protection.unlocked) {
-                    ProtectGate(
-                        onSubmit = { password ->
-                            scope.launch {
-                                runCatching { store.call("protection/unlock", org.json.JSONObject().put("password", password)) }
-                                    .onSuccess { store.notify("Console unlocked") }
-                                    .onFailure { store.notify(it.message ?: "Password does not match") }
-                            }
-                        },
-                    )
-                } else {
-                    ConsoleRoutes(store, route, onNavigate = { route = it })
+                    val degraded = !live || store.realtimeState.status == RealtimeStatus.SYNC_ERROR
+                    if (degraded) {
+                        ConnectionBanner(store, onDetails = { diagnostics = true })
+                        Spacer(Modifier.height(12.dp))
+                    }
+
+                    if (protection != null && protection.required && !protection.unlocked) {
+                        ProtectGate(
+                            onSubmit = { password ->
+                                scope.launch {
+                                    runCatching { store.call("protection/unlock", org.json.JSONObject().put("password", password)) }
+                                        .onSuccess { store.notify("Console unlocked") }
+                                        .onFailure { store.notify(it.message ?: "Password does not match") }
+                                }
+                            },
+                        )
+                    } else {
+                        ConsoleRoutes(store, route, onNavigate = { route = it })
+                    }
                 }
             }
         }

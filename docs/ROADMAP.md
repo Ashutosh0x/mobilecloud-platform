@@ -6,7 +6,8 @@ presented as done.
 ## Phase 1 — Deterministic core & regression discipline ✅ DONE (`VERIFIED_SOURCE`/`DEPLOYED`)
 
 - `por-kernel` reconciliation (58 tests), `core-engine` platform services
-  (16 tests), `trading-engine` (10 tests).
+  (35 tests), `trading-engine` (17 tests) — 110 in the default workspace
+  members.
 - Deterministic snapshot corpus: **26 snapshots** (17 baseline byte-identical
   on every re-run + 9 Gate 7), sealed in `INTEGRITY_MANIFEST.sha256`.
 

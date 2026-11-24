@@ -19,13 +19,19 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Unix PTY master/slave spawner (master blueprint; terminal doc 1).
  *
- * Wraps the C++ forkpty bridge in libmobilecloud_native.so. The master fd is
- * drained on a dedicated `pty-io` thread that *parks in the kernel* via
- * [Os.poll] with an infinite timeout (audit finding P4.4) — there is no 20 ms
- * busy-poll, so an idle CloudShell costs no wake-ups. The poll set also watches
- * a private self-pipe so [close] can wake a parked reader at once instead of
- * waiting for the shell to exit. Decoded UTF-8 chunks are forwarded to the
- * active [TerminalSurfaceView]; keystrokes flow back through [write].
+ * Wraps the C++ forkpty bridge in libmobilecloud_native.so. When a `tmux`
+ * binary is bundled in the engine userland the child is
+ * `tmux new-session -A -s mobilecloud-session`, so leaving the screen or
+ * backgrounding the app re-attaches to the live shell instead of killing it
+ * (audit §"session durability"). Without tmux the bridge falls back to a plain
+ * login shell, exactly as before.
+ *
+ * The master fd is drained on a dedicated `pty-io` thread that *parks in the
+ * kernel* via [Os.poll] with an infinite timeout (audit finding P4.4) — there
+ * is no 20 ms busy-poll, so an idle CloudShell costs no wake-ups. The poll set
+ * also watches a private self-pipe so [close] can wake a parked reader at once
+ * instead of waiting for the shell to exit. Decoded UTF-8 chunks are forwarded
+ * to the active terminal surface; keystrokes flow back through [write].
  */
 class NativePtyController(
     private val engineBin: File,
@@ -68,13 +74,31 @@ class NativePtyController(
 
     val isAlive: Boolean get() = masterFd >= 0
 
+    /** True when this session is attached to the persistent tmux server. */
+    var usingTmux: Boolean = false
+        private set
+
     fun start(shell: String = resolveShell()) {
         if (masterFd >= 0) return
         val path = "${engineBin.absolutePath}:/system/bin:/vendor/bin"
-        val fd = nativeSpawnPty(
-            initialRows, initialCols,
-            shell, home.absolutePath, path,
-        )
+        val tmux = resolveExecutable("tmux")
+        val conf = tmux?.let { ensureTmuxConfig() }
+        usingTmux = tmux != null
+        val fd = runCatching {
+            nativeSpawnPty(
+                initialRows, initialCols,
+                shell, home.absolutePath, path,
+                tmux?.absolutePath ?: "",
+                conf?.absolutePath ?: "",
+            )
+        }.getOrElse { error ->
+            if (error is UnsatisfiedLinkError) {
+                // Native bridge missing on this ABI: surface a clean exit
+                // instead of crashing the Compose tree.
+                error.printStackTrace()
+            }
+            -1
+        }
         if (fd < 0) {
             onExit?.invoke()
             return
@@ -248,9 +272,41 @@ class NativePtyController(
             .firstOrNull { it.exists() }?.absolutePath
             ?: "/system/bin/sh"
 
+    /** Engine-bundled executable first, then the Android userland. */
+    private fun resolveExecutable(name: String): File? =
+        listOf(
+            engineBin.resolve(name),
+            File("/system/bin/$name"),
+            File("/vendor/bin/$name"),
+            File("/usr/bin/$name"),
+            File("/usr/local/bin/$name"),
+        ).firstOrNull { it.isFile }
+
+    /**
+     * Write the managed tmux profile once. A user-supplied config is never
+     * overwritten. Mirrors `core-engine/src/terminal_gateway/pty_session.rs`,
+     * so the on-device and remote shells behave identically: touch selects
+     * panes, truecolor survives, and 10k lines of history persist.
+     */
+    private fun ensureTmuxConfig(): File {
+        val conf = File(home, ".tmux.conf")
+        if (conf.isFile) return conf
+        runCatching {
+            conf.parentFile?.mkdirs()
+            conf.writeText(TMUX_PROFILE)
+        }.onFailure { it.printStackTrace() }
+        return conf
+    }
+
     // --- native bridge (cpp/jni_bridge.cpp, libmobilecloud_native.so) ---
     private external fun nativeSpawnPty(
-        rows: Int, cols: Int, shellPath: String, envHome: String, envPath: String,
+        rows: Int,
+        cols: Int,
+        shellPath: String,
+        envHome: String,
+        envPath: String,
+        tmuxPath: String,
+        tmuxConf: String,
     ): Int
 
     private external fun nativeReadPty(fd: Int, buffer: ByteArray, maxBytes: Int): Int
@@ -259,6 +315,22 @@ class NativePtyController(
     private external fun nativeClosePty(fd: Int)
 
     companion object {
+        /** Session name shared with the Rust gateway (`pty_session.rs`). */
+        const val TMUX_SESSION: String = "mobilecloud-session"
+
+        private val TMUX_PROFILE: String = """
+            # MobileCloud managed tmux profile (terminal architecture doc §2.3)
+            set -g default-terminal "tmux-256color"
+            set -as terminal-features ",xterm-256color:RGB"
+            set -g mouse on
+            set -g history-limit 10000
+            set -g focus-events on
+            set -g set-clipboard on
+            set -g allow-passthrough on
+            set -g aggressive-resize on
+            set -g display-time 1500
+        """.trimIndent() + "\n"
+
         init {
             try {
                 System.loadLibrary("mobilecloud_native")

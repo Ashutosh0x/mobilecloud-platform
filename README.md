@@ -4,17 +4,64 @@
 
 MobileCloud is a web management console and an Android companion client. Both use the same account data. The Rust edge engine and FurlPay proof-of-reserve components are separate preview and research projects.
 
-**Release status: local evaluation only.** The Android APK is a console client; it does not run the Rust engine. The dashboard records build and deployment requests but does not execute them. Public signup, outbound webhook delivery, and browser CloudShell are disabled. The trusted local build preview is not sandboxed; do not run untrusted repositories.
+**Release status: local evaluation only.** The Android APK is a console client; it does not run the Rust engine. The dashboard records build and deployment requests but does not execute them. The trusted local build preview is not sandboxed; do not run untrusted repositories.
 
 ## Components
 
 | Component | Location | What is available |
 | --- | --- | --- |
 | Web console | [apps/web-dashboard](apps/web-dashboard) | Next.js UI and API, SQLite, and a separate realtime gateway. |
-| Android console | [android-app](android-app) | Kotlin/Compose client with HTTPS sign-in, camera-based QR pairing, and same-origin WSS. |
-| Edge engine | [core-engine](core-engine) | Loopback-only operator and static deployment listeners. Not a multi-tenant build service. |
+| Browser CloudShell | [web-cloudshell](web-cloudshell) | Full terminal in the browser (xterm.js + WebGL) over the phone's PTY, with a file manager and one-click web preview. |
+| Android console | [android-app](android-app) | Kotlin/Compose client with HTTPS sign-in, camera-based QR pairing, same-origin WSS, and a real on-device terminal. |
+| Edge engine | [core-engine](core-engine) | Loopback-only operator and static deployment listeners, plus the tri-modal terminal gateway. Not a multi-tenant build service. |
 | Proof-of-reserve research | [contracts/por-verifier](contracts/por-verifier) | Stellar Soroban verifier and test fixtures. These do not verify live reserves or custody. |
 | Trading demo | [trading-engine](trading-engine) | Paper/demo trading code. Not validated for live execution. |
+
+## The terminal
+
+One shell, three surfaces — the Android app, a browser tab, and SSH — all
+attached to the same `tmux` session, so a build started on the phone survives
+a reload, a screen lock, and a move to a laptop.
+
+| Surface | Transport | Credential |
+| --- | --- | --- |
+| Android app | JNI `forkpty` bridge to a persistent `tmux` server | none (local) |
+| Browser | WebSocket at `/terminal/ws` | one-use ticket, 30 s, single redemption |
+| SSH | `russh` on port 2222 | Ed25519 public key |
+
+The browser terminal has the full feature set a shell needs: alternate screen
+buffer, 10 000 lines of scrollback, 24-bit colour, mouse reporting for
+`tmux` panes, bracketed paste, OSC 52 clipboard, and automatic reconnection.
+The Android terminal has the same emulation, plus a two-row Termux-style key
+bar with sticky modifiers, touch-to-mouse translation, and a foreground
+service that keeps a long build alive through Doze.
+
+Two features close the gap with Google Cloud Shell and AWS CloudShell:
+
+* **Web preview** — a dev server running on the phone is exposed to the
+  browser at `/preview/<port>/`. The upstream is always loopback, the engine's
+  own ports are refused, and the session token is bound to one port and
+  dropped from the URL after the first navigation.
+* **File transfer** — browse, upload, download, and delete inside the
+  engine's workspace. Every path is resolved inside that workspace; a path
+  that escapes it is refused rather than clamped.
+
+See [docs/CLOUDSHELL.md](docs/CLOUDSHELL.md) for the credential model, the
+reverse-proxy configuration, and the API surface.
+
+### Run the browser CloudShell
+
+The dev server proxies the engine's routes and attaches the operator
+credential, which is the only place that credential appears:
+
+```bash
+export MOBILECLOUD_ENGINE=http://127.0.0.1:3000
+export MOBILECLOUD_OPERATOR_TOKEN=…          # the engine's operator token
+cd web-cloudshell && npm ci && npm run dev    # http://localhost:5173
+```
+
+In production the same role is played by the reverse proxy in front of the
+engine; the configuration is in [docs/CLOUDSHELL.md](docs/CLOUDSHELL.md).
 
 ## Run the web console locally
 
@@ -52,16 +99,25 @@ Run each command from the indicated directory.
 | Directory | Command |
 | --- | --- |
 | `apps/web-dashboard` | `npm ci && npm test && npm run build` |
-| Repository root | `cargo test -p core-engine` |
+| `web-cloudshell` | `npm ci && npx tsc --noEmit && npx vite build` |
+| Repository root | `cargo test` |
 | `android-app` | `bash ./gradlew :app:assembleDebug :app:lintDebug :app:assembleRelease` |
 
-The local remediation checks passed 28 dashboard regression tests, 17 engine tests, the dashboard production build, browser smoke tests, and Android debug and unsigned release builds plus lint. These checks do not validate production ingress, a signed release, or on-device pairing.
+The local remediation checks passed 28 dashboard regression tests, 110 workspace
+tests (35 edge-engine, 58 proof-of-reserve kernel, 17 trading engine), the
+dashboard and CloudShell production builds, and Android debug and unsigned
+release builds plus lint. These checks do not validate production ingress, a
+signed release, on-device pairing, or a live engine behind a reverse proxy.
 
-Before public rollout, verify backup and migration recovery, HTTPS/WSS routing, and pairing, reconnect, and revocation on a physical Android device. Keep public builds disabled until workers and tenant authorization are isolated. Reserve and trading claims require independent validation.
+Before public rollout, verify backup and migration recovery, HTTPS/WSS routing,
+and pairing, reconnect, and revocation on a physical Android device. Keep
+public builds disabled until workers and tenant authorization are isolated.
+Reserve and trading claims require independent validation.
 
 ## Further reading
 
 - [CI workflow](.github/workflows/ci.yml)
+- [CloudShell: tri-modal terminal, credential model, preview, file transfer](docs/CLOUDSHELL.md)
 - [Realtime design](docs/REALTIME-SYNC.md)
 - [Architecture and threat model](docs/ARCHITECTURE.md) · [Security model](docs/SECURITY-MODEL.md)
 - [Soroban verifier design](docs/STELLAR-SOROBAN.md) · [Historical verification baseline](docs/VERIFIED-BASELINE.md)

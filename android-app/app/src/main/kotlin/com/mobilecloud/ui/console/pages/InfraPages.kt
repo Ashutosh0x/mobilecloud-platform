@@ -14,8 +14,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -27,10 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
@@ -313,75 +308,6 @@ fun WorkflowsPage(store: ConsoleStore) {
                     fontSize = 11.sp,
                 )
             }
-        }
-    }
-}
-
-/* ------------------------------ CloudShell ----------------------------- */
-
-@Composable
-fun ShellPage(store: ConsoleStore) {
-    val scope = rememberCoroutineScope()
-    var line by remember { mutableStateOf("") }
-
-    fun submit() {
-        val command = line.trim()
-        if (command.isEmpty()) return
-        line = ""
-        store.pushShell("$ $command")
-        scope.launch {
-            try {
-                val data = store.call("shell", jobj("command" to command))
-                store.pushShell(data.optString("output"))
-            } catch (e: Exception) {
-                val message = e.message ?: "Shell failed"
-                store.pushShell(message)
-                store.notify(message)
-            }
-        }
-    }
-
-    PageHead("CloudShell", "Commands are a fixed list. They read this database. They do not open a host shell.")
-    Spacer(Modifier.height(12.dp))
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(Aurora.CardWell)
-            .border(1.dp, Aurora.Border, RoundedCornerShape(10.dp))
-            .padding(12.dp),
-    ) {
-        store.shell.forEach { row ->
-            Text(
-                row,
-                color = if (row.startsWith("$")) Aurora.GlowGreen else Aurora.TextHi,
-                fontSize = 12.sp,
-                fontFamily = AppFonts.Terminal,
-                lineHeight = 18.sp,
-                modifier = Modifier.padding(vertical = 1.dp),
-            )
-        }
-        Spacer(Modifier.height(6.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("$", color = Aurora.TextMid, fontSize = 12.sp, fontFamily = AppFonts.Terminal)
-            Spacer(Modifier.width(8.dp))
-            Box(Modifier.weight(1f)) {
-                BasicTextField(
-                    value = line,
-                    onValueChange = { line = it },
-                    singleLine = true,
-                    textStyle = TextStyle(color = Aurora.TextHi, fontSize = 12.sp, fontFamily = AppFonts.Terminal),
-                    cursorBrush = SolidColor(Aurora.Cyan),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    modifier = Modifier.fillMaxWidth(),
-                    decorationBox = { inner ->
-                        if (line.isEmpty()) Text("help", color = Aurora.TextLow, fontSize = 12.sp, fontFamily = AppFonts.Terminal)
-                        inner()
-                    },
-                )
-            }
-            Spacer(Modifier.width(8.dp))
-            CButton("Run", onClick = { submit() }, compact = true, enabled = line.isNotBlank())
         }
     }
 }

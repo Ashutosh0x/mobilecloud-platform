@@ -2,42 +2,307 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="referrer" content="no-referrer" />
+  <!-- Split deployments can point the shell at the phone gateway. Same-origin
+       defaults (/terminal/ws and /terminal/ticket) are used when omitted. -->
+  <meta name="mobilecloud-terminal-gateway" content="" />
+  <meta name="mobilecloud-terminal-ticket" content="" />
   <script>
+    // Never keep credentials in the address bar or in history.
     const params = new URLSearchParams(location.search);
-    if (params.has('token')) {
-      params.delete('token');
-      history.replaceState(null, '', location.pathname + (params.size ? '?' + params : '') + location.hash);
+    for (const key of ['token', 'ticket', 'password']) {
+      if (params.has(key)) {
+        params.delete(key);
+        history.replaceState(null, '', location.pathname + (params.size ? '?' + params : '') + location.hash);
+      }
     }
   </script>
   <title>MobileCloud CloudShell</title>
-  <!-- CIDS baseline (terminal doc §6.2 theme) -->
   <style>
-    html, body { margin: 0; height: 100%; background-color: #070A13; }
-    body { font-family: 'JetBrains Mono', Menlo, monospace; overflow: hidden; }
-    #terminal-container { width: 100vw; height: 100vh; padding: 12px; box-sizing: border-box; }
-    #status-pill {
-      position: fixed; top: 10px; right: 14px; z-index: 10;
-      font-size: 11px; letter-spacing: 0.06em; padding: 3px 10px;
-      border-radius: 999px; background: rgba(30, 41, 59, 0.85); color: #94A3B8;
-      border: 1px solid #1E293B; user-select: none;
+    :root {
+      color-scheme: dark;
+      --bg: #070A13;
+      --panel: #0B1120;
+      --card: #111C31;
+      --border: #1E293B;
+      --text: #F8FAFC;
+      --muted: #94A3B8;
+      --faint: #64748B;
+      --accent: #38BDF8;
+      --danger: #F87171;
     }
-    #status-pill[data-status="disabled"] { color: #F59E0B; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background-color: var(--bg);
+      overscroll-behavior: none;
+    }
+    body {
+      font-family: 'JetBrains Mono', Menlo, Consolas, monospace;
+      overflow: hidden;
+    }
+    #app {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+    }
+    #terminal-container {
+      flex: 1;
+      min-height: 0;
+      padding: 12px;
+      padding-bottom: 46px;
+      box-sizing: border-box;
+    }
+
+    /* ---------- toolbar ---------- */
+    #toolbar {
+      position: fixed;
+      top: max(10px, env(safe-area-inset-top));
+      left: 14px;
+      right: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      z-index: 10;
+      pointer-events: none;
+    }
+    #toolbar > * { pointer-events: auto; }
+    #status-pill {
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: rgba(30, 41, 59, 0.85);
+      color: var(--muted);
+      border: 1px solid var(--border);
+      user-select: none;
+      transition: color 120ms ease, border-color 120ms ease;
+    }
+    #status-pill[data-status="connecting"],
+    #status-pill[data-status="reconnecting"] { color: #FBBF24; border-color: #78350F; }
+    #status-pill[data-status="open"] { color: #34D399; border-color: #065F46; }
+    #status-pill[data-status="error"],
+    #status-pill[data-status="closed"] { color: var(--danger); border-color: #7F1D1D; }
+    #status-pill[data-status="connecting"]::after { content: " · retrying"; }
+
+    .tool-button {
+      font: inherit;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: rgba(30, 41, 59, 0.85);
+      color: var(--muted);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+    }
+    .tool-button:hover { color: var(--text); border-color: var(--accent); }
+    .tool-button[aria-pressed="true"] {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: rgba(56, 189, 248, 0.14);
+    }
+    #toolbar-spacer { flex: 1; }
+
+    /* ---------- drawer ---------- */
+    .panel {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 20;
+      max-height: min(62dvh, 520px);
+      display: flex;
+      flex-direction: column;
+      background: var(--panel);
+      border-top: 1px solid var(--border);
+      box-shadow: 0 -18px 44px rgba(0, 0, 0, 0.55);
+    }
+    .panel[hidden] { display: none; }
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .panel-title {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .panel-close {
+      font: inherit;
+      background: none;
+      border: 0;
+      color: var(--faint);
+      cursor: pointer;
+      font-size: 13px;
+      padding: 2px 6px;
+    }
+    .panel-close:hover { color: var(--text); }
+    .panel-body {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 10px 14px 16px;
+    }
+    .panel-inner { display: flex; flex-direction: column; gap: 10px; }
+    .panel-loading, .panel-empty, .panel-error {
+      font-size: 12px;
+      color: var(--faint);
+      padding: 8px 0;
+    }
+    .panel-error { color: var(--danger); }
+
+    .panel-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .ghost, .primary {
+      font: inherit;
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .ghost:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+    .ghost:disabled { opacity: 0.4; cursor: default; }
+    .ghost.danger:hover { color: var(--danger); border-color: var(--danger); }
+    .primary { color: var(--accent); border-color: var(--accent); }
+    .primary:hover { background: rgba(56, 189, 248, 0.14); }
+
+    .file-list { display: flex; flex-direction: column; }
+    .file-row {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr) auto auto;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 2px;
+      border-bottom: 1px solid rgba(30, 41, 59, 0.6);
+      font-size: 12px;
+    }
+    .file-icon { color: var(--accent); }
+    .file-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-meta { color: var(--faint); font-size: 10px; white-space: nowrap; }
+    .file-actions { display: flex; gap: 6px; }
+
+    .port-list { display: flex; flex-direction: column; gap: 6px; }
+    .port-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 5px 0;
+      border-bottom: 1px solid rgba(30, 41, 59, 0.6);
+      font-size: 12px;
+    }
+    .port-label { color: var(--text); }
+    .port-input {
+      font: inherit;
+      font-size: 12px;
+      width: 110px;
+      padding: 5px 8px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text);
+    }
+
+    .xterm .xterm-viewport { scrollbar-width: thin; }
   </style>
 </head>
 <body>
-  <div id="terminal-container"></div>
-  <div id="status-pill" data-status="disabled" role="status">BROWSER CLOUDSHELL DISABLED</div>
+  <div id="app">
+    <div id="toolbar">
+      <span id="status-pill" data-status="connecting" role="status" aria-live="polite">CONNECTING</span>
+      <button id="btn-files" class="tool-button" type="button" aria-pressed="false">▤ Files</button>
+      <button id="btn-preview" class="tool-button" type="button" aria-pressed="false">◱ Preview</button>
+      <span id="toolbar-spacer"></span>
+    </div>
+    <div id="terminal-container"></div>
+  </div>
 
   <script type="module">
     import { mountTerminal } from '/src/terminal.ts';
+    import { FilesPanel, PreviewPanel } from '/src/panels.ts';
+
     const pill = document.getElementById('status-pill');
+    const labels = {
+      idle: 'IDLE',
+      connecting: 'CONNECTING',
+      open: 'CONNECTED',
+      reconnecting: 'RECONNECTING',
+      closed: 'CLOSED',
+      error: 'ERROR',
+    };
+
     const handle = mountTerminal(
       document.getElementById('terminal-container'),
-      (status) => { pill.dataset.status = status; },
+      (status, detail) => {
+        pill.dataset.status = status;
+        pill.textContent = labels[status] ?? status.toUpperCase();
+        pill.title = detail ?? '';
+      },
+      {
+        fontSize: window.innerWidth < 640 ? 12 : 14,
+        scrollback: 10000,
+        onTitle: (title) => {
+          document.title = title ? `${title} — MobileCloud CloudShell` : 'MobileCloud CloudShell';
+        },
+      },
     );
+
+    // ---- drawer panels -----------------------------------------------------
+    const filesButton = document.getElementById('btn-files');
+    const previewButton = document.getElementById('btn-preview');
+    const app = document.getElementById('app');
+
+    let files = null;
+    let preview = null;
+
+    function syncButtons() {
+      filesButton.setAttribute('aria-pressed', String(Boolean(files && files.isOpen)));
+      previewButton.setAttribute('aria-pressed', String(Boolean(preview && preview.isOpen)));
+    }
+
+    function toggleFiles() {
+      if (preview) { preview.hide(); }
+      if (!files) files = new FilesPanel(() => { files.hide(); syncButtons(); });
+      app.append(files.root);
+      files.toggle();
+      syncButtons();
+    }
+
+    function togglePreview() {
+      if (files) { files.hide(); }
+      if (!preview) preview = new PreviewPanel(() => { preview.hide(); syncButtons(); });
+      app.append(preview.root);
+      preview.toggle();
+      syncButtons();
+    }
+
+    filesButton.addEventListener('click', toggleFiles);
+    previewButton.addEventListener('click', togglePreview);
+
+    // Mobile browsers fire `resize` when the URL bar collapses; refit a frame
+    // later so the PTY gets the final dimensions rather than an intermediate.
+    window.visualViewport?.addEventListener('resize', () => {
+      window.requestAnimationFrame(() => handle.fit());
+    });
+
     window.addEventListener('beforeunload', () => handle.dispose());
+    window.cloudshell = handle;
   </script>
 </body>
 </html>

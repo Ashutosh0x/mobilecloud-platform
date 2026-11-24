@@ -18,13 +18,16 @@ import com.mobilecloud.ui.console.pages.ObservabilityPage
 import com.mobilecloud.ui.console.pages.OverviewPage
 import com.mobilecloud.ui.console.pages.ProjectsPage
 import com.mobilecloud.ui.console.pages.SettingsPage
-import com.mobilecloud.ui.console.pages.ShellPage
 import com.mobilecloud.ui.console.pages.SpeedPage
 import com.mobilecloud.ui.console.pages.StoragePage
 import com.mobilecloud.ui.console.pages.TeamPage
 import com.mobilecloud.ui.console.pages.WorkflowsPage
 
-/** Route table — mirrors the web `app/(console)` page tree 1:1. */
+/** Route table — mirrors the web `app/(console)` page tree 1:1.
+ *
+ * `/shell` is deliberately absent: [com.mobilecloud.ui.console.ConsoleShell]
+ * renders the real PTY terminal outside the scrolling content slot, so the
+ * canvas gets a bounded height. */
 @Composable
 fun ConsoleRoutes(store: ConsoleStore, route: String, onNavigate: (String) -> Unit) {
     when (route) {
@@ -45,7 +48,6 @@ fun ConsoleRoutes(store: ConsoleStore, route: String, onNavigate: (String) -> Un
         "/databases" -> DatabasesPage(store)
         "/functions" -> FunctionsPage(store)
         "/workflows" -> WorkflowsPage(store)
-        "/shell" -> ShellPage(store)
         "/node" -> NodeConsolePage(store, onNavigate)
         "/team" -> TeamPage(store)
         "/billing" -> BillingPage(store)

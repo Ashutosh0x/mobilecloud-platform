@@ -50,6 +50,7 @@ on testnet on 2026-11-21 — including live rejections of six attack classes.
 | [STELLAR-SOROBAN.md](STELLAR-SOROBAN.md) | Contract mechanics, TTL/archival behavior, events |
 | [ACURAST-TEE.md](ACURAST-TEE.md) | Attestor signing architecture and TEE roadmap |
 | [INTEGRATION-GUIDE.md](INTEGRATION-GUIDE.md) | How to read and independently verify the proof-of-reserve |
+| [CLOUDSHELL.md](CLOUDSHELL.md) | The tri-modal terminal: Android app, browser CloudShell, SSH; credential model, web preview, file transfer, session durability |
 | [ROADMAP.md](ROADMAP.md) | Phase 1–6 plan with honest status tags |
 | [AUDIT-EVIDENCE.md](AUDIT-EVIDENCE.md) | Integrity manifests, verification scripts, commit anchors |
 
@@ -61,8 +62,10 @@ on testnet on 2026-11-21 — including live rejections of six attack classes.
 
 ## Verification posture (as of 2026-11-21)
 
-- **107 green tests** across the workspace (16 core-engine, 23 por-verifier,
-  58 por-kernel, 10 trading-engine) + 4 in `por-xdr-toolkit`.
+- **110 green tests** across the default workspace members (35 core-engine,
+  58 por-kernel, 17 trading-engine). The Soroban contract crate
+  (`por-verifier`) builds for `wasm32-unknown-unknown` and is verified
+  separately.
 - **26 regression snapshots** (17 baseline byte-identical + 9 Gate 7).
 - **Live:** 6 state-advancing transactions (seq 2→7 contiguous), 6 simulated
   attacks rejected pre-flight, tx ↔ state ↔ event triple-agreement, and an

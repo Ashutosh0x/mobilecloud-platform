@@ -13,9 +13,11 @@ toolchain (matches audit/TESTNET_BASELINE_2026-11-21/versions.txt):
   soroban-sdk 22.0.11
   endpoint protocol 30 (rpc 30.0.1-6b6ec60c)
 
-workspace test totals (recounted 2026-11-22):
-  110 green tests = 19 core-engine + 23 por-verifier + 58 por-kernel + 10 trading-engine
-  + 4 tests in tools/por-xdr-toolkit (standalone crate)
+workspace test totals (recounted 2026-11-25):
+  110 green tests in the default workspace members
+  = 35 core-engine + 58 por-kernel + 17 trading-engine
+  the Soroban contract crate (por-verifier) builds for wasm32-unknown-unknown
+  and tools/por-xdr-toolkit is verified separately
   snapshots: 26 = 17 baseline (byte-identical) + 9 Gate 7
 
 deployed contract (testnet):
@@ -23,6 +25,6 @@ deployed contract (testnet):
   wasm hash 8ebcebc32894d39cbd50867249952f8fb0d9b04e6ae1251ccf34c26aad013648
 
 verification:
-  sha256sum -c INTEGRITY_MANIFEST.sha256          (repo-wide, 55 entries)
+  sha256sum -c INTEGRITY_MANIFEST.sha256          (repo-wide, 56 entries)
   cd audit/TESTNET_BASELINE_2026-11-21 && sha256sum -c MANIFEST.sha256
   python -I audit/TESTNET_BASELINE_2026-11-21/crypto/verify_baseline.py

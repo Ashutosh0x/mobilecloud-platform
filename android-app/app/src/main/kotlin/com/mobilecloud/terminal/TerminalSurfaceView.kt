@@ -1,264 +1,121 @@
 package com.mobilecloud.terminal
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.utf16CodePoint
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.abs
+import kotlin.math.roundToInt
+
+/** Precomputed monospace glyph metrics — JetBrains Mono advance is ~0.6em. */
+class MonospaceMetrics(fontSizePx: Float) {
+    val charWidth: Float = fontSizePx * 0.6f
+    val lineHeight: Float = fontSizePx * 1.28f
+}
 
 /**
- * Compose Canvas ANSI/VT100 engine (master blueprint; terminal doc 1.1).
+ * Touch-interactive terminal surface: hardware-accelerated canvas wired to a
+ * [TerminalEmulator], with real IME input, hardware key mapping, mouse
+ * reporting, and scrollback drag.
  *
- * Maintains a rows x cols cell buffer with per-cell 8-bit foreground
- * colors, decodes the common ANSI/CSI subset shells and TUI programs emit
- * (SGR colors 30-37/90-97 + 256-color, cursor motion, line wrap, ED/EL
- * erases, BS/CR/LF/TAB, OSC passthrough), and renders with hardware-
- * accelerated monospace draw calls.
+ * Redraws are **reactive**: [TerminalEmulator.onRevision] fires only when the
+ * engine receives bytes or the viewport moves. There is no frame ticker, so an
+ * idle shell costs zero GPU work (the previous 30 FPS `delay(33)` loop redrew
+ * 1,920 cells forever).
  */
-class TerminalEmulator(val cols: Int = 80, val rows: Int = 24) {
-
-    data class Cell(var char: Char = ' ', var color: Int = DEFAULT_FG)
-
-    private val screen = Array(rows) { Array(cols) { Cell() } }
-    private var cursorRow = 0
-    private var cursorCol = 0
-    private var currentFg = DEFAULT_FG
-    private var pendingBytes = ByteArray(0)
-
-    /** Feed raw VT bytes; a partial UTF-8 tail is buffered for the next chunk. */
-    fun feed(chunk: String) {
-        pendingBytes += chunk.toByteArray(Charsets.UTF_8)
-        val validLen = longestValidUtf8Prefix(pendingBytes)
-        val text = String(pendingBytes, 0, validLen, Charsets.UTF_8)
-        pendingBytes = pendingBytes.copyOfRange(validLen, pendingBytes.size)
-        process(text)
-    }
-
-    /** Length of the longest byte prefix that decodes without truncation. */
-    private fun longestValidUtf8Prefix(bytes: ByteArray): Int {
-        if (bytes.isEmpty()) return 0
-        var i = bytes.size - 1
-        var continuations = 0
-        while (i >= 0 && continuations < 3) {
-            val b = bytes[i].toInt() and 0xFF
-            if (b and 0xC0 == 0x80) { continuations++; i--; continue }
-            val required = when {
-                b and 0x80 == 0x00 -> 0
-                b and 0xE0 == 0xC0 -> 1
-                b and 0xF0 == 0xE0 -> 2
-                b and 0xF8 == 0xF0 -> 3
-                else -> return bytes.size // stray continuation: let decoder replace
-            }
-            return if (required > continuations) i else bytes.size
-        }
-        return bytes.size
-    }
-
-    private fun process(text: String) {
-        var i = 0
-        while (i < text.length) {
-            val c = text[i]
-            when {
-                c == ESC -> i = handleEscape(text, i)
-                c == '\r' -> cursorCol = 0
-                c == '\n' -> {
-                    cursorRow++
-                    if (cursorRow >= rows) scroll()
-                }
-                c == '\b' -> cursorCol = (cursorCol - 1).coerceAtLeast(0)
-                c == '\t' -> cursorCol = ((cursorCol / 8) + 1) * 8
-                c == BEL || c == NUL -> { /* BEL, NUL: ignore */ }
-                else -> {
-                    if (cursorCol >= cols) {
-                        cursorCol = 0
-                        cursorRow++
-                        if (cursorRow >= rows) scroll()
-                    }
-                    screen[cursorRow][cursorCol] = Cell(c, currentFg)
-                    cursorCol++
-                }
-            }
-            i++
-        }
-    }
-
-    /** Handle escape sequences starting at index; returns next index. */
-    private fun handleEscape(text: String, index: Int): Int {
-        if (index + 1 >= text.length) return index + 1
-        return when (text[index + 1]) {
-            '[' -> handleCsi(text, index + 2)
-            ']' -> { // OSC - skip until BEL or ESC-backslash (ST)
-                var j = index + 2
-                while (j < text.length &&
-                    text[j] != BEL &&
-                    !(text[j] == ESC && j + 1 < text.length && text[j + 1] == '\\')
-                ) j++
-                (j + 1).coerceAtMost(text.length)
-            }
-            else -> index + 2 // two-character sequence
-        }
-    }
-
-    /** CSI dispatch: cursor motion, SGR, erases. */
-    private fun handleCsi(text: String, start: Int): Int {
-        var j = start
-        val params = StringBuilder()
-        while (j < text.length) {
-            val c = text[j]
-            if (c.isLetter()) break
-            params.append(c)
-            j++
-        }
-        if (j >= text.length) return j
-        val final = text[j]
-        val parsed = params.toString().split(';').map { it.toIntOrNull() ?: 0 }
-
-        when (final) {
-            'm' -> currentFg = sgrColor(parsed)
-            'H', 'f' -> {
-                cursorRow = ((parsed.getOrNull(0) ?: 1) - 1).coerceIn(0, rows - 1)
-                cursorCol = ((parsed.getOrNull(1) ?: 1) - 1).coerceIn(0, cols - 1)
-            }
-            'A' -> cursorRow = (cursorRow - (parsed.getOrElse(0) { 1 })).coerceAtLeast(0)
-            'B' -> cursorRow = (cursorRow + (parsed.getOrElse(0) { 1 })).coerceAtMost(rows - 1)
-            'C' -> cursorCol = (cursorCol + (parsed.getOrElse(0) { 1 })).coerceAtMost(cols - 1)
-            'D' -> cursorCol = (cursorCol - (parsed.getOrElse(0) { 1 })).coerceAtLeast(0)
-            'K' -> when (parsed.getOrElse(0) { 0 }) {
-                0 -> for (cIdx in cursorCol until cols) screen[cursorRow][cIdx] = Cell()
-                1 -> for (cIdx in 0..cursorCol.coerceAtMost(cols - 1)) screen[cursorRow][cIdx] = Cell()
-                else -> for (cIdx in 0 until cols) screen[cursorRow][cIdx] = Cell()
-            }
-            'J' -> when (parsed.getOrElse(0) { 0 }) {
-                2 -> clear()
-                1 -> {
-                    for (rIdx in 0..cursorRow) {
-                        val upto = if (rIdx == cursorRow) cursorCol else cols
-                        for (cIdx in 0 until upto.coerceAtMost(cols)) screen[rIdx][cIdx] = Cell()
-                    }
-                }
-                else -> for (rIdx in cursorRow until rows) {
-                    val from = if (rIdx == cursorRow) cursorCol else 0
-                    for (cIdx in from until cols) screen[rIdx][cIdx] = Cell()
-                }
-            }
-        }
-        return j + 1
-    }
-
-    /** SGR to palette index (30-37 basic, 90-97 bright, 38;5;N 256-color). */
-    private fun sgrColor(params: List<Int>): Int {
-        if (params.isEmpty() || params[0] == 0 || params[0] == 39) return DEFAULT_FG
-        if (params[0] == 1) return BRIGHT_FG // bold mapped to bright
-        val base = params[0]
-        if (base in 30..37) return base - 30
-        if (base in 90..97) return base - 90 + 8
-        if (base == 38 && params.size >= 3 && params[1] == 5) {
-            return params[2].coerceIn(0, 255)
-        }
-        return currentFg
-    }
-
-    private fun scroll() {
-        for (rIdx in 0 until rows - 1) {
-            screen[rIdx] = screen[rIdx + 1]
-        }
-        screen[rows - 1] = Array(cols) { Cell() }
-        cursorRow = rows - 1
-    }
-
-    fun clear() {
-        for (row in screen) for (cell in row) cell.run { char = ' '; color = DEFAULT_FG }
-        cursorRow = 0
-        cursorCol = 0
-    }
-
-    fun colorOf(index: Int): Color = PALETTE[index and 0xFF]
-
-    fun forEachCell(action: (row: Int, col: Int, cell: Cell) -> Unit) {
-        for (rIdx in 0 until rows) {
-            for (cIdx in 0 until cols) action(rIdx, cIdx, screen[rIdx][cIdx])
-        }
-    }
-
-    fun cursor(): Pair<Int, Int> = cursorRow to cursorCol
-
-    companion object {
-        const val ESC = '\u001B'
-        const val BEL = '\u0007'
-        const val NUL = '\u0000'
-        const val DEFAULT_FG = 15
-        const val BRIGHT_FG = 7
-
-        /** xterm 256-color palette: 0-15 fixed, 16-231 RGB cube, 232-255 grayscale. */
-        val PALETTE: Array<Color> = run {
-            val base = intArrayOf(
-                0x000000, 0xCC0000, 0x00A300, 0xC7C400, 0x0000C7,
-                0xC700C7, 0x00C7C7, 0xC7C7C7, 0x676767, 0xFF0000,
-                0x00FF00, 0xFFFF00, 0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
-            )
-            Array(256) { i ->
-                val rgb = when {
-                    i < 16 -> base[i]
-                    i < 232 -> {
-                        val c = i - 16
-                        val r = (c / 36).let { if (it == 0) 0 else it * 40 + 55 }
-                        val g = ((c % 36) / 6).let { if (it == 0) 0 else it * 40 + 55 }
-                        val b = (c % 6).let { if (it == 0) 0 else it * 40 + 55 }
-                        (r shl 16) or (g shl 8) or b
-                    }
-                    else -> {
-                        val gray = 8 + (i - 232) * 10
-                        (gray shl 16) or (gray shl 8) or gray
-                    }
-                }
-                Color(
-                    red = ((rgb shr 16) and 0xFF) / 255f,
-                    green = ((rgb shr 8) and 0xFF) / 255f,
-                    blue = (rgb and 0xFF) / 255f,
-                )
-            }
-        }
-    }
-}
-
-/** Precomputed monospace glyph metrics — JetBrains Mono advance is 0.6em. */
-class MonospaceMetrics(val fontSize: TextUnit) {
-    val charWidth: Float = fontSize.value * 0.6f
-    val lineHeight: Float = fontSize.value * 1.2f
-}
-
-/**
- * Touch-interactive terminal surface: hardware-accelerated canvas wired to
- * a [TerminalEmulator], tap-to-focus for the soft keyboard.
- */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun TerminalSurfaceView(
     emulator: TerminalEmulator,
     modifier: Modifier = Modifier,
     fontSize: TextUnit = 13.sp,
+    focusRequester: FocusRequester? = null,
+    onResize: (cols: Int, rows: Int) -> Unit = { _, _ -> },
+    onInput: (String) -> Unit = {},
+    onClipboard: (String) -> Unit = {},
+    onClipboardRead: () -> String? = { null },
+    onScrollState: (scrolledBack: Boolean) -> Unit = {},
     onTap: () -> Unit = {},
 ) {
-    // Emulator mutations live outside Compose state - a frame ticker drives
-    // invalidation at a ~30 FPS UI cadence.
-    var revision by remember { mutableIntStateOf(0) }
-    LaunchedEffect(emulator) {
-        while (true) {
-            kotlinx.coroutines.delay(33)
-            revision++
+    var revision by remember(emulator) { mutableIntStateOf(0) }
+    val currentInput by rememberUpdatedState(onInput)
+    val currentClipboard by rememberUpdatedState(onClipboard)
+    val currentClipboardRead by rememberUpdatedState(onClipboardRead)
+    val currentScrollState by rememberUpdatedState(onScrollState)
+    DisposableEffect(emulator) {
+        emulator.onRevision = {
+            revision += 1
+            currentScrollState(emulator.scrollOffset != 0)
+        }
+        // DA/DSR/OSC-10/11 replies and clipboard reads are terminal traffic too.
+        emulator.onPtyReply = { currentInput(it) }
+        emulator.onClipboardWrite = { currentClipboard(it) }
+        emulator.onClipboardRead = { currentClipboardRead() }
+        onDispose {
+            emulator.onRevision = null
+            emulator.onPtyReply = null
+            emulator.onClipboardWrite = null
+            emulator.onClipboardRead = null
         }
     }
 
-    val metrics = remember(fontSize) { MonospaceMetrics(fontSize) }
-
-    // JetBrains Mono — same face as the xterm.js web CloudShell (res/font).
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val density = LocalDensity.current
+    val metrics = remember(fontSize, density) {
+        MonospaceMetrics(with(density) { fontSize.toPx() })
+    }
+    val context = LocalContext.current
     val typeface = remember(context) {
         androidx.core.content.res.ResourcesCompat.getFont(
             context,
@@ -266,13 +123,239 @@ fun TerminalSurfaceView(
         ) ?: android.graphics.Typeface.MONOSPACE
     }
 
-    Canvas(
-        modifier = modifier.pointerInput(Unit) {
-            detectTapGestures(onTap = { onTap() })
+    val internalFocusRequester = remember { FocusRequester() }
+    val effectiveFocusRequester = focusRequester ?: internalFocusRequester
+    val keyboard = LocalSoftwareKeyboardController.current
+    var grid by remember { mutableStateOf(0 to 0) }
+
+    fun send(raw: String) {
+        if (raw.isNotEmpty()) {
+            emulator.scrollToBottom()
+            onInput(raw)
         }
+    }
+
+    fun cellAt(offset: Offset): Pair<Int, Int> = (
+        (offset.x / metrics.charWidth).toInt().coerceIn(0, emulator.cols - 1) to
+            (offset.y / metrics.lineHeight).toInt().coerceIn(0, emulator.rows - 1)
+        )
+
+    fun mouse(
+        action: TerminalEmulator.MouseAction,
+        button: Int,
+        offset: Offset,
+    ): Boolean {
+        val (col, row) = cellAt(offset)
+        val sequence = emulator.mouseEvent(action, button, col, row) ?: return false
+        send(sequence)
+        return true
+    }
+
+    fun focusAndShowKeyboard() {
+        onTap()
+        runCatching { effectiveFocusRequester.requestFocus() }
+        keyboard?.show()
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color(0xFF070A13))
+            .onSizeChanged { size ->
+                val cols = (size.width / metrics.charWidth).toInt().coerceAtLeast(2)
+                val rows = (size.height / metrics.lineHeight).toInt().coerceAtLeast(2)
+                if (grid != cols to rows) grid = cols to rows
+            }
+            .onPreviewKeyEvent { event -> handleHardwareKey(event, emulator, ::send) },
     ) {
-        revision // read so the ticker invalidates the canvas
-        drawTerminal(emulator, metrics, typeface)
+        LaunchedEffect(grid, emulator) {
+            val (cols, rows) = grid
+            if (cols >= 2 && rows >= 2 && (cols != emulator.cols || rows != emulator.rows)) {
+                emulator.resize(cols, rows)
+                onResize(cols, rows)
+            }
+        }
+
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(emulator, metrics) {
+                    detectTapGestures(
+                        onTap = { offset ->
+                            // A tap is a left click in a mouse-aware TUI, and
+                            // keyboard focus everywhere else.
+                            if (!mouse(TerminalEmulator.MouseAction.PRESS, 0, offset)) {
+                                focusAndShowKeyboard()
+                            } else {
+                                mouse(TerminalEmulator.MouseAction.RELEASE, 0, offset)
+                                runCatching { effectiveFocusRequester.requestFocus() }
+                            }
+                        },
+                    )
+                }
+                .pointerInput(emulator, metrics) {
+                    var accumulatedY = 0f
+                    var dragging = false
+                    detectDragGestures(
+                        onDragStart = { offset ->
+                            dragging = emulator.mouseReportingEnabled &&
+                                mouse(TerminalEmulator.MouseAction.PRESS, 0, offset)
+                        },
+                        onDragEnd = { dragging = false },
+                        onDragCancel = { dragging = false },
+                    ) { change, dragAmount ->
+                        if (dragging) {
+                            mouse(TerminalEmulator.MouseAction.MOVE, 0, change.position)
+                        } else {
+                            accumulatedY += dragAmount.y
+                            val step = metrics.lineHeight
+                            while (abs(accumulatedY) >= step) {
+                                val lines = if (accumulatedY > 0) 1 else -1
+                                emulator.scrollViewport(lines)
+                                accumulatedY -= lines * step
+                            }
+                        }
+                    }
+                }
+                .pointerInput(emulator, metrics) {
+                    // Mouse wheel / trackpad scroll. `Modifier.onPointerEvent` is
+                    // not public API in this Compose version, so the event is
+                    // observed directly in the pointer input scope.
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Final)
+                            if (event.type != PointerEventType.Scroll) continue
+                            val change = event.changes.firstOrNull() ?: continue
+                            val scroll = change.scrollDelta.y
+                            if (scroll == 0f) continue
+                            if (!mouse(
+                                    if (scroll > 0) TerminalEmulator.MouseAction.WHEEL_DOWN
+                                    else TerminalEmulator.MouseAction.WHEEL_UP,
+                                    0,
+                                    change.position,
+                                )
+                            ) {
+                                emulator.scrollViewport(if (scroll > 0) -1 else 1)
+                            }
+                        }
+                    }
+                },
+        ) {
+            revision // read to subscribe the canvas to engine mutations
+            drawTerminal(emulator, metrics, typeface)
+        }
+
+        // Invisible IME capture. A zero-width sentinel keeps Backspace
+        // observable even when the field is otherwise empty.
+        TerminalInputField(
+            emulator = emulator,
+            onInput = ::send,
+            focusRequester = effectiveFocusRequester,
+            modifier = Modifier
+                .size(1.dp)
+                .alpha(0.01f),
+        )
+    }
+}
+
+private const val SENTINEL = "\u200B"
+
+@Composable
+private fun TerminalInputField(
+    emulator: TerminalEmulator,
+    onInput: (String) -> Unit,
+    focusRequester: FocusRequester,
+    modifier: Modifier = Modifier,
+) {
+    var value by remember {
+        mutableStateOf(TextFieldValue(SENTINEL, TextRange(SENTINEL.length)))
+    }
+    BasicTextField(
+        value = value,
+        onValueChange = { next ->
+            val before = value.text
+            val after = next.text
+            var common = 0
+            while (common < before.length && common < after.length && before[common] == after[common]) {
+                common++
+            }
+            val removed = before.length - common
+            val added = after.substring(common)
+            if (removed > 0) repeat(removed) { onInput("\u007F") }
+            if (added.isNotEmpty()) onInput(added.replace('\n', '\r'))
+            emulator.scrollToBottom()
+            value = TextFieldValue(SENTINEL, TextRange(SENTINEL.length))
+        },
+        textStyle = TextStyle(fontSize = 1.sp, color = Color.Transparent),
+        cursorBrush = SolidColor(Color.Transparent),
+        keyboardOptions = KeyboardOptions(
+            autoCorrectEnabled = false,
+            capitalization = KeyboardCapitalization.None,
+            keyboardType = KeyboardType.Ascii,
+            imeAction = ImeAction.None,
+        ),
+        modifier = modifier.focusRequester(focusRequester),
+    )
+}
+
+private fun handleHardwareKey(
+    event: KeyEvent,
+    emulator: TerminalEmulator,
+    send: (String) -> Unit,
+): Boolean {
+    if (event.type != KeyEventType.KeyDown) return false
+    val modifiers = KeyModifiers(
+        ctrl = event.isCtrlPressed,
+        alt = event.isAltPressed,
+        shift = event.isShiftPressed,
+    )
+
+    fun emit(sequence: String): Boolean {
+        send(sequence)
+        return true
+    }
+
+    fun named(key: TerminalKey): Boolean = emit(emulator.encodeKey(key, modifiers))
+
+    return when (event.key) {
+        Key.Enter, Key.NumPadEnter -> named(TerminalKey.ENTER)
+        Key.Backspace -> named(TerminalKey.BACKSPACE)
+        Key.Escape -> named(TerminalKey.ESC)
+        Key.Tab -> named(TerminalKey.TAB)
+        Key.Delete -> named(TerminalKey.DELETE)
+        Key.Insert -> named(TerminalKey.INSERT)
+        Key.MoveHome -> named(TerminalKey.HOME)
+        Key.MoveEnd -> named(TerminalKey.END)
+        Key.PageUp -> named(TerminalKey.PAGE_UP)
+        Key.PageDown -> named(TerminalKey.PAGE_DOWN)
+        Key.DirectionUp -> named(TerminalKey.UP)
+        Key.DirectionDown -> named(TerminalKey.DOWN)
+        Key.DirectionLeft -> named(TerminalKey.LEFT)
+        Key.DirectionRight -> named(TerminalKey.RIGHT)
+        Key.F1 -> named(TerminalKey.F1)
+        Key.F2 -> named(TerminalKey.F2)
+        Key.F3 -> named(TerminalKey.F3)
+        Key.F4 -> named(TerminalKey.F4)
+        Key.F5 -> named(TerminalKey.F5)
+        Key.F6 -> named(TerminalKey.F6)
+        Key.F7 -> named(TerminalKey.F7)
+        Key.F8 -> named(TerminalKey.F8)
+        Key.F9 -> named(TerminalKey.F9)
+        Key.F10 -> named(TerminalKey.F10)
+        Key.F11 -> named(TerminalKey.F11)
+        Key.F12 -> named(TerminalKey.F12)
+        else -> {
+            val codePoint = event.utf16CodePoint
+            when {
+                // Some Android IMEs already deliver Ctrl+letter as its C0 byte.
+                codePoint in 1..26 -> emit(codePoint.toChar().toString())
+                codePoint == 0 -> emit("\u0000")
+                codePoint >= 0x20 -> emit(
+                    modifiers.applyToText(String(Character.toChars(codePoint))),
+                )
+                else -> false
+            }
+        }
     }
 }
 
@@ -286,32 +369,88 @@ private fun DrawScope.drawTerminal(
     val paint = android.graphics.Paint().apply {
         isAntiAlias = true
         setTypeface(typeface)
-        textSize = metrics.fontSize.value
+        textSize = metrics.charWidth / 0.6f
+    }
+    val boldPaint = android.graphics.Paint(paint)
+    val overallReverse = emulator.reverseVideoEnabled()
+
+    for (row in 0 until emulator.rows) {
+        for (col in 0 until emulator.cols) {
+            val cell = emulator.visibleCell(row, col)
+            if (cell.flags and TerminalEmulator.CONT != 0) continue
+            if (cell.codePoint == ' '.code && cell.combining == null &&
+                cell.bg == TerminalEmulator.DEFAULT_BG
+            ) {
+                continue
+            }
+
+            var fg = cell.fg
+            var bg = cell.bg
+            if (overallReverse || cell.flags and TerminalEmulator.REVERSE != 0) {
+                val swap = fg; fg = bg; bg = swap
+                if (bg == 0x070A13) bg = 0xE2E8F0.takeIf { fg == 0x070A13 } ?: bg
+            }
+            if (cell.flags and TerminalEmulator.HIDDEN != 0) fg = bg
+
+            if (bg != TerminalEmulator.DEFAULT_BG) {
+                drawRect(
+                    color = Color(0xFF000000.toInt() or (bg and 0xFFFFFF)),
+                    topLeft = Offset(col * metrics.charWidth, row * metrics.lineHeight),
+                    size = Size(metrics.charWidth, metrics.lineHeight),
+                )
+            }
+            if (cell.codePoint == ' '.code) continue
+
+            val isWide = emulator.visibleCell(row, col + 1)
+                .let { it.flags and TerminalEmulator.CONT != 0 }
+            val glyph = buildString {
+                appendCodePoint(cell.codePoint)
+                cell.combining?.let { append(it) }
+            }
+            val target = if (cell.flags and (TerminalEmulator.BOLD or TerminalEmulator.BLINK) != 0) {
+                boldPaint
+            } else {
+                paint
+            }
+            target.color = android.graphics.Color.argb(
+                0xFF,
+                ((fg shr 16) and 0xFF),
+                ((fg shr 8) and 0xFF),
+                (fg and 0xFF),
+            )
+            if (cell.flags and TerminalEmulator.DIM != 0) {
+                target.alpha = 0xC0
+            } else {
+                target.alpha = 0xFF
+            }
+            target.isFakeBoldText = cell.flags and TerminalEmulator.BOLD != 0
+            target.textSkewX = if (cell.flags and TerminalEmulator.ITALIC != 0) -0.22f else 0f
+            target.isUnderlineText = cell.flags and TerminalEmulator.UNDERLINE != 0
+            target.isStrikeThruText = cell.flags and TerminalEmulator.STRIKE != 0
+            target.textScaleX = if (isWide) {
+                val natural = target.measureText(glyph)
+                if (natural > 0f) (metrics.charWidth * 2f) / natural else 1f
+            } else {
+                1f
+            }
+
+            drawContext.canvas.nativeCanvas.drawText(
+                glyph,
+                col * metrics.charWidth,
+                row * metrics.lineHeight + metrics.lineHeight * 0.8f,
+                target,
+            )
+        }
     }
 
-    emulator.forEachCell { row, col, cell ->
-        if (cell.char == ' ') return@forEachCell
-        val color = emulator.colorOf(cell.color)
-        paint.color = android.graphics.Color.argb(
-            0xFF,
-            (color.red * 255).toInt(),
-            (color.green * 255).toInt(),
-            (color.blue * 255).toInt(),
-        )
-        drawContext.canvas.nativeCanvas.drawText(
-            cell.char.toString(),
-            col * metrics.charWidth,
-            (row + 1) * metrics.lineHeight,
-            paint,
+    // Block cursor; omitted while the user is reading scrollback.
+    val cursor = emulator.cursorViewPosition()
+    if (cursor != null && emulator.cursorIsVisible()) {
+        drawRect(
+            color = Color(0xFF38BDF8),
+            topLeft = Offset(cursor.second * metrics.charWidth, cursor.first * metrics.lineHeight),
+            size = Size(metrics.charWidth, metrics.lineHeight),
+            alpha = 0.5f,
         )
     }
-
-    // Block cursor at the emulator position.
-    val (crow, ccol) = emulator.cursor()
-    drawRect(
-        color = Color(0xFF38BDF8),
-        topLeft = Offset(ccol * metrics.charWidth, crow * metrics.lineHeight),
-        size = Size(metrics.charWidth, metrics.lineHeight),
-        alpha = 0.55f,
-    )
 }

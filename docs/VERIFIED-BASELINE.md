@@ -76,7 +76,9 @@ every step. Raw events: `audit/TESTNET_BASELINE_2026-11-21/events/por_events_raw
 
 - Sources/specs/tooling commit: `31d3e7160c0a466c608ab3cfa8bf8dce71f17072`
   (repository initialized during audit remediation; see AUDIT-EVIDENCE.md).
-- Workspace: **107 green tests** (16 core-engine, 23 por-verifier, 58
-  por-kernel, 10 trading-engine) + 4 in `por-xdr-toolkit`.
+- Workspace: **110 green tests** in the default workspace members (35
+  core-engine, 58 por-kernel, 17 trading-engine). The Soroban contract crate
+  (`por-verifier`) builds for `wasm32-unknown-unknown` and is verified
+  separately, as is `por-xdr-toolkit`.
 - Regression corpus: **26 snapshots** (17 baseline byte-identical + 9 Gate 7),
   all sealed in `INTEGRITY_MANIFEST.sha256`.

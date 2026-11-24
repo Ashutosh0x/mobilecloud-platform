@@ -1,7 +1,11 @@
 // MobileCloud JNI bridge (master blueprint; APK build spec section 2).
 //
 // Library: libmobilecloud_native.so (loaded by NativePtyController).
-// Dormant local PTY support: forkpty + non-blocking master fd.
+// Local PTY support: forkpty + non-blocking master fd.
+//
+// When tmux is bundled the child is `tmux new-session -A -s <session>`, so a
+// closed tab / destroyed activity re-attaches to a live shell instead of
+// killing long-running work. Without tmux the child is a plain login shell.
 //
 // StrongBox KeyStore operations stay on the Kotlin side: the TEE keymaster
 // is a Binder service, not reachable from native code.
@@ -11,6 +15,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <mutex>
+#include <unordered_map>
 #include <unistd.h>
 #include <termios.h>
 #include <pty.h>
@@ -32,6 +38,49 @@ int set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+// master fd -> child pid.
+//
+// `waitpid(-1, …)` would reap *any* child of the app process, which steals
+// the exit status of an unrelated process (the tmux client, a build that was
+// spawned from a previous session). The child of a PTY is known exactly, so
+// it is tracked here and only that pid is waited for.
+std::mutex g_children_mutex;
+std::unordered_map<int, pid_t> g_children;
+
+void remember_child(int master_fd, pid_t child) {
+    std::lock_guard<std::mutex> guard(g_children_mutex);
+    g_children[master_fd] = child;
+}
+
+pid_t forget_child(int master_fd) {
+    std::lock_guard<std::mutex> guard(g_children_mutex);
+    auto it = g_children.find(master_fd);
+    if (it == g_children.end()) return -1;
+    pid_t child = it->second;
+    g_children.erase(it);
+    return child;
+}
+
+// Environment shared by the login shell and the tmux client. Truecolor and a
+// UTF-8 locale are what make `btop`, `bat`, and powerline prompts render
+// correctly over the phone's terminal.
+void apply_child_environment(const char *home, const char *path, const char *shell) {
+    setenv("TERM", "xterm-256color", 1);
+    setenv("COLORTERM", "truecolor", 1);
+    setenv("TERM_PROGRAM", "mobilecloud", 1);
+    setenv("TERM_PROGRAM_VERSION", "2.0", 1);
+    setenv("LANG", "C.UTF-8", 1);
+    setenv("LC_ALL", "C.UTF-8", 1);
+    setenv("HOME", home, 1);
+    setenv("PATH", path, 1);
+    setenv("SHELL", shell, 1);
+    if (getenv("PS1") == nullptr) setenv("PS1", "mobilecloud$ ", 1);
+    unsetenv("ANDROID_DATA");
+    unsetenv("ANDROID_ROOT");
+    // tmux refuses to attach when TERM is unknown to its terminfo database.
+    // The engine ships tmux + terminfo; the fallback keeps a bare shell usable.
+}
+
 } // namespace
 
 extern "C" {
@@ -43,10 +92,13 @@ extern "C" {
 extern "C" JNIEXPORT jint JNICALL
 Java_com_mobilecloud_terminal_NativePtyController_nativeSpawnPty(
         JNIEnv *env, jclass, jint rows, jint cols,
-        jstring shellPath, jstring envHome, jstring envPath) {
+        jstring shellPath, jstring envHome, jstring envPath,
+        jstring tmuxPath, jstring tmuxConf) {
     const char *shell = env->GetStringUTFChars(shellPath, nullptr);
     const char *home = env->GetStringUTFChars(envHome, nullptr);
     const char *path = env->GetStringUTFChars(envPath, nullptr);
+    const char *tmux = tmuxPath == nullptr ? nullptr : env->GetStringUTFChars(tmuxPath, nullptr);
+    const char *conf = tmuxConf == nullptr ? nullptr : env->GetStringUTFChars(tmuxConf, nullptr);
 
     struct winsize ws{};
     ws.ws_row = static_cast<unsigned short>(rows);
@@ -56,30 +108,43 @@ Java_com_mobilecloud_terminal_NativePtyController_nativeSpawnPty(
     pid_t child = forkpty(&master_fd, nullptr, nullptr, &ws);
     if (child < 0) {
         LOGE("forkpty failed: %s", strerror(errno));
+        int error = errno;
         env->ReleaseStringUTFChars(shellPath, shell);
         env->ReleaseStringUTFChars(envHome, home);
         env->ReleaseStringUTFChars(envPath, path);
-        return -errno;
+        if (tmux != nullptr) env->ReleaseStringUTFChars(tmuxPath, tmux);
+        if (conf != nullptr) env->ReleaseStringUTFChars(tmuxConf, conf);
+        return -error;
     }
 
     if (child == 0) {
         // These preferences do not isolate the child from the app UID or
         // its resources. The local PTY is not a security boundary.
-        setenv("TERM", "xterm-256color", 1);
-        setenv("HOME", home, 1);
-        setenv("PATH", path, 1);
-        unsetenv("ANDROID_DATA");
-        unsetenv("ANDROID_ROOT");
-        execl(shell, shell, "-l", nullptr);
+        apply_child_environment(home, path, shell);
+        if (tmux != nullptr && tmux[0] != '\0') {
+            if (conf != nullptr && conf[0] != '\0') {
+                execl(tmux, tmux, "-u", "-f", conf,
+                      "new-session", "-A", "-s", "mobilecloud-session", (char *) nullptr);
+            } else {
+                execl(tmux, tmux, "-u",
+                      "new-session", "-A", "-s", "mobilecloud-session", (char *) nullptr);
+            }
+        }
+        // tmux missing or exec failed: hand out a direct login shell.
+        execl(shell, shell, "-l", (char *) nullptr);
         _exit(127); // exec failed
     }
 
     set_nonblocking(master_fd);
-    LOGI("PTY spawned: master=%d child=%d shell=%s", master_fd, child, shell);
+    remember_child(master_fd, child);
+    LOGI("PTY spawned: master=%d child=%d shell=%s tmux=%s",
+         master_fd, child, shell, (tmux != nullptr && tmux[0] != '\0') ? tmux : "none");
 
     env->ReleaseStringUTFChars(shellPath, shell);
     env->ReleaseStringUTFChars(envHome, home);
     env->ReleaseStringUTFChars(envPath, path);
+    if (tmux != nullptr) env->ReleaseStringUTFChars(tmuxPath, tmux);
+    if (conf != nullptr) env->ReleaseStringUTFChars(tmuxConf, conf);
     return master_fd;
 }
 
@@ -125,8 +190,18 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_mobilecloud_terminal_NativePtyController_nativeClosePty(
         JNIEnv *, jclass, jint fd) {
     close(fd);
-    int status;
-    waitpid(-1, &status, WNOHANG); // best-effort reap
+    // Reap exactly the child this PTY spawned. `waitpid(-1, …)` would also
+    // reap unrelated children of the app process and steal their exit status.
+    pid_t child = forget_child(fd);
+    if (child <= 0) return;
+    int status = 0;
+    if (waitpid(child, &status, WNOHANG) == 0) {
+        // The shell has not noticed the hangup yet. Ask it to exit, then give
+        // it one more chance without blocking the caller indefinitely.
+        kill(child, SIGHUP);
+        usleep(50 * 1000);
+        waitpid(child, &status, WNOHANG);
+    }
 }
 
 } // extern "C"

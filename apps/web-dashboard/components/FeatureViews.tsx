@@ -489,6 +489,9 @@ export function BillingView() {
 export function ShellPage() {
   const { state, call, pushShell, setToast } = useCloud();
   const [line, setLine] = useState("");
+  // The full terminal (a real PTY on the phone) lives in the standalone
+  // CloudShell app. The list below is the account-scoped command console.
+  const cloudshellUrl = process.env.NEXT_PUBLIC_CLOUDSHELL_URL ?? "";
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     const command = line;
@@ -505,7 +508,17 @@ export function ShellPage() {
   }
   return (
     <>
-      <header className="page-head"><div><h2>CloudShell</h2><p>Commands are a fixed list. They read this database. They do not open a host shell.</p></div></header>
+      <header className="page-head">
+        <div>
+          <h2>CloudShell</h2>
+          <p>Commands are a fixed list. They read this database. They do not open a host shell.</p>
+        </div>
+        {cloudshellUrl ? (
+          <a className="primary" href={cloudshellUrl} target="_blank" rel="noopener noreferrer">
+            Open the full terminal →
+          </a>
+        ) : null}
+      </header>
       <div className="term">
         {state.shell.map((row, i) => <div key={`${i}-${row.slice(0, 12)}`} className={row.startsWith("$") ? "cmd" : ""}>{row}</div>)}
         <form onSubmit={onSubmit}>
