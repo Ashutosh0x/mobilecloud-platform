@@ -1,15 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Adaptive-icon foreground: the MobileCloud "M" mark, drawn as a stroked
-     polyline inside the 72dp safe zone of the 108dp viewport. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:pathData="M34,74 L34,34 L54,60 L74,34 L74,74"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="7"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round" />
+    <!-- Center the shared 24-unit mark within the adaptive icon safe zone. -->
+    <group android:scaleX="3.2" android:scaleY="3.2" android:translateX="15.6" android:translateY="15.6">
+        <path android:fillColor="#EDF7FF" android:pathData="M12,2.8 L21.1,8 L17.1,10.3 L12,7.4 L6.9,10.3 L2.9,8 Z" />
+        <path android:fillColor="#9AB9FF" android:pathData="M2.9,10.6 L10.8,15.1 V20.4 L2.9,15.8 Z" />
+        <path android:fillColor="#60E2E6" android:pathData="M21.1,10.6 V15.8 L13.2,20.4 V15.1 Z" />
+        <path android:fillColor="#FFFFFF" android:pathData="M12,9.7 L14.9,11.4 L12,13.1 L9.1,11.4 Z" />
+    </group>
 </vector>

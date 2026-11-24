@@ -230,8 +230,15 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <button className="icon-btn" type="button" aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} onClick={() => { if (window.innerWidth <= 800) setDrawer((v) => !v); else setCollapsed((v) => !v); }}>
           <Icon name="grid" size={16} />
         </button>
-        <Link href="/" className="brand">
-          <span className="logo">M</span>
+        <Link href="/" className="brand" aria-label="MobileCloud home">
+          <span className="logo" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path fill="#EDF7FF" d="M12 2.8 21.1 8 17.1 10.3 12 7.4 6.9 10.3 2.9 8Z" />
+              <path fill="#9AB9FF" d="M2.9 10.6 10.8 15.1V20.4L2.9 15.8Z" />
+              <path fill="#60E2E6" d="M21.1 10.6V15.8L13.2 20.4V15.1Z" />
+              <path fill="#FFFFFF" d="M12 9.7 14.9 11.4 12 13.1 9.1 11.4Z" />
+            </svg>
+          </span>
           <span className="brand-copy">
             <h1>MobileCloud</h1>
             <p>Build. Ship. Scale.</p>

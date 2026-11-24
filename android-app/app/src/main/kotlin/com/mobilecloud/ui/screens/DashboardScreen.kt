@@ -61,6 +61,7 @@ import com.mobilecloud.ui.components.ProgressRing
 import com.mobilecloud.ui.components.RefSourceChip
 import com.mobilecloud.ui.components.SectionLabel
 import com.mobilecloud.ui.components.StatusPill
+import com.mobilecloud.ui.console.LogoMark
 import com.mobilecloud.ui.theme.Aurora
 import kotlinx.coroutines.delay
 
@@ -98,21 +99,7 @@ fun DashboardScreen() {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    Modifier
-                        .size(36.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Aurora.TextHi),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        "M",
-                        color = Aurora.Bg,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = AppFonts.Mono,
-                    )
-                }
+                LogoMark(36.dp)
                 Spacer(Modifier.width(10.dp))
                 Column {
                     Text(

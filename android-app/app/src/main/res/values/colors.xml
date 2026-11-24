@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Adaptive launcher icon background: MobileCloud primary blue. -->
-    <color name="ic_launcher_background">#0070F3</color>
+    <color name="ic_launcher_background">#163060</color>
 </resources>

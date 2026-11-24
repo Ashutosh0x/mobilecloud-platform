@@ -5,7 +5,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,7 +15,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -44,7 +42,6 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.mobilecloud.console.ConsoleOrigin
 import com.mobilecloud.console.ConsoleStatus
 import com.mobilecloud.console.ConsoleStore
-import com.mobilecloud.ui.theme.AppFonts
 import com.mobilecloud.ui.theme.Aurora
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -139,9 +136,7 @@ fun ConsoleLogin(store: ConsoleStore) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Spacer(Modifier.height(30.dp))
-        Box(Modifier.height(48.dp).width(48.dp).clip(RoundedCornerShape(12.dp)).background(Aurora.TextHi), Alignment.Center) {
-            Text("M", color = Aurora.Bg, fontSize = 24.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
-        }
+        LogoMark(48.dp)
         Spacer(Modifier.height(14.dp))
         Text("MobileCloud", color = Aurora.TextHi, fontSize = 22.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.4).sp)
         Spacer(Modifier.height(4.dp))

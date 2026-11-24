@@ -52,9 +52,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.colorResource
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mobilecloud.R
 import com.mobilecloud.console.ConsoleStore
 import com.mobilecloud.console.ConnectionState
 import com.mobilecloud.console.RealtimeStatus
@@ -76,7 +80,7 @@ import java.util.Locale
 fun LoadingSplash() {
     Box(Modifier.fillMaxSize().background(Aurora.Bg), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            LogoMark(40.dp, 20.sp)
+            LogoMark(40.dp)
             Spacer(Modifier.height(16.dp))
             Text("Loading console…", color = Aurora.TextMid, fontSize = 12.sp)
         }
@@ -84,13 +88,13 @@ fun LoadingSplash() {
 }
 
 @Composable
-private fun LogoMark(size: androidx.compose.ui.unit.Dp, fontSize: androidx.compose.ui.unit.TextUnit) {
-    Box(
-        Modifier.size(size).clip(RoundedCornerShape(8.dp)).background(Aurora.TextHi),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text("M", color = Aurora.Bg, fontSize = fontSize, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
-    }
+internal fun LogoMark(size: Dp) {
+    Icon(
+        painter = painterResource(R.drawable.ic_launcher_foreground),
+        contentDescription = null,
+        modifier = Modifier.size(size).background(colorResource(R.color.ic_launcher_background), RoundedCornerShape(size / 4)),
+        tint = Color.Unspecified,
+    )
 }
 
 /** Full console shell once the account is loaded. */
@@ -286,7 +290,7 @@ private fun TopBar(
     ) {
         IconBare(Icons.Filled.Menu, "Open navigation", onMenu)
         Spacer(Modifier.width(6.dp))
-        LogoMark(30.dp, 16.sp)
+        LogoMark(30.dp)
         Spacer(Modifier.width(9.dp))
         Column(Modifier.weight(1f)) {
             Text("MobileCloud", color = Aurora.TextHi, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.3).sp)
@@ -356,7 +360,7 @@ private fun Sidebar(
             .padding(12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            LogoMark(28.dp, 15.sp)
+            LogoMark(28.dp)
             Spacer(Modifier.width(9.dp))
             Text("Console", color = Aurora.TextHi, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             IconBare(Icons.Filled.Close, "Close navigation") { unpadded() }
