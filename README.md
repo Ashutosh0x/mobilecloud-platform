@@ -7,7 +7,7 @@
 ### **The Autonomous Smartphone Edge Cloud & Institutional Proof-of-Reserve Protocol**
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-110%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-124%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 [![Rust](https://img.shields.io/badge/Rust-1.80%2B-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![Android](https://img.shields.io/badge/Android-API%2026--35-3ddc84?style=for-the-badge&logo=android&logoColor=white)](android-app)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7f52ff?style=for-the-badge&logo=kotlin&logoColor=white)](android-app)
