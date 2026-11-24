@@ -1,7 +1,8 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Analytics, DbFile, Deployment, Domain, FuncRow, HostInfo, LogRow, Member, Metrics, ObjectRow, Project, RangeKey, User } from "./types";
+import { realtime, type RealtimeState } from "./realtime";
 
 export type { RangeKey };
 
@@ -85,6 +86,21 @@ export type CloudState = {
   protection: { required: boolean; unlocked: boolean };
   identity: Capability[];
   shell: string[];
+  /** Live connection state shared by the whole app (single realtime client). */
+  realtime: RealtimeState;
+};
+
+const initialRealtime: RealtimeState = {
+  status: "connecting",
+  accountId: null,
+  accountName: null,
+  cursor: 0,
+  lastSyncAt: null,
+  lastError: null,
+  pending: 0,
+  attempts: 0,
+  transport: null,
+  serverStatus: "unknown",
 };
 
 const empty: CloudState = {
@@ -121,6 +137,7 @@ const empty: CloudState = {
   protection: { required: false, unlocked: true },
   identity: [],
   shell: ["CloudShell reads this server. Type help."],
+  realtime: initialRealtime,
 };
 
 type Api = {
@@ -128,12 +145,27 @@ type Api = {
   setQuery: (query: string) => void;
   setRange: (range: RangeKey) => void;
   refresh: () => Promise<void>;
-  call: (path: string, init?: RequestInit) => Promise<unknown>;
+  /**
+   * Performs a mutation. Pass [optimistic] to apply the change locally first:
+   * the patch is rolled back if the server rejects it, and replaced by the
+   * authoritative snapshot once the request succeeds.
+   */
+  call: (path: string, init?: RequestInit, optimistic?: OptimisticPatch) => Promise<unknown>;
   login: (path: "auth/login" | "auth/signup", input: { email: string; password: string; name?: string }) => Promise<void>;
   logout: () => Promise<void>;
   pushShell: (line: string) => void;
   setToast: (toast: string | null) => void;
+  /** Re-open the realtime socket immediately. */
+  realtimeRetry: () => void;
 };
+
+/** Local, immediate state change applied before the server confirms it. */
+export type OptimisticPatch = (state: CloudState) => Partial<CloudState>;
+
+/** Fields that describe UI intent, not server data — never rolled back. */
+function transient(s: CloudState) {
+  return { query: s.query, range: s.range, shell: s.shell, toast: s.toast, realtime: s.realtime };
+}
 
 const Ctx = createContext<Api | null>(null);
 
@@ -150,11 +182,17 @@ async function request(path: string, init?: RequestInit) {
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<CloudState>(empty);
+  // Keeps the latest refresh identity for the realtime event handler without
+  // re-subscribing on every re-render.
+  const refreshRef = useRef<() => Promise<void>>(async () => undefined);
+  // Last rendered state, read by `call` to roll an optimistic patch back.
+  const stateRef = useRef<CloudState>(empty);
+  useEffect(() => { stateRef.current = state; }, [state]);
 
   const refresh = useCallback(async () => {
     const me = await request("auth/me") as { user: User | null };
     if (!me.user) {
-      setState((s) => ({ ...empty, status: "anon", query: s.query, range: s.range, shell: s.shell }));
+      setState((s) => ({ ...empty, status: "anon", query: s.query, range: s.range, shell: s.shell, realtime: s.realtime }));
       return;
     }
     const range = state.range;
@@ -205,18 +243,62 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return () => { live = false; };
   }, [refresh]);
 
+  // Mirror the shared realtime client's state into the store so any component
+  // can render the connection indicator without opening its own socket.
+  useEffect(() => {
+    refreshRef.current = refresh;
+  }, [refresh]);
+
+  useEffect(() => {
+    return realtime.subscribe((rt) => setState((s) => ({ ...s, realtime: rt })));
+  }, []);
+
+  // A live event means the server state moved: re-pull the snapshot so every
+  // page reflects it. Debounced so a burst of events triggers one refresh.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = realtime.onEvent(() => {
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        refreshRef.current().catch(() => undefined);
+      }, 250);
+    });
+    return () => {
+      unsubscribe();
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
+
+  // Only run the socket for an authenticated session. Signing in starts it,
+  // signing out (or a lost session) tears it down.
+  useEffect(() => {
+    if (state.status === "ready") realtime.start();
+    else realtime.stop();
+  }, [state.status]);
+
+  // Bounded safety net: if the socket is unavailable the app still converges.
   useEffect(() => {
     if (state.status !== "ready") return;
     const id = setInterval(() => {
+      if (realtime.snapshot().status === "connected") return;
       refresh().catch(() => setState((s) => ({ ...s, status: "error", error: "Lost contact with the control plane." })));
-    }, 20000);
+    }, 60000);
     return () => clearInterval(id);
   }, [state.status, refresh]);
 
-  const call = useCallback(async (path: string, init?: RequestInit) => {
-    const data = await request(path, init);
-    await refresh();
-    return data;
+  const call = useCallback(async (path: string, init?: RequestInit, optimistic?: OptimisticPatch) => {
+    // Snapshot the last confirmed state so a rejected mutation can be undone.
+    const before = optimistic ? stateRef.current : null;
+    if (before && optimistic) setState((s) => ({ ...s, ...optimistic(s) }));
+    try {
+      const data = await request(path, init);
+      await refresh();                       // authoritative reconciliation
+      return data;
+    } catch (error) {
+      if (before) setState((s) => ({ ...before, ...transient(s) }));
+      throw error;
+    }
   }, [refresh]);
 
   const api = useMemo<Api>(() => ({
@@ -226,15 +308,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     refresh,
     call,
     login: async (path, input) => {
+      realtime.reset();
       await request(path, { method: "POST", body: JSON.stringify(input) });
       await refresh();
     },
     logout: async () => {
       await request("auth/logout", { method: "POST" });
+      realtime.reset();
       setState((s) => ({ ...empty, status: "anon", shell: s.shell }));
     },
     pushShell: (line) => setState((s) => ({ ...s, shell: [...s.shell, line].slice(-40) })),
     setToast: (toast) => setState((s) => ({ ...s, toast })),
+    realtimeRetry: () => realtime.retry(),
   }), [state, refresh, call]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;

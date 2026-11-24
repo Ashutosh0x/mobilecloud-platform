@@ -15,6 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -107,12 +108,12 @@ fun AppLockScreen(activity: FragmentActivity, onUnlocked: () -> Unit) {
                 Text("RETRY AUTHENTICATION", fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
         } else {
-            Text("Awaiting hardware TEE prompt…", color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+            Text("Awaiting hardware TEE prompt…", color = TextSecondary, fontSize = 12.sp, fontFamily = AppFonts.Mono)
         }
         Spacer(modifier = Modifier.height(48.dp))
         Text(
             "StrongBox-backed · zero-transfer to host apps",
-            color = AccentIndigo, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+            color = AccentIndigo, fontSize = 11.sp, fontFamily = AppFonts.Mono,
         )
     }
 }

@@ -30,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -78,10 +79,10 @@ fun ProofOfReserveScreen() {
         GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Red.copy(alpha = 0.45f), corner = 14.dp) {
             Column(Modifier.padding(14.dp)) {
                 Row {
-                    Text("MODE: ", color = Aurora.TextLow, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    Text("MODE: ", color = Aurora.TextLow, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
                     Text(
                         if (daemonReachable == true) "DEGRADED" else "DEGRADED",
-                        color = Aurora.Red, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace,
+                        color = Aurora.Red, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono,
                     )
                 }
                 Spacer(Modifier.height(6.dp))
@@ -131,7 +132,7 @@ fun ProofOfReserveScreen() {
             Column(Modifier.padding(16.dp)) {
                 SectionLabel("SPECIMEN BALANCE SHEET — ILLUSTRATIVE ONLY (NOT AUDITED)")
                 Spacer(Modifier.height(10.dp))
-                Text("SOURCE A: ON-CHAIN TOKEN SUPPLY (specimen)", color = Aurora.TextFaint, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                Text("SOURCE A: ON-CHAIN TOKEN SUPPLY (specimen)", color = Aurora.TextFaint, fontSize = 10.sp, fontFamily = AppFonts.Mono)
                 Spacer(Modifier.height(6.dp))
                 KVRow("Solana SPL (Backpack)", "450,000.00 ANT")
                 KVRow("Robinhood Chain (L2)", "120,000.00 ANT")
@@ -146,7 +147,7 @@ fun ProofOfReserveScreen() {
                 )
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Total On-Chain Liabilities:", color = Aurora.TextMid, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    Text("677,108.43 ANT", color = Aurora.TextHi, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    Text("677,108.43 ANT", color = Aurora.TextHi, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
                 }
             }
         }
@@ -156,7 +157,7 @@ fun ProofOfReserveScreen() {
         // ---- Source B (custody, from the blueprint's PoR screen) ----
         GlowCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
-                Text("SOURCE B: RESERVES / CUSTODY (specimen)", color = Aurora.TextFaint, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                Text("SOURCE B: RESERVES / CUSTODY (specimen)", color = Aurora.TextFaint, fontSize = 10.sp, fontFamily = AppFonts.Mono)
                 Spacer(Modifier.height(6.dp))
                 KVRow("DTC Settled Common Stock", "650,000.00 shares")
                 KVRow("NSCC Cash in Transit (T+1)", "\$2,365,000.00")
@@ -171,7 +172,7 @@ fun ProofOfReserveScreen() {
                 )
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Net Verifiable Backing:", color = Aurora.TextMid, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    Text("678,500.00 shares", color = Aurora.TextHi, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    Text("678,500.00 shares", color = Aurora.TextHi, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
                 }
             }
         }
@@ -210,7 +211,7 @@ private fun MissingRow(label: String) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, color = Aurora.TextMid, fontSize = 13.sp)
-        Text("MISSING", color = Aurora.Red, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+        Text("MISSING", color = Aurora.Red, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
     }
 }
 

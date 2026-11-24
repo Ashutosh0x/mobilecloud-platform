@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useCloud } from "@/lib/store";
+import { realtimeLabel } from "@/lib/realtime";
 import { Icon } from "./Icons";
 
 const GROUPS = [
@@ -65,7 +66,7 @@ function Gate() {
 export function Shell({ children }: { children: React.ReactNode }) {
   const path = usePathname();
   const router = useRouter();
-  const { state, setQuery, setToast, logout, call } = useCloud();
+  const { state, setQuery, setToast, logout, call, realtimeRetry } = useCloud();
   const unread = state.notifications.filter((item) => !item.read).length;
   const [collapsed, setCollapsed] = useState(false);
   const [drawer, setDrawer] = useState(false);
@@ -191,7 +192,22 @@ export function Shell({ children }: { children: React.ReactNode }) {
     }).catch(() => undefined);
   }, [path, state.status, state.settings.recordPageViews]);
 
-  const connected = state.status === "ready" && state.metrics;
+  const rt = state.realtime;
+  const rtTone =
+    rt.status === "connected"
+      ? "online"
+      : rt.status === "offline" || rt.status === "sync_error"
+        ? "offline"
+        : "pending";
+  const rtTitle = [
+    `Realtime: ${realtimeLabel(rt.status)}`,
+    rt.transport ? `transport ${rt.transport}` : null,
+    rt.pending > 0 ? `${rt.pending} new` : null,
+    rt.lastSyncAt ? `last sync ${new Date(rt.lastSyncAt).toLocaleTimeString()}` : null,
+    rt.lastError,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div className={`console${collapsed ? " collapsed" : ""}`}>
@@ -218,7 +234,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
           <kbd>Ctrl K</kbd>
         </div>
         <div className="top-actions">
-          <span className={connected ? "online" : "offline"}><i className="dot" /> <span>{connected ? "Connected" : state.status === "error" ? "Disconnected" : "Checking"}</span></span>
+          <button className={rtTone} type="button" title={rtTitle} onClick={() => realtimeRetry()} style={{ background: "transparent", border: 0, cursor: "pointer" }}>
+            <i className="dot" /> <span>{realtimeLabel(rt.status)}</span>
+          </button>
           <button className="icon-btn" type="button" aria-label="Notifications" aria-expanded={notes} onClick={() => { setNotes((v) => !v); setAccount(false); }}>
             <Icon name="bell" />
             {unread > 0 && <i className="ping" />}
@@ -230,7 +248,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
             <div className="menu" role="menu">
               <div className="sub">{unread > 0 ? `${unread} unread` : "Notifications"}</div>
               {state.notifications.slice(0, 8).map((item) => (
-                <button key={item.id} type="button" role="menuitem" onClick={() => { void call(`notifications/${item.id}`, { method: "PATCH" }); }}>
+                <button key={item.id} type="button" role="menuitem" onClick={() => {
+                  // Optimistic: mark it read now, roll back if the server rejects it.
+                  void call(`notifications/${item.id}`, { method: "PATCH" }, (s) => ({
+                    notifications: s.notifications.map((n) => (n.id === item.id ? { ...n, read: true } : n)),
+                  }));
+                }}>
                   {item.title}{item.read ? "" : " · unread"}
                 </button>
               ))}
@@ -264,7 +287,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <div className="side-spacer" />
         <div className="side-note">
           <strong>Control plane</strong>
-          <span>{connected ? "SQLite on this server." : "Waiting for the API."}</span>
+          <span>{state.status === "ready" && state.metrics ? "SQLite on this server." : "Waiting for the API."}</span>
           <em><i className="dot" /> {state.metrics ? `Up ${Math.floor(state.metrics.processUptimeSec / 60)}m` : "No metrics yet"}</em>
         </div>
       </aside>

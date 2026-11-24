@@ -202,6 +202,28 @@ CREATE TABLE IF NOT EXISTS webhooks (
   events TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+-- Durable event outbox. Every mutation appends one row inside the same
+-- transaction as the write it describes, so a dropped WebSocket frame can
+-- never lose a change: clients recover by reading this table through
+-- GET /api/sync/changes?cursor=N. The seq column is the global, monotonically
+-- increasing ordering token used for cursor sync and duplicate detection.
+CREATE TABLE IF NOT EXISTS events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT UNIQUE NOT NULL,
+  owner_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  resource_id TEXT,
+  schema_version INTEGER NOT NULL DEFAULT 1,
+  actor TEXT,
+  payload TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_owner_seq ON events (owner_id, seq);
+CREATE TABLE IF NOT EXISTS event_cursors (
+  consumer TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL,
+  at INTEGER NOT NULL
+);
 `;
 
 let singleton: DatabaseSync | null = null;
@@ -216,6 +238,9 @@ export function openDb(file?: string): DatabaseSync {
   mkdirSync(dirname(target), { recursive: true });
   const db = new DatabaseSync(target);
   db.exec("PRAGMA journal_mode = WAL;");
+  // The realtime gateway is a second process writing to the same file (its
+  // event cursor), so writers must wait rather than fail with SQLITE_BUSY.
+  db.exec("PRAGMA busy_timeout = 4000;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(SCHEMA);
   for (const sql of [

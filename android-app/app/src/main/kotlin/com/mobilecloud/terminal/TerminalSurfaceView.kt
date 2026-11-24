@@ -228,7 +228,7 @@ class TerminalEmulator(val cols: Int = 80, val rows: Int = 24) {
     }
 }
 
-/** Precomputed monospace glyph metrics (JetBrains Mono when bundled). */
+/** Precomputed monospace glyph metrics — JetBrains Mono advance is 0.6em. */
 class MonospaceMetrics(val fontSize: TextUnit) {
     val charWidth: Float = fontSize.value * 0.6f
     val lineHeight: Float = fontSize.value * 1.2f
@@ -257,22 +257,35 @@ fun TerminalSurfaceView(
 
     val metrics = remember(fontSize) { MonospaceMetrics(fontSize) }
 
+    // JetBrains Mono — same face as the xterm.js web CloudShell (res/font).
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val typeface = remember(context) {
+        androidx.core.content.res.ResourcesCompat.getFont(
+            context,
+            com.mobilecloud.R.font.jetbrains_mono_400,
+        ) ?: android.graphics.Typeface.MONOSPACE
+    }
+
     Canvas(
         modifier = modifier.pointerInput(Unit) {
             detectTapGestures(onTap = { onTap() })
         }
     ) {
         revision // read so the ticker invalidates the canvas
-        drawTerminal(emulator, metrics)
+        drawTerminal(emulator, metrics, typeface)
     }
 }
 
-private fun DrawScope.drawTerminal(emulator: TerminalEmulator, metrics: MonospaceMetrics) {
-    drawRect(Color(0xFF0B0F19)) // theme background per terminal doc 6.2
+private fun DrawScope.drawTerminal(
+    emulator: TerminalEmulator,
+    metrics: MonospaceMetrics,
+    typeface: android.graphics.Typeface,
+) {
+    drawRect(Color(0xFF070A13)) // CIDS theme background — web-cloudshell xterm.js parity
 
     val paint = android.graphics.Paint().apply {
         isAntiAlias = true
-        typeface = android.graphics.Typeface.MONOSPACE
+        setTypeface(typeface)
         textSize = metrics.fontSize.value
     }
 

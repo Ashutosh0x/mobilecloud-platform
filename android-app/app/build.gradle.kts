@@ -5,7 +5,10 @@ plugins {
 }
 
 android {
-    namespace = "com.mobilecloud.node"
+    // The R / BuildConfig classes must live in the root source package
+    // (`com.mobilecloud.*`) because every screen and the terminal view import
+    // `com.mobilecloud.R`. The store identity stays `com.mobilecloud.node`.
+    namespace = "com.mobilecloud"
     compileSdk = 35
     ndkVersion = "27.1.12297006"
 

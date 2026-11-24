@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { hashPassword, newId, tokenHash, verifyPassword } from "./db.ts";
+import { publish } from "./events.ts";
 
 const GATE = "mc_gate";
 
@@ -8,6 +9,9 @@ export function notify(db: DatabaseSync, owner: string, type: string, title: str
   db.prepare(
     "INSERT INTO notifications (id, owner_id, type, title, message, read, at) VALUES (?, ?, ?, ?, ?, 0, ?)",
   ).run(newId(), owner, type, title, message.slice(0, 500), Date.now());
+  // Mirror the notification into the outbox so every signed-in device sees the
+  // same unread state without polling.
+  publish(db, owner, "notification.created", null, { type, title, message: message.slice(0, 500) });
   const hooks = db.prepare("SELECT url, secret, events FROM webhooks WHERE owner_id = ?").all(owner) as { url: string; secret: string; events: string }[];
   const body = JSON.stringify({ type, title, message, at: Date.now() });
   for (const hook of hooks) {

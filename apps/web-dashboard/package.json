@@ -3,9 +3,13 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "dev": "next dev --port 3210",
+    "dev": "node server/run.mjs dev",
+    "dev:web": "next dev --port 3210",
+    "dev:realtime": "node server/realtime.mjs",
     "build": "next build",
-    "start": "next start --port 3210"
+    "start": "node server/run.mjs start",
+    "start:web": "next start --port 3210",
+    "test": "node --experimental-strip-types --test lib/server/*.test.ts"
   },
   "dependencies": {
     "next": "^15.5.6",

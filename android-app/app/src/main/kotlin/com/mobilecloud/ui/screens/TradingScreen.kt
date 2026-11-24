@@ -1,6 +1,7 @@
 package com.mobilecloud.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -34,6 +36,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
+import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -109,12 +112,12 @@ fun TradingScreen() {
                 SectionLabel("SPECIMEN QUOTES — ANT / USDC (NOT LIVE)")
                 Spacer(Modifier.height(12.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Backpack CLOB: \$88.40", color = Aurora.TextHi, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
+                    Text("Backpack CLOB: \$88.40", color = Aurora.TextHi, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, fontFamily = AppFonts.Mono)
                     Spacer(Modifier.width(10.dp))
                     Text("▶", color = Aurora.Blue, fontSize = 16.sp)
                     Spacer(Modifier.width(10.dp))
-                    Text("Raydium AMM:", color = Aurora.TextHi, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
-                    Text("\$88.58", color = Aurora.TextHi, fontSize = 17.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    Text("Raydium AMM:", color = Aurora.TextHi, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, fontFamily = AppFonts.Mono)
+                    Text("\$88.58", color = Aurora.TextHi, fontSize = 17.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
                 }
                 Spacer(Modifier.height(10.dp))
                 Text(
@@ -145,7 +148,7 @@ fun TradingScreen() {
                             "${trade.time} • ${trade.bundleId}",
                             color = Aurora.TextLow,
                             fontSize = 10.5.sp,
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = AppFonts.Mono,
                         )
                         SpecimenBadge()
                     }
@@ -163,7 +166,7 @@ fun TradingScreen() {
                             color = if (trade.toxic) Aurora.TextLow else Aurora.TextMid,
                             fontSize = 11.5.sp,
                         )
-                        Text(trade.bps, color = Aurora.Cyan, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
+                        Text(trade.bps, color = Aurora.Cyan, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, fontFamily = AppFonts.Mono)
                     }
                 }
             }
@@ -183,7 +186,7 @@ fun TradingScreen() {
                         color = Aurora.Cyan,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = AppFonts.Mono,
                     )
                 }
                 DotTickSlider(
@@ -195,7 +198,7 @@ fun TradingScreen() {
                     "Fail-closed policy: submission paths abort unless engine state is clear",
                     color = Color(0xFF58B7E8),
                     fontSize = 10.5.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = AppFonts.Mono,
                     modifier = Modifier.padding(bottom = 10.dp),
                 )
             }
@@ -265,8 +268,8 @@ private fun ModeCard(modeLabel: String, modeColor: Color, detail: String) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.Warning, null, tint = modeColor, modifier = Modifier.size(13.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("MODE: ", color = Aurora.TextLow, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                Text(modeLabel, color = modeColor, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                Text("MODE: ", color = Aurora.TextLow, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
+                Text(modeLabel, color = modeColor, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
             }
             Spacer(Modifier.height(6.dp))
             Text(detail, color = Aurora.TextMid, fontSize = 11.5.sp, lineHeight = 16.sp)
@@ -293,7 +296,7 @@ private fun ScreenTitle(title: String, subtitle: String) {
                 .border(androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), RoundedCornerShape(8.dp)),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Filled.ShowChart, null, tint = Aurora.Cyan, modifier = Modifier.size(17.dp))
+            Icon(Icons.AutoMirrored.Filled.ShowChart, null, tint = Aurora.Cyan, modifier = Modifier.size(17.dp))
         }
     }
 }

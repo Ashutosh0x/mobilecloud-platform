@@ -40,7 +40,8 @@ on testnet on 2026-11-21 — including live rejections of six attack classes.
 
 | Document | Contents |
 | :--- | :--- |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Dual-cadence assurance model, component dataflow |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Dual-cadence assurance model, component dataflow, platform real-time plane |
+| [REALTIME-SYNC.md](REALTIME-SYNC.md) | Unified Web ⇄ Android real-time sync: event envelope, transactional outbox, WebSocket gateway protocol, cursor recovery, discovery, cross-device auth, limits |
 | [VERIFIED-BASELINE.md](VERIFIED-BASELINE.md) | T1–T12 testnet evidence: tx hashes, ledgers, live attack rejections |
 | [SOLVENCY-MODEL.md](SOLVENCY-MODEL.md) | Basis-point scale, thresholds (10,000 / 9,950), ratio math |
 | [PROTOCOL-30-XDR.md](PROTOCOL-30-XDR.md) | XDR wire-format invariants and the `Option<ScVec>` presence flag |

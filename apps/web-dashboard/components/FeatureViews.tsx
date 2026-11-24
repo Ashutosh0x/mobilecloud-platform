@@ -68,7 +68,10 @@ export function ProjectsView() {
         <Confirm title="Delete this project?" body="Deployments and domain records for it are removed. Files already written are left on disk." onCancel={() => setDrop(null)} onYes={() => {
           const id = drop;
           setDrop(null);
-          run(() => call(`projects/${id}`, { method: "DELETE" }), setToast, "Project deleted");
+          run(() => call(`projects/${id}`, { method: "DELETE" }, (s) => ({
+            // Optimistic: hide it immediately, restore it if the server refuses.
+            projects: s.projects.filter((p) => p.id !== id),
+          })), setToast, "Project deleted");
         }} />
       )}
     </>
@@ -144,7 +147,7 @@ export function DomainsView() {
         ))}
         {rows.length === 0 && <p className="empty">No hostnames recorded.</p>}
       </article>
-      {drop && <Confirm title="Remove this hostname?" body="Only the local record is deleted." onCancel={() => setDrop(null)} onYes={() => { const id = drop; setDrop(null); run(() => call(`domains/${id}`, { method: "DELETE" }), setToast, "Hostname removed"); }} />}
+      {drop && <Confirm title="Remove this hostname?" body="Only the local record is deleted." onCancel={() => setDrop(null)} onYes={() => { const id = drop; setDrop(null); run(() => call(`domains/${id}`, { method: "DELETE" }, (s) => ({ domains: s.domains.filter((d) => d.id !== id) })), setToast, "Hostname removed"); }} />}
     </>
   );
 }

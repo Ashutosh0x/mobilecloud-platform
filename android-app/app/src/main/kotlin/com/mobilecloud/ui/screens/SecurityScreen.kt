@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -118,7 +119,7 @@ fun SecurityScreen() {
                     },
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = AppFonts.Mono,
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(keystore.detail, color = Aurora.TextMid, fontSize = 11.sp, lineHeight = 15.sp)
@@ -137,12 +138,12 @@ fun SecurityScreen() {
                     SectionLabel("HARDWARE KEY")
                 }
                 Spacer(Modifier.height(10.dp))
-                Text("Algorithm  ${keystore.keyAlgorithm}", color = Aurora.TextMid, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                Text("Algorithm  ${keystore.keyAlgorithm}", color = Aurora.TextMid, fontSize = 12.sp, fontFamily = AppFonts.Mono)
                 Text(
                     "SHA-256  ${keystore.publicKeySha256.take(24)}…",
                     color = Aurora.Cyan,
                     fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = AppFonts.Mono,
                 )
                 Spacer(Modifier.height(12.dp))
                 Button(

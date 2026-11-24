@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -47,6 +48,7 @@ import com.mobilecloud.core.TradingEngineController
 import com.mobilecloud.security.HardwareAttestation
 import com.mobilecloud.ui.components.GlowCard
 import com.mobilecloud.ui.components.IconBadge
+import com.mobilecloud.ui.components.KVRow
 import com.mobilecloud.ui.components.RefSourceChip
 import com.mobilecloud.ui.components.SectionLabel
 import com.mobilecloud.ui.components.StatusPill
@@ -122,7 +124,7 @@ fun HardwareSettingsScreen() {
                 }
                 Spacer(Modifier.height(12.dp))
                 if (t == null) {
-                    Text("reading BatteryManager…", color = Aurora.TextLow, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                    Text("reading BatteryManager…", color = Aurora.TextLow, fontSize = 12.sp, fontFamily = AppFonts.Mono)
                 } else {
                     KVRow("Charge state", "${t.battery.batteryStatus} · ${t.battery.batteryPercent}% · ${t.battery.batteryCurrentMicroAmps / 1000} mA")
                     KVRow("Cell temperature", "%.1f °C".format(t.battery.batteryTempTenthsC / 10.0))
@@ -158,7 +160,7 @@ fun HardwareSettingsScreen() {
                         "TEE" -> Aurora.Cyan
                         else -> Aurora.Amber
                     },
-                    fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono,
                 )
                 Spacer(Modifier.height(4.dp))
                 KVRow("Algorithm", keystore.keyAlgorithm)
@@ -223,7 +225,7 @@ fun HardwareSettingsScreen() {
                         soc > 41.0 -> Aurora.Amber
                         else -> Aurora.GlowGreen
                     },
-                    fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp, fontFamily = AppFonts.Mono,
                 )
                 Spacer(Modifier.height(6.dp))
                 val halted = TradingEngineController.state.value.halted
@@ -238,7 +240,7 @@ fun HardwareSettingsScreen() {
                         else
                             "Trading engine state: clear",
                         color = if (halted) Aurora.Red else Aurora.GlowGreen,
-                        fontSize = 11.5.sp, fontFamily = FontFamily.Monospace,
+                        fontSize = 11.5.sp, fontFamily = AppFonts.Mono,
                     )
                 }
                 Spacer(Modifier.height(8.dp))

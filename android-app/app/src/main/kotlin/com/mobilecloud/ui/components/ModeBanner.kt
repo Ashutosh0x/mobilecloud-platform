@@ -10,6 +10,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -44,12 +45,12 @@ fun ModeBanner(mode: OperatingMode, detail: String, modifier: Modifier = Modifie
             Text(
                 "MODE: ",
                 color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = AppFonts.Mono,
             )
             Text(
                 mode.label,
                 color = labelColor, fontSize = 11.sp, fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = AppFonts.Mono,
             )
         }
         Text(detail, color = TextSecondary, fontSize = 11.sp)
@@ -63,7 +64,7 @@ fun ProvenanceChip(source: String, modifier: Modifier = Modifier) {
         "src: $source",
         color = Accent,
         fontSize = 9.sp,
-        fontFamily = FontFamily.Monospace,
+        fontFamily = AppFonts.Mono,
         modifier = modifier
             .background(Accent.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
             .padding(horizontal = 6.dp, vertical = 2.dp),

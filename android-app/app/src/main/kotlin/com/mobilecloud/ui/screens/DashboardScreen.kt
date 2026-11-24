@@ -1,6 +1,7 @@
 package com.mobilecloud.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,6 +47,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -109,7 +111,7 @@ fun DashboardScreen() {
                         color = Aurora.Bg,
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = AppFonts.Mono,
                     )
                 }
                 Spacer(Modifier.width(10.dp))
@@ -170,7 +172,7 @@ fun DashboardScreen() {
         if (t == null) {
             GlowCard(Modifier.fillMaxWidth()) {
                 Box(Modifier.fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) {
-                    Text("reading live telemetry…", color = Aurora.TextLow, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                    Text("reading live telemetry…", color = Aurora.TextLow, fontSize = 12.sp, fontFamily = AppFonts.Mono)
                 }
             }
             return@Column
@@ -199,7 +201,7 @@ fun DashboardScreen() {
                             "${t.socModel ?: t.deviceBoard} · Android ${t.androidRelease} (SDK ${t.sdkInt}) · arm64-v8a",
                             color = Aurora.TextMid,
                             fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = AppFonts.Mono,
                         )
                     }
                 }
@@ -500,7 +502,7 @@ private fun TelemetryTile(
         Column(Modifier.weight(1f)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(label, color = Aurora.TextMid, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                Text(value, color = Aurora.TextHi, fontSize = 11.5.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                Text(value, color = Aurora.TextHi, fontSize = 11.5.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
             }
             Spacer(Modifier.height(2.dp))
             Text(detail, color = Aurora.TextFaint, fontSize = 9.5.sp)

@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +47,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
+import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -59,7 +61,7 @@ import kotlinx.coroutines.delay
  * GlowCard, SectionLabel, StatusPill, IconBadge, ProvenanceChip (styled),
  * MetricCard, ProgressRing, LinearMeter, Sparkline, TrafficChart,
  * MeshTopology, DotTickSlider, HoldToConfirmButton.
- * =========================================================================
+ * ========================================================================= */
 
 /**
  * Signature surface: dark card with a crisp border matching web console tokens.
@@ -174,7 +176,7 @@ fun RefSourceChip(source: String, modifier: Modifier = Modifier) {
         "src: $source",
         color = Aurora.ChipText,
         fontSize = 10.sp,
-        fontFamily = FontFamily.Monospace,
+        fontFamily = AppFonts.Mono,
         modifier = modifier
             .clip(RoundedCornerShape(6.dp))
             .border(1.dp, Aurora.Border, RoundedCornerShape(6.dp))
@@ -207,7 +209,7 @@ fun MetricCard(
                 color = Aurora.TextHi,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = AppFonts.Mono,
                 letterSpacing = (-0.5).sp,
             )
             if (meter != null) {
@@ -496,7 +498,7 @@ fun HoldToConfirmButton(
             .clip(RoundedCornerShape(10.dp))
             .background(container)
             .pointerInput(enabled) {
-                androidx.compose.foundation.gestures.detectTapGestures(
+                detectTapGestures(
                     onPress = {
                         if (enabled) { held = true }
                         try { awaitRelease() } finally { held = false; if (progress < 1f) progress = 0f }
@@ -554,7 +556,7 @@ fun KVRow(
         Text(
             value, color = valueColor, fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
-            fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,
+            fontFamily = if (mono) AppFonts.Mono else AppFonts.Sans,
         )
     }
 }

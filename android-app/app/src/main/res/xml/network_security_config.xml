@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Defense-in-depth (GitHub manifest pattern, decompilation report §17.3 #9):
-     cleartext is forbidden everywhere except the on-device loopback to the
-     mobilecloud-core supervisor daemon. Every WAN destination stays TLS-only. -->
+<!-- The console connects to a self-hosted control plane whose address the user
+     enters at sign-in (e.g. http://10.0.2.2:3000 on an emulator, or a LAN IP).
+     Those deployments commonly serve plain HTTP, so cleartext is permitted and
+     the loopback daemon stays explicitly allowed. -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false" />
+    <base-config cleartextTrafficPermitted="true" />
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">127.0.0.1</domain>
         <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">10.0.2.2</domain>
     </domain-config>
 </network-security-config>

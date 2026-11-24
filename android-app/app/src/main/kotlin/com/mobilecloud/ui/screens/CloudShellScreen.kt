@@ -1,6 +1,7 @@
 package com.mobilecloud.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +34,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -113,7 +115,7 @@ fun CloudShellScreen() {
                     color = if (connected) Aurora.TextHi else Aurora.TextLow,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = AppFonts.Mono,
                 )
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -121,7 +123,7 @@ fun CloudShellScreen() {
                 Spacer(Modifier.width(5.dp))
                 Text(
                     if (connected) "PTY alive" else "connecting",
-                    color = Aurora.TextFaint, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                    color = Aurora.TextFaint, fontSize = 10.sp, fontFamily = AppFonts.Mono,
                 )
             }
         }
@@ -156,7 +158,7 @@ fun CloudShellScreen() {
                 placeholder = { Text("type a command…", color = Aurora.TextLow, fontSize = 12.sp) },
                 textStyle = TextStyle(
                     color = Aurora.TextHi,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = AppFonts.Mono,
                     fontSize = 13.sp,
                 ),
                 singleLine = true,

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -29,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -78,8 +80,8 @@ fun MeshScreen() {
         GlowCard(Modifier.fillMaxWidth(), glow = Aurora.Border, corner = 12.dp) {
             Column(Modifier.padding(14.dp)) {
                 Row {
-                    Text("MODE: ", color = Aurora.TextLow, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                    Text("SIMULATION", color = Aurora.Amber, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    Text("MODE: ", color = Aurora.TextLow, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
+                    Text("SIMULATION", color = Aurora.Amber, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
@@ -104,7 +106,7 @@ fun MeshScreen() {
             "specimen diagram — not an active network",
             color = Aurora.TextFaint,
             fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = AppFonts.Mono,
             modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
         )
 
@@ -177,7 +179,7 @@ private fun RttBar(label: String, ms: Int, color: Color) {
                 color = color,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = AppFonts.Mono,
             )
         }
         Spacer(Modifier.height(5.dp))
@@ -196,9 +198,9 @@ private fun PeerRow(name: String, rtt: String, route: String, color: Color) {
         Box(Modifier.size(7.dp).background(color, CircleShape))
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
-            Text(name, color = Aurora.TextHi, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+            Text(name, color = Aurora.TextHi, fontSize = 13.sp, fontFamily = AppFonts.Mono)
             Text(route, color = Aurora.TextFaint, fontSize = 10.sp)
         }
-        Text(rtt, color = color, fontSize = 13.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+        Text(rtt, color = color, fontSize = 13.sp, fontWeight = FontWeight.Bold, fontFamily = AppFonts.Mono)
     }
 }

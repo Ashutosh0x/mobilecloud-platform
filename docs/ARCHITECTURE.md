@@ -70,3 +70,39 @@ that is the acceptance posture.
 It publishes status; it does not control third parties. Halting trading or
 minting requires external wiring (e.g. `trading-engine::soroban_circuit_breaker`
 or a token transfer hook) — see GOVERNANCE.md §Advisory model.
+
+## The MobileCloud plane: Web console ⇄ Android node [VERIFIED_SOURCE]
+
+The PoR plane above is deliberately independent of the platform plane. The
+platform plane has its own architecture, documented in full in
+[REALTIME-SYNC.md](REALTIME-SYNC.md):
+
+```mermaid
+flowchart LR
+    W["Web Console :3210"] <-->|HTTPS / WSS| API["Dashboard API :3210"]
+    A["Android Node"] <-->|HTTPS / WSS| API
+    API -->|"same transaction as the data write"| OUT[("Outbox: events + event_cursors")]
+    OUT -->|"tail by seq"| GW["Realtime gateway :3211"]
+    GW -->|"owner-scoped event frames"| W
+    GW -->|"owner-scoped event frames"| A
+    OUT --> SYNC["GET /api/sync/changes?cursor="]
+    SYNC -.->|offline recovery| W
+    SYNC -.->|offline recovery| A
+```
+
+Key decisions:
+
+| Decision | Reason |
+| :--- | :--- |
+| Separate gateway process on `:3211` | A Next.js route handler cannot answer an HTTP `upgrade`; the gateway tails the same SQLite WAL file |
+| Transactional outbox instead of socket-only notification | A client that is asleep must still recover the change; delivery is never the only record |
+| Global monotonic `sequence` + `event_id` | Ordering, gap detection, cursor bookkeeping and idempotent processing from one counter |
+| Authorized catch-up endpoint rather than client-side diffing | The server decides what a tenant may see; clients cannot read another account's log |
+| Endpoint discovery with bounded timeouts, single-flight, validated caching | Deterministic on Wi-Fi, mobile data, VPN or USB without depending on `adb reverse` |
+| Explicit connection state machine | `401` is "sign in required", not "unreachable"; `403` is not a reason to re-discover |
+
+Honest status: the outbox, gateway, authorization and offline-recovery paths are
+covered by automated tests (`apps/web-dashboard`, 14 tests) that spawn the real
+gateway. Conflict handling is last-write-wins; multi-control-plane scaling and a
+packaged public tunnel are **not** implemented. See REALTIME-SYNC.md §13.
+

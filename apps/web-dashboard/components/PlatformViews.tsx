@@ -66,7 +66,9 @@ export function FirewallView() {
               <div className="name">{rule.name}</div>
               <div className="sub">{rule.action} when {rule.matchKey} {rule.matchOp} {rule.matchValue}</div>
             </div>
-            <button className="danger" type="button" onClick={() => run(() => call(`firewall/${rule.id}`, { method: "DELETE" }), setToast, "Rule removed")}>Remove</button>
+            <button className="danger" type="button" onClick={() => run(() => call(`firewall/${rule.id}`, { method: "DELETE" }, (s) => ({
+              firewall: { ...s.firewall, rules: s.firewall.rules.filter((r) => r.id !== rule.id) },
+            })), setToast, "Rule removed")}>Remove</button>
           </div>
         ))}
         {state.firewall.rules.length === 0 && <p className="empty">No firewall rules stored.</p>}

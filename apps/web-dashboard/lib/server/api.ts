@@ -6,10 +6,17 @@ import { dataRoot, hashPassword, newId, openDb, tokenHash, verifyPassword } from
 import { collectAnalytics, collectHost, collectMetrics } from "./metrics.ts";
 import { capabilities, collectObservability, inspectRequest, listBuilds, listDrives, listFirewallEvents, listRules, listWorkflows, observedJa4, summarizeVitals, trafficSummary } from "./platform.ts";
 import { approveDevice, clearProtection, createToken, gateCookie, identityProviders, listNotifications, listSessions, listTokens, listWebhooks, notify, pollDevice, protectionStatus, readGate, setProtection, startDevice, unlockProtection, userFromBearer } from "./identity.ts";
+import { changesSince, publish, tx } from "./events.ts";
 
 const COOKIE = "mc_session";
 const WEEK = 7 * 24 * 3600 * 1000;
 const attempts = new Map<string, { n: number; reset: number }>();
+
+/** Port the realtime gateway listens on; advertised through `GET /api/health`. */
+function realtimePort(): number {
+  const raw = Number(process.env.MOBILECLOUD_REALTIME_PORT ?? 3211);
+  return Number.isFinite(raw) && raw > 0 ? raw : 3211;
+}
 
 type SessionUser = User & { password_hash?: string };
 
@@ -155,9 +162,12 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       if (existing) return { response: json({ error: "An account with that email already exists" }, 409), status: 409, owner: null };
       const id = newId();
       const count = db.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number };
-      db.prepare(
-        "INSERT INTO users (id, email, name, password_hash, role, plan, created_at) VALUES (?, ?, ?, ?, ?, 'community', ?)",
-      ).run(id, email, name, hashPassword(password), count.n === 0 ? "owner" : "member", Date.now());
+      tx(db, () => {
+        db.prepare(
+          "INSERT INTO users (id, email, name, password_hash, role, plan, created_at) VALUES (?, ?, ?, ?, ?, 'community', ?)",
+        ).run(id, email, name, hashPassword(password), count.n === 0 ? "owner" : "member", Date.now());
+        publish(db, id, "account.updated", id, { id, email, name, created: true });
+      });
       log(id, "info", "auth", "account created");
       return issueSession(id, req);
     }
@@ -181,7 +191,16 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
 
   if (key === "POST auth/logout") {
     const token = readCookie(req);
-    if (token) db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(tokenHash(token));
+    if (token) {
+      const hash = tokenHash(token);
+      const row = db.prepare("SELECT id, user_id AS userId FROM sessions WHERE token_hash = ?").get(hash) as
+        | { id: string | null; userId: string }
+        | undefined;
+      tx(db, () => {
+        db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(hash);
+        if (row) publish(db, row.userId, "session.revoked", row.id ?? hash, { sessionId: row.id ?? hash, reason: "signed_out" });
+      });
+    }
     const headers = new Headers();
     headers.append("set-cookie", cookieHeader("", 0));
     return { response: json({ ok: true }, 200, headers), status: 200, owner: null };
@@ -192,12 +211,50 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     return { response: json({ user }), status: 200, owner: user?.id ?? null };
   }
 
+  // Public service-identity probe. Lets a client confirm it found a MobileCloud
+  // control plane before trusting the endpoint. No secrets, no auth required.
+  // It also advertises where the realtime gateway lives so a client never has
+  // to guess a port.
+  if (key === "GET health") {
+    return {
+      response: json({
+        service: "MobileCloud",
+        apiVersion: 1,
+        status: "ok",
+        environment: process.env.NODE_ENV ?? "development",
+        time: new Date().toISOString(),
+        realtime: {
+          transport: "websocket",
+          path: "/api/realtime",
+          port: realtimePort(),
+          fallback: "/api/sync/changes",
+          schemaVersion: 1,
+        },
+      }),
+      status: 200,
+      owner: null,
+    };
+  }
+
   const user = requireUser(req);
   const owner = user.id;
   const blocked = inspectRequest(db, owner, req, parts.join("/"));
   if (blocked) {
     notify(db, owner, "firewall.denied", "Request blocked", blocked.error);
     return { response: json({ error: blocked.error }, blocked.status), status: blocked.status, owner };
+  }
+
+  // Authorized catch-up feed. A client that was offline (or whose socket
+  // dropped) replays from its last cursor and receives every change it missed,
+  // scoped to its own account. Returns the new cursor to persist.
+  if (key === "GET sync/changes") {
+    const params = new URL(req.url).searchParams;
+    const rawCursor = Number(params.get("cursor") ?? 0);
+    const cursor = Number.isFinite(rawCursor) && rawCursor > 0 ? Math.floor(rawCursor) : 0;
+    const rawLimit = Number(params.get("limit") ?? 500);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(1000, Math.floor(rawLimit)) : 500;
+    const page = changesSince(db, owner, cursor, limit);
+    return { response: json({ ...page, account_id: owner }), status: 200, owner };
   }
 
   if (key === "GET overview") {
@@ -258,17 +315,27 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     if (!["Next.js", "Vite", "Astro", "Nuxt", "Remix", "React"].includes(framework)) {
       return { response: json({ error: "Unknown framework" }, 400), status: 400, owner };
     }
-    db.prepare(
-      "INSERT INTO projects (id, owner_id, name, framework, target, created_at) VALUES (?, ?, ?, ?, 'production', ?)",
-    ).run(newId(), owner, name, framework, Date.now());
+    const id = newId();
+    tx(db, () => {
+      db.prepare(
+        "INSERT INTO projects (id, owner_id, name, framework, target, created_at) VALUES (?, ?, ?, ?, 'production', ?)",
+      ).run(id, owner, name, framework, Date.now());
+      publish(db, owner, "project.created", id, { id, name, framework, target: "production" });
+    });
     log(owner, "info", "projects", `created ${name}`);
-    return { response: json({ ok: true }), status: 201, owner };
+    return { response: json({ ok: true, id }), status: 201, owner };
   }
   if (method === "DELETE" && parts[0] === "projects" && parts[1]) {
-    db.prepare("DELETE FROM deployments WHERE owner_id = ? AND project_id = ?").run(owner, parts[1]);
-    db.prepare("DELETE FROM domains WHERE owner_id = ? AND project_id = ?").run(owner, parts[1]);
-    const result = db.prepare("DELETE FROM projects WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
-    if (Number(result.changes) === 0) return { response: json({ error: "Project not found" }, 404), status: 404, owner };
+    const existing = db.prepare("SELECT name FROM projects WHERE owner_id = ? AND id = ?").get(owner, parts[1]) as
+      | { name: string }
+      | undefined;
+    if (!existing) return { response: json({ error: "Project not found" }, 404), status: 404, owner };
+    tx(db, () => {
+      db.prepare("DELETE FROM deployments WHERE owner_id = ? AND project_id = ?").run(owner, parts[1]);
+      db.prepare("DELETE FROM domains WHERE owner_id = ? AND project_id = ?").run(owner, parts[1]);
+      db.prepare("DELETE FROM projects WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
+      publish(db, owner, "project.deleted", parts[1], { id: parts[1], name: existing.name });
+    });
     log(owner, "warn", "projects", `deleted ${parts[1]}`);
     return { response: json({ ok: true }), status: 200, owner };
   }
@@ -281,9 +348,15 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const note = builder
       ? "A builder URL is set, but this server does not dispatch builds yet."
       : "No build runner is configured. Set MOBILECLOUD_BUILDER_URL to a reachable builder.";
-    db.prepare(
-      "INSERT INTO deployments (id, owner_id, project_id, status, note, created_at) VALUES (?, ?, ?, 'blocked', ?, ?)",
-    ).run(newId(), owner, project.id, note, Date.now());
+    const id = newId();
+    tx(db, () => {
+      db.prepare(
+        "INSERT INTO deployments (id, owner_id, project_id, status, note, created_at) VALUES (?, ?, ?, 'blocked', ?, ?)",
+      ).run(id, owner, project.id, note, Date.now());
+      publish(db, owner, "deployment.updated", id, {
+        id, projectId: project.id, project: project.name, status: "blocked", note,
+      });
+    });
     log(owner, "warn", "builder", `${project.name}: ${note}`);
     notify(db, owner, "deployment.blocked", "Deployment not built", `${project.name}: ${note}`);
     return { response: json({ ok: true, status: "blocked", note }), status: 201, owner };
@@ -296,15 +369,25 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const project = db.prepare("SELECT id FROM projects WHERE owner_id = ? AND name = ?").get(owner, str(input.project)) as { id: string } | undefined;
     if (!project) return { response: json({ error: "Project not found" }, 404), status: 404, owner };
     const detail = "Saved locally. No DNS provider is configured, so no records were published.";
-    db.prepare(
-      "INSERT INTO domains (id, owner_id, project_id, host, status, detail, created_at) VALUES (?, ?, ?, ?, 'recorded', ?, ?)",
-    ).run(newId(), owner, project.id, host, detail, Date.now());
+    const id = newId();
+    tx(db, () => {
+      db.prepare(
+        "INSERT INTO domains (id, owner_id, project_id, host, status, detail, created_at) VALUES (?, ?, ?, ?, 'recorded', ?, ?)",
+      ).run(id, owner, project.id, host, detail, Date.now());
+      publish(db, owner, "configuration.updated", id, { resource: "domain", id, host, projectId: project.id, status: "recorded" });
+    });
     log(owner, "info", "domains", `recorded ${host}`);
     return { response: json({ ok: true }), status: 201, owner };
   }
   if (method === "DELETE" && parts[0] === "domains" && parts[1]) {
-    const result = db.prepare("DELETE FROM domains WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
-    if (Number(result.changes) === 0) return { response: json({ error: "Domain not found" }, 404), status: 404, owner };
+    const existing = db.prepare("SELECT host FROM domains WHERE owner_id = ? AND id = ?").get(owner, parts[1]) as
+      | { host: string }
+      | undefined;
+    if (!existing) return { response: json({ error: "Domain not found" }, 404), status: 404, owner };
+    tx(db, () => {
+      db.prepare("DELETE FROM domains WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
+      publish(db, owner, "configuration.updated", parts[1], { resource: "domain", id: parts[1], host: existing.host, deleted: true });
+    });
     return { response: json({ ok: true }), status: 200, owner };
   }
 
@@ -314,7 +397,11 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     mkdirSync(dir, { recursive: true });
     const file = join(dir, `${name}.sqlite`);
     writeFileSync(file, "", { flag: "wx" });
-    db.prepare("INSERT INTO db_files (id, owner_id, name, path, created_at) VALUES (?, ?, ?, ?, ?)").run(newId(), owner, name, file, Date.now());
+    const id = newId();
+    tx(db, () => {
+      db.prepare("INSERT INTO db_files (id, owner_id, name, path, created_at) VALUES (?, ?, ?, ?, ?)").run(id, owner, name, file, Date.now());
+      publish(db, owner, "configuration.updated", id, { resource: "database", id, name });
+    });
     log(owner, "info", "databases", `created ${name}.sqlite`);
     return { response: json({ ok: true, bytes: statSync(file).size }), status: 201, owner };
   }
@@ -324,9 +411,13 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const name = safeSlug(str(input.name), "Function name");
     const routePath = str(input.route);
     if (!routePath.startsWith("/")) return { response: json({ error: "Route must start with /" }, 400), status: 400, owner };
-    db.prepare(
-      "INSERT INTO functions (id, owner_id, name, route, invocations, created_at) VALUES (?, ?, ?, ?, 0, ?)",
-    ).run(newId(), owner, name, routePath, Date.now());
+    const id = newId();
+    tx(db, () => {
+      db.prepare(
+        "INSERT INTO functions (id, owner_id, name, route, invocations, created_at) VALUES (?, ?, ?, ?, 0, ?)",
+      ).run(id, owner, name, routePath, Date.now());
+      publish(db, owner, "configuration.updated", id, { resource: "function", id, name, route: routePath });
+    });
     log(owner, "info", "functions", `registered ${name} with no handler source`);
     return { response: json({ ok: true }), status: 201, owner };
   }
@@ -353,9 +444,13 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const file = join(dir, keyName.replace(/\//g, "__"));
     writeFileSync(file, bytes);
     const size = statSync(file).size;
-    db.prepare(
-      "INSERT INTO objects (id, owner_id, bucket, key, path, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).run(newId(), owner, bucket, keyName, file, size, Date.now());
+    const id = newId();
+    tx(db, () => {
+      db.prepare(
+        "INSERT INTO objects (id, owner_id, bucket, key, path, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run(id, owner, bucket, keyName, file, size, Date.now());
+      publish(db, owner, "configuration.updated", id, { resource: "object", id, bucket, key: keyName, bytes: size });
+    });
     log(owner, "info", "storage", `wrote ${bucket}/${keyName} (${size} bytes)`);
     return { response: json({ ok: true, bytes: size }), status: 201, owner };
   }
@@ -365,9 +460,13 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const email = str(input.email).toLowerCase();
     const name = str(input.name);
     if (!email.includes("@") || !name) return { response: json({ error: "Name and email are required" }, 400), status: 400, owner };
-    db.prepare(
-      "INSERT INTO invites (id, owner_id, email, name, role, email_sent, created_at) VALUES (?, ?, ?, ?, 'member', 0, ?)",
-    ).run(newId(), owner, email, name, Date.now());
+    const id = newId();
+    tx(db, () => {
+      db.prepare(
+        "INSERT INTO invites (id, owner_id, email, name, role, email_sent, created_at) VALUES (?, ?, ?, ?, 'member', 0, ?)",
+      ).run(id, owner, email, name, Date.now());
+      publish(db, owner, "configuration.updated", id, { resource: "invite", id, email, name });
+    });
     log(owner, "info", "team", `saved invite for ${email}. SMTP is not configured, so no email was sent.`);
     return { response: json({ ok: true, emailSent: false }), status: 201, owner };
   }
@@ -375,16 +474,27 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   if (key === "POST settings") {
     const input = await body(req);
     if (typeof input.recordPageViews !== "boolean") return { response: json({ error: "recordPageViews must be boolean" }, 400), status: 400, owner };
-    db.prepare(
-      "INSERT INTO settings (owner_id, key, value) VALUES (?, 'recordPageViews', ?) ON CONFLICT(owner_id, key) DO UPDATE SET value = excluded.value",
-    ).run(owner, input.recordPageViews ? "1" : "0");
+    tx(db, () => {
+      db.prepare(
+        "INSERT INTO settings (owner_id, key, value) VALUES (?, 'recordPageViews', ?) ON CONFLICT(owner_id, key) DO UPDATE SET value = excluded.value",
+      ).run(owner, input.recordPageViews ? "1" : "0");
+      publish(db, owner, "configuration.updated", owner, { resource: "settings", recordPageViews: input.recordPageViews });
+    });
     return { response: json({ ok: true }), status: 200, owner };
   }
 
   if (method === "DELETE" && parts[0] === "sessions" && parts[1]) {
     const current = readCookie(req) ? tokenHash(readCookie(req) as string) : "";
-    const result = db.prepare("DELETE FROM sessions WHERE user_id = ? AND (id = ? OR token_hash = ?) AND token_hash != ?").run(owner, parts[1], parts[1], current);
-    if (Number(result.changes) === 0) return { response: json({ error: "Session not found, or it is the current browser session. Use sign out for this one." }, 404), status: 404, owner };
+    const target = db.prepare("SELECT id, token_hash AS tokenHash FROM sessions WHERE user_id = ? AND (id = ? OR token_hash = ?)").get(owner, parts[1], parts[1]) as
+      | { id: string | null; tokenHash: string }
+      | undefined;
+    if (!target || target.tokenHash === current) {
+      return { response: json({ error: "Session not found, or it is the current browser session. Use sign out for this one." }, 404), status: 404, owner };
+    }
+    tx(db, () => {
+      db.prepare("DELETE FROM sessions WHERE user_id = ? AND token_hash = ?").run(owner, target.tokenHash);
+      publish(db, owner, "session.revoked", target.id ?? target.tokenHash, { sessionId: target.id ?? target.tokenHash, reason: "revoked_by_user" });
+    });
     return { response: json({ ok: true }), status: 200, owner };
   }
 
@@ -399,14 +509,21 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   }
 
   if (method === "DELETE" && parts[0] === "tokens" && parts[1]) {
-    const result = db.prepare("DELETE FROM access_tokens WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
-    if (Number(result.changes) === 0) return { response: json({ error: "Token not found" }, 404), status: 404, owner };
+    const existing = db.prepare("SELECT name FROM access_tokens WHERE owner_id = ? AND id = ?").get(owner, parts[1]) as
+      | { name: string }
+      | undefined;
+    if (!existing) return { response: json({ error: "Token not found" }, 404), status: 404, owner };
+    tx(db, () => {
+      db.prepare("DELETE FROM access_tokens WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
+      publish(db, owner, "configuration.updated", parts[1], { resource: "token", id: parts[1], name: existing.name, deleted: true });
+    });
     return { response: json({ ok: true }), status: 200, owner };
   }
 
   if (key === "POST device/approve") {
     const code = str((await body(req)).userCode);
     if (!approveDevice(db, owner, code)) return { response: json({ error: "Code is unknown, expired, or already used" }, 404), status: 404, owner };
+    publish(db, owner, "configuration.updated", code.toUpperCase(), { resource: "device", code: code.toUpperCase(), approved: true });
     notify(db, owner, "auth.device", "Device approved", `Approved device code ${code.toUpperCase()}`);
     return { response: json({ ok: true }), status: 200, owner };
   }
@@ -415,6 +532,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const password = String((await body(req)).password ?? "");
     if (password.length < 8) return { response: json({ error: "Password must be at least 8 characters" }, 400), status: 400, owner };
     const gate = setProtection(db, owner, password);
+    publish(db, owner, "configuration.updated", owner, { resource: "protection", required: true });
     const headers = new Headers();
     headers.append("set-cookie", gateCookie(gate, WEEK / 1000));
     return { response: json({ ok: true }, 200, headers), status: 200, owner };
@@ -430,6 +548,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
 
   if (key === "DELETE protection") {
     clearProtection(db, owner);
+    publish(db, owner, "configuration.updated", owner, { resource: "protection", required: false });
     const headers = new Headers();
     headers.append("set-cookie", gateCookie("", 0));
     return { response: json({ ok: true }, 200, headers), status: 200, owner };
@@ -440,28 +559,42 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const url = str(input.url);
     if (!/^https?:\/\//.test(url)) return { response: json({ error: "Enter an http or https URL" }, 400), status: 400, owner };
     const secret = randomBytes(16).toString("hex");
-    db.prepare("INSERT INTO webhooks (id, owner_id, url, secret, events, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
-      newId(), owner, url, secret, "deployment.blocked,firewall.denied,auth.session,auth.device", Date.now(),
-    );
+    const id = newId();
+    tx(db, () => {
+      db.prepare("INSERT INTO webhooks (id, owner_id, url, secret, events, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+        id, owner, url, secret, "deployment.blocked,firewall.denied,auth.session,auth.device", Date.now(),
+      );
+      publish(db, owner, "configuration.updated", id, { resource: "webhook", id, url });
+    });
     return { response: json({ secret }, 201), status: 201, owner };
   }
 
   if (method === "DELETE" && parts[0] === "webhooks" && parts[1]) {
-    const result = db.prepare("DELETE FROM webhooks WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
-    if (Number(result.changes) === 0) return { response: json({ error: "Webhook not found" }, 404), status: 404, owner };
+    const existing = db.prepare("SELECT url FROM webhooks WHERE owner_id = ? AND id = ?").get(owner, parts[1]) as
+      | { url: string }
+      | undefined;
+    if (!existing) return { response: json({ error: "Webhook not found" }, 404), status: 404, owner };
+    tx(db, () => {
+      db.prepare("DELETE FROM webhooks WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
+      publish(db, owner, "configuration.updated", parts[1], { resource: "webhook", id: parts[1], url: existing.url, deleted: true });
+    });
     return { response: json({ ok: true }), status: 200, owner };
   }
 
   if (method === "PATCH" && parts[0] === "notifications" && parts[1]) {
     const result = db.prepare("UPDATE notifications SET read = 1 WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
     if (Number(result.changes) === 0) return { response: json({ error: "Notification not found" }, 404), status: 404, owner };
+    publish(db, owner, "notification.read", parts[1], { id: parts[1], read: true });
     return { response: json({ ok: true }), status: 200, owner };
   }
 
   if (key === "POST billing") {
     const plan = str((await body(req)).plan);
     if (!["community", "mesh", "hardware"].includes(plan)) return { response: json({ error: "Unknown plan" }, 400), status: 400, owner };
-    db.prepare("UPDATE users SET plan = ? WHERE id = ?").run(plan, owner);
+    tx(db, () => {
+      db.prepare("UPDATE users SET plan = ? WHERE id = ?").run(plan, owner);
+      publish(db, owner, "account.updated", owner, { id: owner, plan });
+    });
     log(owner, "info", "billing", `plan preference set to ${plan}. No payment provider is configured, so nothing was charged.`);
     return { response: json({ ok: true, charged: false }), status: 200, owner };
   }
@@ -469,7 +602,10 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   if (key === "POST profile") {
     const name = str((await body(req)).name);
     if (name.length < 1 || name.length > 80) return { response: json({ error: "Name is required" }, 400), status: 400, owner };
-    db.prepare("UPDATE users SET name = ? WHERE id = ?").run(name, owner);
+    tx(db, () => {
+      db.prepare("UPDATE users SET name = ? WHERE id = ?").run(name, owner);
+      publish(db, owner, "account.updated", owner, { id: owner, name });
+    });
     return { response: json({ ok: true }), status: 200, owner };
   }
 
@@ -499,15 +635,25 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     }
     const limitCount = action === "rate_limit" ? Math.min(10000, Math.max(1, Number(input.limitCount) || 60)) : null;
     const windowSec = action === "rate_limit" ? Math.min(86400, Math.max(1, Number(input.windowSec) || 60)) : null;
-    db.prepare(
-      "INSERT INTO firewall_rules (id, owner_id, name, action, match_key, match_op, match_value, header_name, limit_count, window_sec, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
-    ).run(newId(), owner, name, action, matchKey, matchOp, matchValue, str(input.headerName) || null, limitCount, windowSec, Date.now());
+    const id = newId();
+    tx(db, () => {
+      db.prepare(
+        "INSERT INTO firewall_rules (id, owner_id, name, action, match_key, match_op, match_value, header_name, limit_count, window_sec, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+      ).run(id, owner, name, action, matchKey, matchOp, matchValue, str(input.headerName) || null, limitCount, windowSec, Date.now());
+      publish(db, owner, "configuration.updated", id, { resource: "firewall_rule", id, name, action, matchKey, matchOp, matchValue });
+    });
     log(owner, "info", "firewall", `saved rule ${name}`);
     return { response: json({ ok: true }), status: 201, owner };
   }
   if (method === "DELETE" && parts[0] === "firewall" && parts[1]) {
-    const result = db.prepare("DELETE FROM firewall_rules WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
-    if (Number(result.changes) === 0) return { response: json({ error: "Rule not found" }, 404), status: 404, owner };
+    const existing = db.prepare("SELECT name FROM firewall_rules WHERE owner_id = ? AND id = ?").get(owner, parts[1]) as
+      | { name: string }
+      | undefined;
+    if (!existing) return { response: json({ error: "Rule not found" }, 404), status: 404, owner };
+    tx(db, () => {
+      db.prepare("DELETE FROM firewall_rules WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
+      publish(db, owner, "configuration.updated", parts[1], { resource: "firewall_rule", id: parts[1], name: existing.name, deleted: true });
+    });
     return { response: json({ ok: true }), status: 200, owner };
   }
 
@@ -520,25 +666,37 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const note = target === "android"
       ? "No bare-metal ARM64 runner, Gradle snapshot, or Android SDK is configured. The build was not started."
       : "No web build runner is configured. The build was not started.";
-    db.prepare(
-      "INSERT INTO builds (id, owner_id, project_id, target, status, note, created_at) VALUES (?, ?, ?, ?, 'blocked', ?, ?)",
-    ).run(newId(), owner, project.id, target, note, Date.now());
+    const id = newId();
+    tx(db, () => {
+      db.prepare(
+        "INSERT INTO builds (id, owner_id, project_id, target, status, note, created_at) VALUES (?, ?, ?, ?, 'blocked', ?, ?)",
+      ).run(id, owner, project.id, target, note, Date.now());
+      publish(db, owner, "build.updated", id, { id, projectId: project.id, project: project.name, target, status: "blocked", note });
+    });
     log(owner, "warn", "builds", `${project.name} ${target}: ${note}`);
     return { response: json({ ok: true, status: "blocked", note }), status: 201, owner };
   }
 
   if (key === "POST workflows") {
     const name = safeSlug(str((await body(req)).name), "Workflow name");
-    db.prepare("INSERT INTO workflows (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)").run(newId(), owner, name, Date.now());
+    const id = newId();
+    tx(db, () => {
+      db.prepare("INSERT INTO workflows (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)").run(id, owner, name, Date.now());
+      publish(db, owner, "configuration.updated", id, { resource: "workflow", id, name });
+    });
     return { response: json({ ok: true }), status: 201, owner };
   }
   if (method === "POST" && parts[0] === "workflows" && parts[2] === "run") {
     const row = db.prepare("SELECT id, name FROM workflows WHERE owner_id = ? AND id = ?").get(owner, parts[1]) as { id: string; name: string } | undefined;
     if (!row) return { response: json({ error: "Workflow not found" }, 404), status: 404, owner };
     const note = "Saved a run record. No workflow worker is configured, so no step was executed.";
-    db.prepare(
-      "INSERT INTO workflow_runs (id, owner_id, workflow_id, status, note, at) VALUES (?, ?, ?, 'not_executed', ?, ?)",
-    ).run(newId(), owner, row.id, note, Date.now());
+    const id = newId();
+    tx(db, () => {
+      db.prepare(
+        "INSERT INTO workflow_runs (id, owner_id, workflow_id, status, note, at) VALUES (?, ?, ?, 'not_executed', ?, ?)",
+      ).run(id, owner, row.id, note, Date.now());
+      publish(db, owner, "configuration.updated", row.id, { resource: "workflow_run", id, workflowId: row.id, workflow: row.name, status: "not_executed", note });
+    });
     log(owner, "warn", "workflows", `${row.name}: ${note}`);
     return { response: json({ ok: true, status: "not_executed", note }), status: 202, owner };
   }
@@ -547,7 +705,11 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const name = safeSlug(str((await body(req)).name), "Drive name");
     const dir = join(dataRoot(), "drives", owner, name);
     mkdirSync(dir, { recursive: true });
-    db.prepare("INSERT INTO drives (id, owner_id, name, path, created_at) VALUES (?, ?, ?, ?, ?)").run(newId(), owner, name, dir, Date.now());
+    const id = newId();
+    tx(db, () => {
+      db.prepare("INSERT INTO drives (id, owner_id, name, path, created_at) VALUES (?, ?, ?, ?, ?)").run(id, owner, name, dir, Date.now());
+      publish(db, owner, "configuration.updated", id, { resource: "drive", id, name });
+    });
     log(owner, "info", "drives", `created local directory ${name}`);
     return { response: json({ ok: true }), status: 201, owner };
   }
@@ -580,13 +742,19 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
 function issueSession(userId: string, req: Request) {
   const token = randomBytes(32).toString("hex");
   const agent = (req.headers.get("user-agent") ?? "unknown").slice(0, 180);
-  openDb().prepare(
-    "INSERT INTO sessions (id, token_hash, user_id, expires_at, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-  ).run(newId(), tokenHash(token), userId, Date.now() + WEEK, agent, Date.now());
-  notify(openDb(), userId, "auth.session", "New session", agent);
+  const sessionId = newId();
+  const db = openDb();
+  tx(db, () => {
+    db.prepare(
+      "INSERT INTO sessions (id, token_hash, user_id, expires_at, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(sessionId, tokenHash(token), userId, Date.now() + WEEK, agent, Date.now());
+    // Other signed-in devices learn about the new session in real time.
+    publish(db, userId, "session.created", sessionId, { sessionId, userAgent: agent });
+  });
+  notify(db, userId, "auth.session", "New session", agent);
   const headers = new Headers();
   headers.append("set-cookie", cookieHeader(token, WEEK / 1000));
-  const user = openDb().prepare("SELECT id, email, name, role, plan FROM users WHERE id = ?").get(userId);
+  const user = db.prepare("SELECT id, email, name, role, plan FROM users WHERE id = ?").get(userId);
   return { response: json({ user }, 200, headers), status: 200, owner: userId };
 }
 

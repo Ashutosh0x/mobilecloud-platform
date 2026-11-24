@@ -37,6 +37,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import com.mobilecloud.ui.theme.AppFonts
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -90,7 +91,7 @@ fun OnboardingScreen(onComplete: () -> Unit) {
                 color = Aurora.Bg,
                 fontSize = 36.sp,
                 fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = AppFonts.Mono,
             )
         }
         Spacer(Modifier.height(14.dp))
@@ -177,7 +178,7 @@ fun OnboardingScreen(onComplete: () -> Unit) {
                                 color = if (done) Aurora.GlowGreen else Aurora.TextLow,
                                 fontSize = 16.sp,
                                 fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = AppFonts.Mono,
                             )
                         }
                         Spacer(Modifier.width(13.dp))
@@ -193,7 +194,7 @@ fun OnboardingScreen(onComplete: () -> Unit) {
                                 if (done) check.doneDetail else check.pendingDetail,
                                 color = if (done) Aurora.GreenSoft else Aurora.TextLow,
                                 fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = AppFonts.Mono,
                                 lineHeight = 15.sp,
                             )
                         }
@@ -207,7 +208,7 @@ fun OnboardingScreen(onComplete: () -> Unit) {
             androidLine,
             color = Aurora.TextFaint,
             fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = AppFonts.Mono,
         )
 
         Spacer(Modifier.height(20.dp))

@@ -10,9 +10,12 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mobilecloud.R
 
 /**
  * Cyber-Institutional Design System (CIDS) tokens — UI/UX spec section 1.1,
@@ -201,23 +204,52 @@ val MotionLinear = CubicBezierEasing(0f, 0f, 1f, 1f) // progress indicators
 val MotionLegacy = CubicBezierEasing(0.4f, 0f, 0.2f, 1f) // fallback standard
 
 // ---------------------------------------------------------------------------
+// FONTS — bundled at res/font, 1:1 with the web console stack
+// (apps/web-dashboard/app/layout.tsx): Geist for UI (--font-sans),
+// Geist Mono for data/telemetry (--font-mono), and JetBrains Mono for the
+// CloudShell terminal surface (same face as the xterm.js web CloudShell).
+// ---------------------------------------------------------------------------
+object AppFonts {
+    /** Web --font-sans: Geist. Default for every typography slot. */
+    val Sans = FontFamily(
+        Font(R.font.geist_400, FontWeight.Normal),
+        Font(R.font.geist_500, FontWeight.Medium),
+        Font(R.font.geist_600, FontWeight.SemiBold),
+        Font(R.font.geist_700, FontWeight.Bold),
+    )
+
+    /** Web --font-mono: Geist Mono. Tables, badges, kbd hints, nav sections, telemetry. */
+    val Mono = FontFamily(
+        Font(R.font.geist_mono_400, FontWeight.Normal),
+        Font(R.font.geist_mono_500, FontWeight.Medium),
+        Font(R.font.geist_mono_700, FontWeight.Bold),
+    )
+
+    /** CloudShell terminal face — web-cloudshell xterm.js uses JetBrains Mono 14px. */
+    val Terminal = FontFamily(
+        Font(R.font.jetbrains_mono_400, FontWeight.Normal),
+        Font(R.font.jetbrains_mono_700, FontWeight.Bold),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // LAYER 3 — Typography: 7-step scale from the APK dimens (report §20.3.2):
-// 13 / 14 / 16 / 18 / 20 / 22 / 24 sp. CIDS reads monospace-heavy telemetry,
-// so data screens additionally use FontFamily.Monospace at call sites.
+// 13 / 14 / 16 / 18 / 20 / 22 / 24 sp. Geist is the default family (web
+// parity); data screens use AppFonts.Mono at call sites.
 // ---------------------------------------------------------------------------
 private val CidsTypography = Typography(
-    displayLarge = TextStyle(fontSize = 24.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.8).sp, lineHeight = 30.sp),
-    displayMedium = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.8).sp, lineHeight = 28.sp),
-    headlineSmall = TextStyle(fontSize = 20.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.6).sp, lineHeight = 26.sp),
-    titleLarge = TextStyle(fontSize = 20.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.6).sp, lineHeight = 26.sp),
-    titleMedium = TextStyle(fontSize = 18.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.4).sp, lineHeight = 24.sp),
-    titleSmall = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Medium, letterSpacing = (-0.3).sp, lineHeight = 22.sp),
-    bodyLarge = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Normal, letterSpacing = (-0.15).sp, lineHeight = 22.sp),
-    bodyMedium = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Normal, letterSpacing = (-0.15).sp, lineHeight = 20.sp),
-    bodySmall = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Normal, letterSpacing = (-0.15).sp, lineHeight = 18.sp),
-    labelLarge = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium, letterSpacing = (-0.15).sp),
-    labelMedium = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium, letterSpacing = (-0.15).sp),
-    labelSmall = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.5.sp),
+    displayLarge = TextStyle(fontFamily = AppFonts.Sans, fontSize = 24.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.8).sp, lineHeight = 30.sp),
+    displayMedium = TextStyle(fontFamily = AppFonts.Sans, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.8).sp, lineHeight = 28.sp),
+    headlineSmall = TextStyle(fontFamily = AppFonts.Sans, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.6).sp, lineHeight = 26.sp),
+    titleLarge = TextStyle(fontFamily = AppFonts.Sans, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.6).sp, lineHeight = 26.sp),
+    titleMedium = TextStyle(fontFamily = AppFonts.Sans, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.4).sp, lineHeight = 24.sp),
+    titleSmall = TextStyle(fontFamily = AppFonts.Sans, fontSize = 16.sp, fontWeight = FontWeight.Medium, letterSpacing = (-0.3).sp, lineHeight = 22.sp),
+    bodyLarge = TextStyle(fontFamily = AppFonts.Sans, fontSize = 16.sp, fontWeight = FontWeight.Normal, letterSpacing = (-0.15).sp, lineHeight = 22.sp),
+    bodyMedium = TextStyle(fontFamily = AppFonts.Sans, fontSize = 14.sp, fontWeight = FontWeight.Normal, letterSpacing = (-0.15).sp, lineHeight = 20.sp),
+    bodySmall = TextStyle(fontFamily = AppFonts.Sans, fontSize = 13.sp, fontWeight = FontWeight.Normal, letterSpacing = (-0.15).sp, lineHeight = 18.sp),
+    labelLarge = TextStyle(fontFamily = AppFonts.Sans, fontSize = 14.sp, fontWeight = FontWeight.Medium, letterSpacing = (-0.15).sp),
+    labelMedium = TextStyle(fontFamily = AppFonts.Sans, fontSize = 13.sp, fontWeight = FontWeight.Medium, letterSpacing = (-0.15).sp),
+    labelSmall = TextStyle(fontFamily = AppFonts.Mono, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.5.sp),
 )
 
 private val CidsShapes = Shapes(
