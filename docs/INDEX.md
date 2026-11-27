@@ -67,6 +67,7 @@ on testnet on 2026-11-21 — including live rejections of six attack classes.
 | [FEATURE-REPORT.md](FEATURE-REPORT.md) | Verified feature-system inventory + cross-client execution audit (operational vs limited vs record-only vs mock vs absent) |
 | [FEATURE-STATUS.md](FEATURE-STATUS.md) | Generated component status table; `features/status.json` is authoritative |
 | [AUDIT-REMEDIATION-2026-11.md](AUDIT-REMEDIATION-2026-11.md) | Priority-tier audit remediation status: fixed, partial and open findings |
+| [PASSKEYS-BIOMETRICS.md](PASSKEYS-BIOMETRICS.md) | Passkeys, conditional UI, biometric step-up, app/domain binding and platform gaps |
 | [IMPLEMENTATION_AUDIT.md](IMPLEMENTATION_AUDIT.md) | Phase 0 repository audit: component inventory, executed test baseline, and the honest list of absent subsystems |
 | [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) | The 12-phase engineering program with per-phase status, acceptance criteria, and the architecture decision record |
 | [SECURITY_THREAT_MODEL.md](SECURITY_THREAT_MODEL.md) | Platform-plane assets, trust boundaries, threat table with control status, and the adversarial test plan |

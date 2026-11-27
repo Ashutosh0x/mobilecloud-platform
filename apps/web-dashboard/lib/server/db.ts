@@ -503,6 +503,21 @@ CREATE TABLE IF NOT EXISTS external_identity_links (
   UNIQUE(provider, issuer, subject)
 );
 CREATE INDEX IF NOT EXISTS idx_external_links_user ON external_identity_links(user_id);
+-- Short-lived, action-bound WebAuthn challenges for payment/security step-up.
+-- A step-up token is only issued after the assertion verifies against the
+-- credential and the payload hash still matches the approved action.
+CREATE TABLE IF NOT EXISTS step_up_challenges (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  client_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  challenge_hex TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  used_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_step_up_challenges_user ON step_up_challenges(user_id, created_at);
 -- "Login with MobileCloud": the browser shows a QR code and the phone approves
 -- it. poll_secret_hash proves the request came from the browser that started
 -- the flow, so only that browser can claim the resulting session.

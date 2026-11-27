@@ -15,7 +15,8 @@ import { decodeJwtPayload, deliverBackchannelLogout, discovery, ensureSigningKey
 import { consentFor, hasConsentFor, listConsents, recordConsent, revokeConsent } from "./consent.ts";
 import { buildMetadata as buildSamlMetadata, buildResponse as buildSamlResponse, createServiceProvider, deleteServiceProvider, findServiceProvider, listServiceProviders, parseAuthnRequest, samlConfig } from "./saml.ts";
 import { authenticateScim, createGroup, createScimToken, createUser, deleteGroup, deleteUser, getGroup, getUser, listGroups, listScimTokens, listUsers, patchGroup, patchUser, replaceUser, revokeScimToken, ScimError, serviceProviderConfig } from "./scim.ts";
-import { beginAuthentication, beginRegistration, finishAuthentication, finishRegistration, PasskeyError, verifyAssertion } from "./passkey.ts";
+import { beginAuthentication, beginRegistration, deleteCredential, finishAuthentication, finishRegistration, listCredentials, PasskeyError, verifyAssertion } from "./passkey.ts";
+import { createStepUp, StepUpError, verifyStepUp } from "./stepup.ts";
 import { approveQrLogin, consumeQrLogin, createQrLogin, denyQrLogin, QrLoginError, qrLoginStatus, scanQrLogin } from "./qrlogin.ts";
 import { createSession, listAccountSessions, type ClientType } from "./sessions.ts";
 import { EVENT_TYPES, changesSince, latestSeq, publish, snapshot, tx } from "./events.ts";
@@ -851,13 +852,14 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     }
     const deviceName = str(input.deviceName) || "Android device";
     const devicePlatform = str(input.devicePlatform) || "android";
+    const clientType: ClientType = devicePlatform === "web" ? "web" : "android";
     const deviceId = linkPasskeyDevice(db, registered.userId, deviceName, devicePlatform, registered.credentialId);
-    const headers = startSession(db, registered.userId, req, deviceId, "android", registered.credentialId);
+    const headers = startSession(db, registered.userId, req, deviceId, clientType, registered.credentialId);
     const user = db.prepare("SELECT id, email, name, role, plan FROM users WHERE id = ?").get(registered.userId);
     logAuthEvent(db, {
       userId: registered.userId,
       eventType: "auth.credential.created",
-      clientType: "android",
+      clientType,
       credentialType: "passkey",
       deviceId,
       ipAddress: requestIp(req),
@@ -927,8 +929,9 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     }
     const deviceName = str(input.deviceName) || "Android device";
     const devicePlatform = str(input.devicePlatform) || "android";
+    const clientType: ClientType = devicePlatform === "web" ? "web" : "android";
     const deviceId = linkPasskeyDevice(db, signed.userId, deviceName, devicePlatform, signed.credentialId);
-    const headers = startSession(db, signed.userId, req, deviceId, "android", signed.credentialId);
+    const headers = startSession(db, signed.userId, req, deviceId, clientType, signed.credentialId);
     const user = db.prepare("SELECT id, email, name, role, plan FROM users WHERE id = ?").get(signed.userId);
     logAuthEvent(db, {
       userId: signed.userId,
@@ -1081,6 +1084,142 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       outcome: "success",
     });
     return { response: json({ status: "APPROVED" }, 200, headers), status: 200, owner: row.approved_by };
+  }
+
+  // ---- Passkey management and WebAuthn step-up ---------------------------
+
+  if (method === "GET" && parts[0] === "auth" && parts[1] === "passkeys") {
+    const auth = authenticate(req, db);
+    if (!auth) throw new RequestError(401, "Sign in required");
+    return { response: json({ passkeys: listCredentials(db, auth.user.id) }), status: 200, owner: auth.user.id };
+  }
+
+  if (method === "DELETE" && parts[0] === "auth" && parts[1] === "passkeys" && parts[2]) {
+    const auth = authenticate(req, db);
+    if (!auth) throw new RequestError(401, "Sign in required");
+    requireCsrf(req, auth);
+    const user = db.prepare("SELECT password_hash FROM users WHERE id = ?").get(auth.user.id) as { password_hash: string } | undefined;
+    const hasPassword = Boolean(user?.password_hash.includes(":"));
+    const remaining = Number(
+      (db.prepare("SELECT COUNT(*) AS n FROM credentials WHERE user_id = ?").get(auth.user.id) as { n: number }).n,
+    );
+    if (remaining <= 1 && !hasPassword) {
+      throw new RequestError(409, "This is the account's only passkey and there is no password fallback; add another passkey or recovery method first.");
+    }
+    const removed = tx(db, () => {
+      if (!deleteCredential(db, auth.user.id, parts[2])) return false;
+      // Sessions authenticated by that credential are no longer attributable.
+      db.prepare("DELETE FROM sessions WHERE user_id = ? AND credential_id = ?").run(auth.user.id, parts[2]);
+      publish(db, auth.user.id, "session.revoked", parts[2], { credentialId: parts[2], reason: "passkey_removed" });
+      return true;
+    });
+    if (!removed) throw new RequestError(404, "Passkey not found");
+    logAuthEvent(db, {
+      userId: auth.user.id,
+      eventType: "auth.credential.deleted",
+      clientType: "web",
+      credentialType: "passkey",
+      ipAddress: requestIp(req),
+      userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+      outcome: "success",
+      metadata: { credentialId: parts[2] },
+    });
+    return { response: json({ ok: true }), status: 200, owner: auth.user.id };
+  }
+
+  if (method === "POST" && parts[0] === "auth" && parts[1] === "step-up" && parts[2] === "begin") {
+    const input = await body(req, 8 * 1024);
+    const session = authenticate(req, db);
+    let userId: string;
+    let clientId: string;
+    if (session) {
+      requireCsrf(req, session);
+      userId = session.user.id;
+      clientId = str(input.client_id) || "mobilecloud-console";
+    } else {
+      const basic = clientCredentials(req);
+      if (!basic) throw new RequestError(401, "Client authentication is required.");
+      let client;
+      try {
+        client = requireClient(db, basic.id, basic.secret);
+      } catch (error) {
+        if (error instanceof OAuthError) throw new RequestError(error.status, error.message);
+        throw error;
+      }
+      if (client.public) throw new RequestError(403, "A public client cannot request a step-up for an account.");
+      userId = str(input.user_id);
+      clientId = client.id;
+    }
+    if (!userId) throw new RequestError(400, "A user is required.");
+    try {
+      const challenge = createStepUp(db, passkeyConfig(req), {
+        userId,
+        clientId,
+        action: str(input.action),
+        payload: input.payload,
+      });
+      return {
+        response: json({
+          challenge_id: challenge.challengeId,
+          public_key: challenge.publicKey,
+          expires_in_ms: challenge.expiresInMs,
+        }),
+        status: 200,
+        owner: userId,
+      };
+    } catch (error) {
+      if (error instanceof StepUpError) throw new RequestError(error.status, error.message);
+      throw error;
+    }
+  }
+
+  if (method === "POST" && parts[0] === "auth" && parts[1] === "step-up" && parts[2] === "verify") {
+    const input = await body(req, 256 * 1024);
+    const session = authenticate(req, db);
+    if (session) {
+      requireCsrf(req, session);
+    } else {
+      const basic = clientCredentials(req);
+      if (!basic) throw new RequestError(401, "Client authentication is required.");
+      let client;
+      try {
+        client = requireClient(db, basic.id, basic.secret);
+      } catch (error) {
+        if (error instanceof OAuthError) throw new RequestError(error.status, error.message);
+        throw error;
+      }
+      if (client.public) throw new RequestError(403, "A public client cannot verify a step-up.");
+    }
+    try {
+      const result = verifyStepUp(db, passkeyConfig(req), {
+        challengeId: str(input.challenge_id) || str(input.challengeId),
+        credential: input.credential,
+        payload: input.payload,
+      });
+      logAuthEvent(db, {
+        userId: result.userId,
+        eventType: `auth.stepup.${result.action}`,
+        clientType: "web",
+        credentialType: "passkey",
+        ipAddress: requestIp(req),
+        userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+        outcome: "success",
+        metadata: { action: result.action, credentialId: result.credentialId },
+      });
+      return {
+        response: json({
+          step_up_token: result.token,
+          expires_at: result.expiresAt,
+          action: result.action,
+          user_id: result.userId,
+        }),
+        status: 200,
+        owner: result.userId,
+      };
+    } catch (error) {
+      if (error instanceof StepUpError) throw new RequestError(error.status, error.message);
+      throw error;
+    }
   }
 
   // ---- OAuth: device authorization grant and PKCE -------------------------
@@ -2635,7 +2774,15 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
 function passkeyConfig(req: Request): { rpId: string; rpName: string; origin: string } {
   const origin = publicOrigin() ?? originOf(req);
   const url = new URL(origin);
-  return { rpId: url.hostname, rpName: "MobileCloud", origin };
+  const configured = process.env.MOBILECLOUD_WEBAUTHN_RP_ID?.trim();
+  let rpId = url.hostname;
+  if (configured) {
+    if (url.hostname !== configured && !url.hostname.endsWith(`.${configured}`)) {
+      throw new RequestError(503, "MOBILECLOUD_WEBAUTHN_RP_ID must be the console hostname or one of its parent domains.");
+    }
+    rpId = configured;
+  }
+  return { rpId, rpName: "MobileCloud", origin };
 }
 
 /** The address a request came from, when the deployment can be trusted for it. */

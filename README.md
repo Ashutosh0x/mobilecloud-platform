@@ -5,7 +5,7 @@
 ### **The Autonomous Smartphone Edge Cloud & Institutional Proof-of-Reserve Protocol**
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-359%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-363%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 [![Rust](https://img.shields.io/badge/Rust-1.100-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![Android](https://img.shields.io/badge/Android-API%2030--35-3ddc84?style=for-the-badge&logo=android&logoColor=white)](android-app)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7f52ff?style=for-the-badge&logo=kotlin&logoColor=white)](android-app)
@@ -270,7 +270,7 @@ MobileCloud combines two decoupled, high-performance engines within one monorepo
 
 A passkey is the primary factor on every surface; the password remains only as the recovery path and the one-time bootstrap that proves an account before its first passkey is added.
 
-* **Passkeys (WebAuthn)**: registration and login on Android through Credential Manager and in the browser through `navigator.credentials`. Discoverable ES256 credentials, required user verification, a relying party bound to the console's own origin, signature-counter replay defence, per-credential device labels, and COSE-key storage. Attestation is `none`: the AAGUID is recorded but not cryptographically verified.
+* **Passkeys (WebAuthn)**: registration and login on Android through Credential Manager and in the browser through `navigator.credentials`. Discoverable ES256 credentials, required user verification, a relying party bound to the console's own origin, signature-counter replay defence, per-credential device labels, and COSE-key storage. Attestation is `none`: the AAGUID is recorded but not cryptographically verified. The web console also supports conditional autofill, passkey management, and a WebAuthn step-up that issues a five-minute action- and payload-bound token for FurlPay payments; see [docs/PASSKEYS-BIOMETRICS.md](docs/PASSKEYS-BIOMETRICS.md).
 * **Login with MobileCloud**: the browser shows a 256-bit challenge as a QR code; the phone scans it, displays the verification code and the requesting browser, and approves with a biometric. Only the browser holding the poll secret can collect the session, and claiming it is atomic.
 * **Device Authorization Grant (RFC 8628) and Authorization Code + PKCE (OAuth 2.1)**: `mobilecloud login` either approves a short code in the console or completes a browser flow with a loopback callback. Refresh tokens rotate on every use; replaying a consumed token revokes the entire family.
 * **Client-scoped sessions**: `android`, `web`, `cli`, and `api` sessions get their own lifetimes, device bindings, and credentials. Tokens are stored as SHA-256 hashes and returned exactly once.
@@ -487,11 +487,12 @@ k6 run -e TARGET=https://your.edge.host benchmarks/k6-load-test.js
 | **FurlPay integration** | 9 tests | First federated login creates no account silently; existing account linking requires explicit approval; matching email never merges; state/nonce enforced; issuer/audience/signature checked against real JWKS; code replay and expiry refused; IdP logout does not end FurlPay's session; SSO cannot authorize payment, withdrawal, wallet signing or agent spending; introspection, client management and signing-key overlap rotation. |
 | **Identity configuration** | 5 tests | Production requires an HTTPS origin/issuer and a strong operator password; known defaults are rejected; an unimplemented KMS provider blocks startup; enabling FurlPay requires a client id, HTTPS callback and issuer. |
 | **Runtime gate** | 1 test | In-process `node:vm` Functions/Workflows are fail-closed in production unless `MOBILECLOUD_IN_PROCESS_RUNTIME=1`; the gate is unit-tested across production, opted-in production and development. |
+| **Passkeys & step-up** | 4 tests | A WebAuthn assertion bound to one action and payload issues a step-up token; a changed amount/recipient is refused; challenges are single-use and action-restricted; an account without a passkey cannot start a step-up. |
 | **`android-app`** | `assembleDebug` + `lintDebug` | No JVM unit-test suite ships; the Compose console, JNI `forkpty` terminal, two-row `VirtualKeyBar`, and the foreground `TerminalSessionService` are verified by a passing debug build and lint, not by an automated suite. |
 | **`mobilecloud-cli`** | 8 tests | PKCE S256 against the RFC 7636 test vector, query decoding, UTC timestamp and relative-time formatting, table truncation, server-URL validation (HTTPS only except loopback, no credentials/path/query), and a credentials-file round trip with the profile lifecycle. |
 | **`web-cloudshell`** | `tsc --noEmit` + `vite build` | Type-checked and bundled; the WebGL Xterm.js client, files panel, and preview picker are verified by a passing build, not by an automated suite. |
 
-**359 tests** in total (Rust default members `183` + `por-verifier` `25` + dashboard `147` + `por-xdr-toolkit` `4`).
+**363 tests** in total (Rust default members `183` + `por-verifier` `25` + dashboard `151` + `por-xdr-toolkit` `4`).
 
 ```bash
 # Rust workspace (default members)
@@ -531,7 +532,7 @@ cd mobilecloud-platform
 
 cargo test                      # 183 tests in the default members
 cargo test -p por-verifier      # 25 contract tests
-cd apps/web-dashboard && npm test && cd ../..   # 147 dashboard tests
+cd apps/web-dashboard && npm test && cd ../..   # 151 dashboard tests
 ```
 
 ### 3. Run the web console
@@ -652,6 +653,7 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 | [FEATURE-REPORT.md](docs/FEATURE-REPORT.md) | Verified inventory of every claimed system and feature — implemented vs UI-only vs absent |
 | [FEATURE-STATUS.md](docs/FEATURE-STATUS.md) | Generated feature-status table; `features/status.json` is the source of truth |
 | [AUDIT-REMEDIATION-2026-11.md](docs/AUDIT-REMEDIATION-2026-11.md) | Priority-tier audit remediation: what is fixed, partial or still open |
+| [PASSKEYS-BIOMETRICS.md](docs/PASSKEYS-BIOMETRICS.md) | Passkey registration/sign-in, conditional UI, passkey management, WebAuthn payment step-up, domain-binding files and platform gaps |
 | [IMPLEMENTATION_AUDIT.md](docs/IMPLEMENTATION_AUDIT.md) | Phase 0 repository audit: component inventory, executed test baseline, and the honest list of absent subsystems |
 | [IMPLEMENTATION_ROADMAP.md](docs/IMPLEMENTATION_ROADMAP.md) | The 12-phase engineering program with per-phase status, acceptance criteria, and the architecture decision record |
 | [SECURITY_THREAT_MODEL.md](docs/SECURITY_THREAT_MODEL.md) | Platform assets, trust boundaries, threat table with control status, and the adversarial test plan |
@@ -664,6 +666,6 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 **MobileCloud & FurlPay** — one account, one data model, one durable event log.
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-359%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-363%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 
 </div>

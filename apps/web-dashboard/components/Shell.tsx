@@ -22,6 +22,7 @@ const GROUPS = [
     { href: "/speed", label: "Speed", icon: "zap" },
   ] },
   { label: "Security", items: [
+    { href: "/security", label: "Passkeys", icon: "shield" },
     { href: "/firewall", label: "Firewall", icon: "shield" },
     { href: "/device", label: "Link device", icon: "shield" },
     { href: "/settings", label: "Settings", icon: "gear" },

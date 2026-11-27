@@ -247,6 +247,40 @@ export function issueLogoutToken(
   return signJwt(db, payload);
 }
 
+/**
+ * Issues a short-lived step-up token after a WebAuthn assertion proves a
+ * specific action and payload. It is audience-bound to the relying party and
+ * action-bound, so a token for a $10 payment cannot authorize a $1,000 one.
+ */
+export function issueStepUpToken(
+  db: DatabaseSync,
+  input: {
+    origin: string;
+    clientId: string;
+    userId: string;
+    action: string;
+    payloadHash: string;
+    credentialId: string;
+    ttlMs?: number;
+  },
+): { token: string; expiresAt: number } {
+  const now = Math.floor(Date.now() / 1000);
+  const ttl = Math.max(60_000, input.ttlMs ?? 5 * 60_000);
+  const token = signJwt(db, {
+    iss: issuer(input.origin),
+    aud: input.clientId,
+    sub: input.userId,
+    iat: now,
+    exp: now + Math.floor(ttl / 1000),
+    jti: randomBytes(16).toString("hex"),
+    typ: "stepup",
+    action: input.action,
+    payload_hash: input.payloadHash,
+    credential_id: input.credentialId,
+  });
+  return { token, expiresAt: Date.now() + ttl };
+}
+
 /** Decodes a JWT payload without trusting it; callers must verify before use. */
 export function decodeJwtPayload(token: string): Record<string, unknown> | null {
   const parts = token.split(".");

@@ -9,7 +9,8 @@ const nextConfig = {
     // be configured with the discovery document alone and never learns that
     // the implementation happens to live under /api.
     return [
-      { source: "/.well-known/:path*", destination: "/api/.well-known/:path*" },
+      { source: "/.well-known/openid-configuration", destination: "/api/.well-known/openid-configuration" },
+      { source: "/.well-known/jwks.json", destination: "/api/.well-known/jwks.json" },
       { source: "/oauth/:path*", destination: "/api/oauth/:path*" },
       { source: "/saml/:path*", destination: "/api/saml/:path*" },
       { source: "/scim/:path*", destination: "/api/scim/:path*" },

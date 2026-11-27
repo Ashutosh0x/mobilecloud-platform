@@ -4,6 +4,7 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { CSRF_HEADER, readCsrfCookie } from "@/lib/csrf";
+import { credentialToJson, getPasskey, supportsConditionalUi } from "@/lib/webauthn";
 import { useCloud } from "@/lib/store";
 
 /**
@@ -74,6 +75,8 @@ export default function LoginPage() {
   const [qr, setQr] = useState<QrSession | null>(null);
   const [deadline, setDeadline] = useState(0);
   const [remaining, setRemaining] = useState(0);
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
+  const [passkeyNote, setPasskeyNote] = useState<string | null>(null);
   const next = useRef("/");
 
   useEffect(() => {
@@ -83,6 +86,87 @@ export default function LoginPage() {
   useEffect(() => {
     if (state.status === "ready") router.replace(next.current);
   }, [state.status, router]);
+
+  const finishPasskey = useCallback(
+    async (credential: PublicKeyCredential, challengeId: string) => {
+      const response = await fetch("/api/auth/passkey/login/finish", {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          challengeId,
+          credential: credentialToJson(credential),
+          deviceName: browserLabel(navigator.userAgent),
+          devicePlatform: "web",
+        }),
+      });
+      const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!response.ok) throw new Error(typeof data.error === "string" ? data.error : "Passkey sign-in failed");
+      await refresh();
+      router.replace(next.current);
+    },
+    [refresh, router],
+  );
+
+  const passkeyLogin = useCallback(async () => {
+    setPasskeyBusy(true);
+    setError(null);
+    setPasskeyNote(null);
+    try {
+      const begin = await fetch("/api/auth/passkey/login/begin", {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ devicePlatform: "web" }),
+      });
+      const options = (await begin.json().catch(() => ({}))) as {
+        challenge_id?: string;
+        publicKey?: Record<string, unknown>;
+        error?: string;
+      };
+      if (!begin.ok || !options.publicKey || !options.challenge_id) {
+        throw new Error(options.error ?? "Could not start passkey sign-in");
+      }
+      const credential = await getPasskey(options.publicKey as never);
+      await finishPasskey(credential, options.challenge_id);
+    } catch (caught) {
+      const name = caught instanceof DOMException ? caught.name : "";
+      if (name === "NotAllowedError" || name === "AbortError") setPasskeyNote("Passkey sign-in was cancelled.");
+      else setError(caught instanceof Error ? caught.message : "Passkey sign-in failed");
+    } finally {
+      setPasskeyBusy(false);
+    }
+  }, [finishPasskey]);
+
+  // Conditional UI: passkeys appear in the browser's autofill menu on the
+  // username field. The request sits in the background until the user chooses
+  // a credential, and is aborted when this page goes away.
+  useEffect(() => {
+    if (state.status === "ready") return;
+    const controller = new AbortController();
+    let disposed = false;
+    void (async () => {
+      if (!(await supportsConditionalUi())) return;
+      const begin = await fetch("/api/auth/passkey/login/begin", {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ devicePlatform: "web" }),
+      });
+      if (!begin.ok) return;
+      const options = (await begin.json().catch(() => ({}))) as {
+        challenge_id?: string;
+        publicKey?: Record<string, unknown>;
+      };
+      if (!options.publicKey || !options.challenge_id || disposed) return;
+      const credential = await getPasskey(options.publicKey as never, "conditional", controller.signal);
+      if (!disposed) await finishPasskey(credential, options.challenge_id);
+    })().catch(() => undefined);
+    return () => {
+      disposed = true;
+      controller.abort();
+    };
+  }, [state.status, finishPasskey]);
 
   const startQr = useCallback(async () => {
     setPending(true);
@@ -195,9 +279,23 @@ export default function LoginPage() {
 
         {mode === "choose" && (
           <>
-            <p className="sub">Sign in with the phone that holds your account, or use your password.</p>
-            <button className="primary" type="button" disabled={pending} onClick={() => void startQr()}>
-              {pending ? "Starting…" : "Login with MobileCloud"}
+            <p className="sub">Sign in with a passkey, the phone that holds your account, or your password.</p>
+            <label className="field">
+              Email or passkey
+              <input
+                type="text"
+                autoComplete="username webauthn"
+                placeholder="Select a passkey from autofill, or type your email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+              />
+            </label>
+            <button className="primary" type="button" disabled={pending || passkeyBusy} onClick={() => void passkeyLogin()}>
+              {passkeyBusy ? "Waiting for biometrics…" : "Sign in with a passkey"}
+            </button>
+            {passkeyNote && <p className="sub">{passkeyNote}</p>}
+            <button className="ghost" type="button" disabled={pending} onClick={() => void startQr()}>
+              {pending ? "Starting…" : "Login with MobileCloud on your phone"}
             </button>
             <button className="ghost" type="button" disabled={pending} onClick={() => setMode("password")}>
               Use email and password
@@ -273,7 +371,7 @@ export default function LoginPage() {
             <p className="sub">Sign in with the account your operator provisioned.</p>
             <label className="field">
               Email
-              <input type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} required />
+              <input type="email" autoComplete="username webauthn" value={email} onChange={(event) => setEmail(event.target.value)} required />
             </label>
             <label className="field">
               Password

@@ -210,6 +210,48 @@ export function createFurlPayOidcClient(config: FurlPayConfig, deps: RelyingPart
       return claims;
     },
 
+    /** Verifies a MobileCloud step-up token for one action and payload. */
+    async verifyStepUpToken(
+      stepUpToken: string,
+      expected: { action: string; payloadHash: string },
+    ): Promise<Record<string, unknown>> {
+      const [headerPart, payloadPart, signaturePart] = stepUpToken.split(".");
+      if (!headerPart || !payloadPart || !signaturePart) {
+        throw new FurlPayHttpError("invalid_step_up", "The step-up token is not a compact JWT");
+      }
+      const header = decodeJsonPart(headerPart);
+      if (header.alg !== "RS256" || typeof header.kid !== "string") {
+        throw new FurlPayHttpError("invalid_step_up", "The step-up token has an invalid header");
+      }
+      let keys = await fetchJwks();
+      let jwk = keys.find((key) => key.kid === header.kid);
+      if (!jwk) {
+        jwksCache = null;
+        keys = await fetchJwks(true);
+        jwk = keys.find((key) => key.kid === header.kid);
+      }
+      if (!jwk) throw new FurlPayHttpError("unknown_signing_key", "The step-up token names an unpublished key");
+      const parts = stepUpToken.split(".");
+      const key = createPublicKey({ key: jwk as never, format: "jwk" });
+      const valid = cryptoVerify("RSA-SHA256", Buffer.from(`${parts[0]}.${parts[1]}`), key, Buffer.from(parts[2], "base64url"));
+      if (!valid) throw new FurlPayHttpError("invalid_signature", "The step-up token signature did not verify");
+
+      const claims = decodeJsonPart(payloadPart);
+      const current = Math.floor(now() / 1000);
+      if (claims.iss !== config.issuer) throw new FurlPayHttpError("issuer_mismatch", "The step-up token was issued by another issuer");
+      const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+      if (!audience.includes(config.clientId)) throw new FurlPayHttpError("audience_mismatch", "The step-up token is for another client");
+      if (claims.typ !== "stepup") throw new FurlPayHttpError("invalid_step_up", "That token is not a step-up token");
+      if (claims.action !== expected.action) throw new FurlPayHttpError("action_mismatch", "The step-up token authorizes a different action");
+      if (claims.payload_hash !== expected.payloadHash) {
+        throw new FurlPayHttpError("payload_mismatch", "The approved amount or recipient changed");
+      }
+      if (typeof claims.exp !== "number" || claims.exp + CLOCK_SKEW_SEC <= current) {
+        throw new FurlPayHttpError("token_expired", "The step-up token has expired");
+      }
+      return claims;
+    },
+
     async userInfo(accessToken: string): Promise<Record<string, unknown>> {
       const document = await discover();
       return fetchJson<Record<string, unknown>>(fetchImpl, document.userinfo_endpoint, {
