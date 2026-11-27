@@ -13,6 +13,8 @@
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=black)](apps/web-dashboard)
 [![Terminal](https://img.shields.io/badge/Terminal-Xterm.js%20WebGL%20%2B%20PTY%20%2B%20SSH-F80000?style=for-the-badge&logo=iterm2&logoColor=white)](docs/CLOUDSHELL.md)
 [![Real-Time Sync](https://img.shields.io/badge/Real--Time%20Sync-WebSocket%20%2B%20Outbox-0070f3?style=for-the-badge&logo=socketdotio&logoColor=white)](docs/REALTIME-SYNC.md)
+[![Auth](https://img.shields.io/badge/Auth-Passkeys%20%2B%20OAuth%202.1-00B4AB?style=for-the-badge&logoColor=white)](docs/AUTH.md)
+[![CLI](https://img.shields.io/badge/CLI-mobilecloud-000000?style=for-the-badge&logo=rust&logoColor=white)](cli)
 [![SQLite](https://img.shields.io/badge/SQLite-WAL%20Outbox-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](docs/REALTIME-SYNC.md)
 [![Stellar](https://img.shields.io/badge/Stellar-Protocol%2030-08b5e5?style=for-the-badge&logo=stellar&logoColor=white)](contracts/por-verifier)
 [![Ed25519](https://img.shields.io/badge/Ed25519-232F3E?style=for-the-badge&logo=gnubash&logoColor=white)](core-engine)
@@ -23,9 +25,9 @@
 
 **MobileCloud** turns off-the-shelf Android smartphones into edge servers with an inbuilt tri-modal terminal gateway, and carries the FurlPay proof-of-reserve protocol: a deterministic reconciliation kernel, a Stellar Soroban verifier, and cryptographic attestation.
 
-The web console and the Android app are two synchronized clients of one backend: one account, one data model, one durable event log, live both ways.
+The web console and the Android app are two synchronized clients of one backend: one account, one data model, one durable event log, live both ways. The same account signs in on four surfaces — Android, the web console, the browser CloudShell, and the `mobilecloud` CLI — with passkeys, phone-approved QR login, and an independent, revocable session per client.
 
-[Architecture](#system-architecture) • [Terminal](#3-tri-modal-terminal--cloudshell-gateway) • [Real-Time Sync](#unified-real-time-web--android-synchronization) • [Features](#detailed-platform-features) • [Tech Stack](#technology-stack) • [Benchmarks](#performance--benchmark-matrix) • [Test Matrix](#automated-test-matrix) • [Quick Start](#quick-start) • [Audit Baseline](#cryptographic-audit--integrity)
+[Architecture](#system-architecture) • [Terminal](#3-tri-modal-terminal--cloudshell-gateway) • [Auth](#13-unified-authentication--the-mobilecloud-cli) • [Real-Time Sync](#unified-real-time-web--android-synchronization) • [Features](#detailed-platform-features) • [Tech Stack](#technology-stack) • [Benchmarks](#performance--benchmark-matrix) • [Test Matrix](#automated-test-matrix) • [Quick Start](#quick-start) • [Audit Baseline](#cryptographic-audit--integrity)
 
 </div>
 
@@ -45,6 +47,7 @@ The web console and the Android app are two synchronized clients of one backend:
 | Local build preview | **Not sandboxed.** The preview runs in the plain app UID. Do not run untrusted repositories. |
 | Browser CloudShell | **Working.** Requires a running edge engine and a trusted gateway in front of it. |
 | SSH daemon | **Working.** Refuses a non-loopback bind unless an Ed25519 key is authorized. |
+| Authentication & CLI | **Implemented and covered by tests.** Passkeys (WebAuthn), "Login with MobileCloud" QR approval, RFC 8628 device grant and PKCE, client-scoped sessions with rotating refresh tokens, an append-only audit trail, and a weighted login risk engine. The `mobilecloud` CLI signs in, refreshes, lists devices and sessions, and revokes both. **Not done:** the Android approval screen and notifier compile but are not yet routed from `MainActivity`; no FCM/APNs push transport is configured; passkey attestation is `none` (AAGUID recorded, not verified). |
 | Trading engine | **Paper / demo.** Not validated for live execution. |
 | Proof of reserve | The control plane stores the Rust kernel's reconciliation output **read-only** and reports an explicit unverified state when no attestation exists; it never computes a ratio itself. Verified against the Stellar **testnet**. Custody and CPA attestation are `NOT_ESTABLISHED`. |
 | On-device AI/ML inference (ONNX, TFLite, NPU) | **Not implemented.** No inference code exists in this repository. |
@@ -95,6 +98,16 @@ The web console and the Android app are two synchronized clients of one backend:
   <img src="https://img.shields.io/badge/Cursor%20Sync-8B5CF6?style=for-the-badge&logo=clockify&logoColor=white" alt="Cursor Sync" />
   <img src="https://img.shields.io/badge/Kotlin%20Coroutines%20%26%20StateFlow-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white" alt="Coroutines" />
   <img src="https://img.shields.io/badge/WorkManager-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="WorkManager" />
+</p>
+
+### Authentication & Identity
+<p align="left">
+  <img src="https://img.shields.io/badge/WebAuthn%20L3-Passkeys-00B4AB?style=for-the-badge" alt="WebAuthn passkeys" />
+  <img src="https://img.shields.io/badge/Android%20Credential%20Manager-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Credential Manager" />
+  <img src="https://img.shields.io/badge/OAuth%202.1%20%2B%20PKCE-000000?style=for-the-badge" alt="OAuth 2.1 and PKCE" />
+  <img src="https://img.shields.io/badge/RFC%208628-Device%20Grant-6E40C9?style=for-the-badge" alt="RFC 8628" />
+  <img src="https://img.shields.io/badge/Session%20%2B%20CSRF-SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white" alt="Sessions" />
+  <img src="https://img.shields.io/badge/mobilecloud%20CLI-Rust-000000?style=for-the-badge&logo=rust&logoColor=white" alt="MobileCloud CLI" />
 </p>
 
 ### Blockchain, Smart Contracts & Financial Cryptography
@@ -243,6 +256,16 @@ MobileCloud combines two decoupled, high-performance engines within one monorepo
 * **Proof-of-Reserve Console View**: a `/reserve` route renders the Rust kernel's reconciliation output **read-only** — the control plane never computes a ratio itself — and reports an explicit `unverified` state when no attestation exists.
 
 ### 13. Unified Authentication & the `mobilecloud` CLI
+
+| Surface | Primary credential | Session | Refresh |
+| :--- | :--- | :--- | :--- |
+| Android | WebAuthn passkey in Credential Manager, gated by biometrics | 30 days, device-bound | 30-day rotating |
+| Web console | Passkey, or a phone-approved QR login that sets `mc_session` | 24 hours, CSRF-bound | — |
+| `mobilecloud` CLI | Device grant (RFC 8628) or Authorization Code + PKCE | 1-hour bearer | 30-day rotating |
+| CloudShell | 256-bit terminal ticket minted from the console session | 30 seconds, single use | — |
+
+A passkey is the primary factor on every surface; the password remains only as the recovery path and the one-time bootstrap that proves an account before its first passkey is added.
+
 * **Passkeys (WebAuthn)**: registration and login on Android through Credential Manager and in the browser through `navigator.credentials`. Discoverable ES256 credentials, required user verification, a relying party bound to the console's own origin, signature-counter replay defence, per-credential device labels, and COSE-key storage. Attestation is `none`: the AAGUID is recorded but not cryptographically verified.
 * **Login with MobileCloud**: the browser shows a 256-bit challenge as a QR code; the phone scans it, displays the verification code and the requesting browser, and approves with a biometric. Only the browser holding the poll secret can collect the session, and claiming it is atomic.
 * **Device Authorization Grant (RFC 8628) and Authorization Code + PKCE (OAuth 2.1)**: `mobilecloud login` either approves a short code in the console or completes a browser flow with a loopback callback. Refresh tokens rotate on every use; replaying a consumed token revokes the entire family.
@@ -277,8 +300,10 @@ flowchart TD
         PTY --> SSH
     end
 
-    subgraph WebPlane["Web Clients"]
+    subgraph WebPlane["Clients & Identity Plane"]
         CONSOLE["apps/web-dashboard<br/>Next.js 15 · 20 console views"]
+        AUTH["Identity plane<br/>passkeys · Login with MobileCloud<br/>device & PKCE grants · scoped sessions · audit"]
+        CLI["mobilecloud CLI (Rust)<br/>device grant · PKCE · rotating refresh"]
         CLOUDSHELL["web-cloudshell<br/>WebGL Xterm.js · file manager · preview picker"]
     end
 
@@ -301,6 +326,9 @@ flowchart TD
     end
 
     APP --> JNI --> PTY
+    APP -.->|"passkey · QR approval"| AUTH
+    CONSOLE -->|"session + CSRF"| AUTH
+    CLI <-->|"HTTPS + Bearer"| AUTH
     KRN --> CoreDaemon
     CONSOLE <-->|"REST / WebSocket"| CoreDaemon
     CLOUDSHELL <-->|"WebSocket :3000<br/>ticket-authenticated"| WS
@@ -375,6 +403,7 @@ graph TD
         TUNNEL["edge/mobilecloud-tunnel (bins)<br/>• mc-tunnel-client<br/>• mc-tunnel-relay<br/>• Ed25519 handshake · yamux mux · WSS"]
         SHIELD["edge/mobilecloud-shield (lib)<br/>• IP Blocklist (CrowdSec JSON)<br/>• Sliding-Window Rate Limiter<br/>• Regex WAF (traversal/SQLi/XSS/CMDi)"]
         FLEET["fleet-mesh (lib)<br/>• Node Registry + Revocation<br/>• Ed25519 Device Identity<br/>• Replay-Protected Heartbeats<br/>• Resource-Aware Placement"]
+        CLICRATE["cli (bin: mobilecloud)<br/>• Device Grant + PKCE Login<br/>• Scoped Token Refresh<br/>• Device & Session Revocation"]
 
         subgraph Tools["Workspace Tools"]
             ATTESTOR["tools/por-attestor<br/>Pre-sorted 5-Key Ed25519 Signer"]
@@ -392,7 +421,7 @@ graph TD
     subgraph ConfigAudit["Audit, Specs & Governance"]
         SPECS["specs/<br/>AUD-01 · DOC-01 · QRP-01"]
         AUDIT["audit/<br/>Cryptographic Testnet Baseline<br/>26 state snapshots · verify_baseline.py"]
-        DOCS["docs/<br/>14 platform engineering guides"]
+        DOCS["docs/<br/>20 platform engineering guides"]
     end
 
     KERNEL --> ATTESTOR
@@ -401,6 +430,7 @@ graph TD
     XDRTOOL -.-> CONTRACT
     CONTRACT -.->|Circuit Breaker Telemetry| TRADING
     ANDROID <-->|JNI forkpty| CORE
+    CLICRATE <-->|"HTTPS · device grant / PKCE"| DASHBOARD
     CLOUDSHELL <-->|WebSocket :3000 + file/preview API| CORE
     DASHBOARD <-->|REST API / Metrics| CORE
     CORE --> TRADING
@@ -560,6 +590,7 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 | Document | Contents |
 | :--- | :--- |
 | [CLOUDSHELL.md](docs/CLOUDSHELL.md) | The tri-modal terminal: credential model, web preview, file transfer, session durability, reverse-proxy configuration |
+| [AUTH.md](docs/AUTH.md) | Unified authentication: passkey ceremonies, Login with MobileCloud, CLI device and PKCE grants, session scopes, refresh rotation, audit and login risk |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Dual-cadence assurance model, component dataflow, platform real-time plane |
 | [REALTIME-SYNC.md](docs/REALTIME-SYNC.md) | Unified Web ⇄ Android real-time sync: event envelope, transactional outbox, WebSocket gateway protocol, cursor recovery, cross-device auth |
 | [SECURITY-MODEL.md](docs/SECURITY-MODEL.md) | Quorum design, digest scheme, threat matrix |
@@ -573,6 +604,10 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 | [ROADMAP.md](docs/ROADMAP.md) | Phase 1–6 plan with honest status tags |
 | [AUDIT-EVIDENCE.md](docs/AUDIT-EVIDENCE.md) | Integrity manifests, verification scripts, commit anchors |
 | [FEATURE-REPORT.md](docs/FEATURE-REPORT.md) | Verified inventory of every claimed system and feature — implemented vs UI-only vs absent |
+| [IMPLEMENTATION_AUDIT.md](docs/IMPLEMENTATION_AUDIT.md) | Phase 0 repository audit: component inventory, executed test baseline, and the honest list of absent subsystems |
+| [IMPLEMENTATION_ROADMAP.md](docs/IMPLEMENTATION_ROADMAP.md) | The 12-phase engineering program with per-phase status, acceptance criteria, and the architecture decision record |
+| [SECURITY_THREAT_MODEL.md](docs/SECURITY_THREAT_MODEL.md) | Platform assets, trust boundaries, threat table with control status, and the adversarial test plan |
+| [PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) | What is deployable today, secrets posture, health/backup/DR gaps, and the pre-launch checklist |
 
 ---
 
