@@ -1,0 +1,21 @@
+# Digests of the contract binaries built for the last release.
+#
+# These are build outputs, not sources: they live under `target/`, which is
+# ignored by git, so they cannot be part of the committed integrity manifest
+# and CI cannot verify them on a clean checkout. They are recorded here
+# instead, and verified against a local release build:
+#
+#   cargo build -p por-verifier --target wasm32-unknown-unknown --release
+#   sha256sum -c audit/RELEASE_WASM.sha256
+#
+# A compiler update changes these bytes, so the digests are pinned to the
+# release they shipped in and are refreshed deliberately — the same way a
+# release manifest is. The sources that produce them are sealed by the
+# committed `INTEGRITY_MANIFEST.sha256`; the audit trail for the shipped
+# binary is `docs/AUDIT-EVIDENCE.md`.
+#
+# `por_verifier.optimized.wasm` is the size-reduced binary that was uploaded
+# to the testnet contract; `por_verifier.wasm` is the plain release build of
+# the same crate.
+289413140b24c3d41d49dff6cd1a783d273779a1da066f2a2c2583814bba002c *target/wasm32-unknown-unknown/release/por_verifier.wasm
+2cd7312c841372b7d9c019ad3b164883701851f000f83325e5d345e9bcf14948 *target/wasm32-unknown-unknown/release/por_verifier.optimized.wasm

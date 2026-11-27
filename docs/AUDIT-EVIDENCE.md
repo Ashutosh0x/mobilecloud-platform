@@ -13,8 +13,12 @@ be re-executed by anyone.
 ## Integrity sealing
 
 ```bash
-# repo-wide (26 snapshots + contract sources + Cargo manifests + release WASM)
+# repo-wide (26 snapshots + contract sources + Cargo manifests + docs set)
 sha256sum -c INTEGRITY_MANIFEST.sha256
+
+# the release contract binaries, verified against a local release build
+cargo build -p por-verifier --target wasm32-unknown-unknown --release
+sha256sum -c audit/RELEASE_WASM.sha256
 
 # frozen 2026-11-21 testnet baseline (crypto/, endpoint/, events/, state/, …)
 cd audit/TESTNET_BASELINE_2026-11-21 && sha256sum -c MANIFEST.sha256
@@ -23,9 +27,14 @@ cd audit/TESTNET_BASELINE_2026-11-21 && sha256sum -c MANIFEST.sha256
 `INTEGRITY_MANIFEST.sha256` (repo root) seals: all 26 regression snapshots
 (`contracts/por-verifier/test_snapshots/test/`), contract sources
 (`lib.rs`, `storage.rs`, `errors.rs`, `test.rs`), root `Cargo.toml` +
-`Cargo.lock`, the release WASM (`por_verifier.wasm` +
-`por_verifier.optimized.wasm`), `tools/por-xdr-toolkit` sources, the
-`specs/` set, and this documentation set.
+`Cargo.lock`, `tools/por-xdr-toolkit` sources, the `specs/` set, and this
+documentation set.
+
+The release contract binaries are sealed separately, in
+`audit/RELEASE_WASM.sha256`. They are build outputs under `target/`, which
+git ignores, so they cannot be committed and CI cannot verify them on a clean
+checkout; their digests are pinned to the release they shipped in and checked
+against a local release build.
 
 ## Independent cryptographic verification (pure Python, zero shared code)
 

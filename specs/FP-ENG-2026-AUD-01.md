@@ -98,7 +98,7 @@ flowchart TD
 - Initialized in `mobilecloud-platform/`; `.gitignore` covers `target/`, `/dist`, runtime state; initial commit captures all verified sources, snapshots, tools, specs, docs, and audit baselines; the 40-character commit SHA is recorded in `versions.txt` (repo-root) and `docs/AUDIT-EVIDENCE.md`.
 
 ### 4.2 Expansion of `MANIFEST.sha256` Repo-Wide — ✅ RESOLVED
-- Top-level `INTEGRITY_MANIFEST.sha256` generated, sealing: all 26 snapshots, contract sources (`lib.rs`, `storage.rs`, `errors.rs`, `test.rs`), `Cargo.toml`, `Cargo.lock`, and the release-compiled WASM (`por_verifier.wasm`). Verify with `sha256sum -c INTEGRITY_MANIFEST.sha256`.
+- Top-level `INTEGRITY_MANIFEST.sha256` generated, sealing: all 26 snapshots, contract sources (`lib.rs`, `storage.rs`, `errors.rs`, `test.rs`), `Cargo.toml`, and `Cargo.lock`. Verify with `sha256sum -c INTEGRITY_MANIFEST.sha256`. The release-compiled WASM (`por_verifier.wasm`, `por_verifier.optimized.wasm`) is a build output under the git-ignored `target/`, so it is sealed separately in `audit/RELEASE_WASM.sha256` and verified against a local release build.
 
 ### 4.3 Promotion of `xdrkey` to `tools/por-xdr-toolkit` — ✅ RESOLVED
 - Crate promoted to `tools/por-xdr-toolkit` (CLI `por-xdr` retains the `key`/`decode` modes with clean error handling); the original `tools/xdrkey` directory is retired.
