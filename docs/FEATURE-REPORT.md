@@ -28,15 +28,17 @@ The originating report's headline numbers were reviewed against the tree.
 
 | Report claim | Audit finding |
 | :--- | :--- |
-| "18 systems / 278 features" | 19 top-level systems listed (§22). 259 / 278 claims are backed by code; **19 are not**. |
+| "18 systems / 278 features" | 19 top-level systems are actually listed (§22). At the *feature* level, 248 / 278 rows are backed by code, 6 are UI-only, and **24 are architecture-only or absent**. At the *system* level, only **7 of 19 are fully operational** (see [§F Coverage quantification](#f-coverage-quantification)). |
 | "185 automated tests, all passing" | **Confirmed.** 128 in the default workspace members + 25 `por-verifier` + 4 `por-xdr-toolkit` + 28 dashboard = 185. |
 | "8 Rust crates" | The root [Cargo.toml](../Cargo.toml) lists **8 workspace members**; counting the WASM contract (`contracts/por-verifier`) and the `tools/*` helpers separately yields **9 crates** under `cargo test` scope. |
 | "Deployed contract `CDWNCMD6…OEDPI`" | **Confirmed real** — cross-referenced in `docs/VERIFIED-BASELINE.md`, `docs/STELLAR-SOROBAN.md`, `docs/ROADMAP.md`, `docs/INTEGRATION-GUIDE.md`, `versions.txt`, `specs/`, `audit/`. |
 | Fleet Mesh (System 12) | **UI-only.** `android-app/.../ui/screens/MeshScreen.kt` renders a static view; no discovery, load-balancing, or replication code exists. |
 | Billing & Metering (System 19) | **UI-only.** `apps/web-dashboard/app/(console)/billing/page.tsx` renders `BillingView`; there is no metering or billing engine. |
 | AI/ML On-Device Inference (System 15) | **Absent.** No ONNX Runtime, TFLite, NPU, Hexagon, or embedding code anywhere in the repository. |
-| Storage / Databases management (System 13 partial) | **Mixed.** The SQLite WAL + transactional-outbox *data plane* is real; the Storage/Databases *management screens* are UI-only. |
-| Domain/DNS/CDN (System 18) | **Partial.** Cache-purge/revalidation API is real; automated SSL provisioning and Cloudflare DNS/CDN integration are design only. |
+| Storage / Databases management (System 13 partial) | **Mixed, local-only.** The SQLite WAL + transactional-outbox data plane is real. Storage and Databases console pages really create local files on disk (`api.ts:729-742,766-805`) but are create/list only — no query editor, schema management, or backup. |
+| Domain/DNS/CDN (System 18) | **Record-only.** A domain row is stored with `status: "recorded"` and the message "No DNS provider is configured" (`apps/web-dashboard/lib/server/api.ts:700-716`). There is **no** DNS provisioning, SSL issuance, or edge caching. The claimed cache-purge/revalidation API is a **501 stub** (`core-engine/src/main.rs:638-642`). |
+| Agentic deploy + cache (System 8) | **Split.** Agent-triggered *builds* are real in the Rust `core-engine` (`POST /api/v1/deploy/agent`, operator-token gated, loopback-only); **cache tag/path revalidation is not implemented** — the endpoint returns `501 cache revalidation is not supported`. |
+| "9 crates" / two backends | The platform has **two independent backends**: the Rust `core-engine` (real builds/terminal/preview, loopback `/api/v1/*`, bearer-token gated) and the Next.js `web-dashboard` console (SQLite plane, mostly record-only). The source report treats them as one. |
 
 ---
 
@@ -181,12 +183,14 @@ Native ARM64 edge engine: Build Output API v3 router, on-device builder, atomic 
 | Custom Agent ID | Each agent deployment records an agent identifier | ✅ Implemented |
 | Token Authentication | Bearer-token auth for agent API calls | ✅ Implemented |
 | Trigger Source Tracking | Records `agent:…`, `git:push`, `manual` | ✅ Implemented |
-| Tag-Based Revalidation | Invalidate cached content by tag | ✅ Implemented |
-| Path-Based Revalidation | Invalidate specific URL paths | ✅ Implemented |
-| Direct Agent Ingress | `POST /api/v1/deploy/agent` | ✅ Implemented |
-| Atomic Rollback API | `POST /api/v1/deploy/rollback` | ✅ Implemented |
-| Deployment History API | `GET /api/v1/deployments/:project` | ✅ Implemented |
-| Cache Revalidation API | `POST /api/v1/cache/revalidate` | ✅ Implemented |
+| Tag-Based Revalidation | Invalidate cached content by tag | ❌ Not Implemented — engine returns 501 `cache revalidation is not supported` (`core-engine/src/main.rs:638-642`) |
+| Path-Based Revalidation | Invalidate specific URL paths | ❌ Not Implemented — same 501 stub |
+| Direct Agent Ingress | `POST /api/v1/deploy/agent` (Rust `core-engine`, operator-token gated, loopback-only) | ✅ Implemented — validates `agent_id`, sets trigger `agent:{id}`, queues a real preview build (`core-engine/src/main.rs:419-482`) |
+| Atomic Rollback API | `POST /api/v1/deploy/rollback` (Rust `core-engine`) | ✅ Implemented (`core-engine/src/main.rs:705`) |
+| Deployment History API | `GET /api/v1/deployments/:project` (Rust `core-engine`) | ✅ Implemented — reads the deployment snapshot (`core-engine/src/main.rs:645-665`) |
+| Cache Revalidation API | `POST /api/v1/cache/revalidate` | ❌ Not Implemented — 501 stub that only checks the project exists |
+
+> **Note.** These `/api/v1/*` operator endpoints live in the Rust `core-engine` and are reachable only on loopback with `MOBILECLOUD_OPERATOR_TOKEN`. **Neither** the web console nor the Android app calls them; the clients use the separate Next.js console API described in §3.
 
 ---
 
@@ -333,11 +337,11 @@ Native ARM64 edge engine: Build Output API v3 router, on-device builder, atomic 
 
 | Feature | Description | Status |
 | :--- | :--- | :--- |
-| File Storage API | Workspace file CRUD | ✅ Implemented |
+| File Storage API | Workspace file CRUD | ✅ Implemented · Tested |
 | Database Query API | SQLite query execution via the dashboard | ✅ Implemented |
-| Blob storage | Binary large-object storage | 🟡 Partial · UI-only |
-| Backup & export | DB backup and migration | 🔷 Planned |
-| Storage / Databases console views | Management screens | 🟡 Partial · UI-only |
+| Blob storage | Binary large-object storage — real file on disk, ≤1 MB/object, ≤100 MB/account, local-only | ✅ Implemented — Limited (`api.ts:766-805`) |
+| Backup & export | DB backup and migration | 🔷 Planned — no scheduled backup exists |
+| Storage / Databases console views | Management create + list | ✅ Implemented — Limited (create/list only; no query editor, schema, or backup UI) |
 
 ---
 
@@ -570,4 +574,152 @@ Only rows backed by code are marked ✅. On-device AI and Fleet Mesh are marked 
 
 ---
 
-**Report version:** 2026.11.27 · **Author:** MobileCloud Engineering Division · **Classification:** Verified feature-system inventory · **Scope:** every feature in the repository · **Total features catalogued:** 278 · **Backed by code:** 248 · **UI-only:** 6 · **Architecture/absent:** 24 · **Automated tests:** 185.
+# Cross-Client Feature Coverage & Execution Audit
+
+Added 2026-11-27. This section **supersedes any conflicting status claim** elsewhere in this report, in the README, and in the source research report. It separates four things those documents conflate: (a) a UI surface existing, (b) a client being wired to an API, (c) an API persisting a record, and (d) the advertised operation actually executing.
+
+**Structural finding that drives everything below:** the platform has **two independent backends**:
+
+| Backend | Location | What it really does | How clients reach it |
+| :--- | :--- | :--- | :--- |
+| **Rust `core-engine`** | `core-engine/src/main.rs` | Real build pipeline, deploy/rollback, terminal gateway, preview proxy, GitHub webhook. Binds **loopback only** (`127.0.0.1:3000` control, `:3001` deployments), gated by a bearer `MOBILECLOUD_OPERATOR_TOKEN`. | Not called by the web console or the Android console. Only `web-cloudshell` (`/api/v1/terminal/*`, `/api/v1/preview/*`). |
+| **Next.js `web-dashboard` console** | `apps/web-dashboard/lib/server/api.ts` | SQLite management plane. Stores records; executes only storage/db/firewall/pairing/vitals/analytics. Builds, functions, workflows, billing, domains, team, webhooks are **record-only**. | Both the web console and the Android console call this API. |
+
+Consequently, a feature can be "real in the engine" yet **not reachable from either client**, and a client button can be wired to an API that **only stores a row**. The matrix records both axes.
+
+## A. Status taxonomy
+
+| Status | Meaning |
+| :--- | :--- |
+| **Operational** | Verified execution path performs the advertised function under its intended conditions. |
+| **Implemented — Limited** | Executes, but with significant restrictions, limited scope, or local-only behavior. |
+| **UI/API — Record Only** | UI/API accepts/stores/displays data; the advertised operation does **not** execute. |
+| **Demo / Simulation** | Mock data, specimen values, or paper-mode logic. |
+| **Architecture Only** | Design/scaffolding exists; functional implementation incomplete. |
+| **Not Implemented** | No meaningful implementation found. |
+| **Testnet Only** | Works on a test network; not verified in production. |
+| **Not Verified** | Insufficient evidence to confirm execution. |
+
+Client-column vocabulary: **Functional** · **Limited** · **Record-only** · **Mock / simulation** · **Missing** · **N/A** (not applicable).
+
+## B. Cross-client coverage matrix
+
+| System | Web Client | Android Client | Backend / Engine | Execution Reality | Evidence |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 1. CompileCloud / build engine | Limited — deployments always `blocked` | Limited — same API | Rust `core-engine` builds are real but env-gated & unsandboxed | Console path only records `blocked`; real builds run only via the loopback operator API | `api.ts:659-698,1128-1147`; `platform.ts:270`; `core-engine/src/main.rs:419-527,800` |
+| 2. Terminal / CloudShell / SSH | Limited — `/shell` runs a **fixed command list**, no PTY | **Functional** — real JNI PTY + tmux | `core-engine` terminal gateway real; browser CloudShell env-gated | Android terminal executes a real shell; web console shell cannot run arbitrary commands | `api.ts:1186-1206`; `platform.ts:268`; `TerminalSurfaceView.kt`,`NativePtyController.kt`; `core-engine/src/terminal_gateway/*` |
+| 3. Web management console | **Functional** (20 routes) | N/A | `apps/web-dashboard` Next.js + SQLite | Every route reads real DB data | `apps/web-dashboard/app/(console)/*`; `lib/store.tsx:201-202`; `api.ts` |
+| 4. Android native client | N/A | **Functional** (21 console routes + 8 screens) | Consumes the same Next.js console API | Console pages wired; 3 native screens are mockups (rows 9–12) | `ConsoleRoutes.kt`; `.../ui/console/**`, `.../ui/screens/**` |
+| 5. Edge tunnel | N/A | N/A | Rust `mobilecloud-tunnel` **real** (7 tests) | Compiles & tested; not deployed, not in CI, no client wiring | `edge/mobilecloud-tunnel/src/*`; `.github/workflows/ci.yml` |
+| 6. Edge shield / WAF | Limited — firewall rules stored & enforced in-process | Limited — CRUD only | Rust `mobilecloud-shield` real (11 tests) but **not mounted** in the dashboard | Dashboard enforces stored rules for the signed-in account only ("not a global anycast WAF"); the shield crate is not the enforcement path | `platform.ts:57,262`; `api.ts:1092-1126`; `edge/mobilecloud-shield/src/waf.rs` |
+| 7. Real-time synchronization | **Functional** | **Functional** | `server/realtime.mjs` RFC 6455 + transactional outbox | Real both ways | `lib/realtime.ts`; `RealtimeClient.kt`; `lib/server/realtime.mjs`; `docs/REALTIME-SYNC.md` |
+| 8. Agentic deploy / cache revalidation | Missing (no client integration) | Missing | Agent **deploy REAL**; **cache revalidation = 501** | Real builds can be queued by an operator token, but tag/path revalidation does not exist | `core-engine/src/main.rs:419-482,627-643` |
+| 9. FurlPay Proof-of-Reserve | Missing (no route) | **Mock / simulation** | `por-kernel` real & tested | Kernel tested; **no live evidence source**; clients render hard-coded values | `por-kernel/src/*`; `ProofOfReserveScreen.kt` |
+| 10. Stellar Soroban contract | Missing | Missing | Contract **real**, Testnet Only | Not verified in production | `contracts/por-verifier/src/lib.rs`; `docs/VERIFIED-BASELINE.md` |
+| 11. Trading engine | Missing (no route) | **Mock / simulation** (specimen trades; halt toggle persists) | Rust `trading-engine` = **Demo/paper** | No exchange connectivity; no orders signed | `trading-engine/src/*`; `TradingScreen.kt`; `core/NodeMode.kt` |
+| 12. Fleet mesh / multi-node | Record-only (`/node` = local host only) | **Mock / simulation** (screen self-labelled "SIMULATION") | **Architecture Only** | No discovery, load balancing, replication, or write forwarding | `components/MobileApp.tsx`; `app/node/page.tsx`; `MeshScreen.kt` |
+| 13. Storage / database / file APIs | Limited (create + list, local files) | Limited (create + list) | Real local filesystem; ≤1 MB/object, ≤100 MB/account | Works, but local-only; no query editor, schema, or backup | `api.ts:729-742,766-805` |
+| 14. Security / cryptography / zero-trust | **Functional** | **Functional** (biometrics + Keymaster) | Real (Ed25519, pairing, sessions, tokens) | Operational | `pairing.ts`,`identity.ts`; `HardwareAttestation.kt`; `edge/*` |
+| 15. AI/ML / on-device inference | Missing | Missing | **Not Implemented** | No ONNX/TFLite/NPU/embedding code anywhere | negative repo search; `platform.ts:272` |
+| 16. Observability / monitoring / analytics | **Functional** | Limited (reads server data) | Real (`metrics.ts`, vitals, percentiles) | Real server-side; Android consumes only | `metrics.ts`; `platform.ts:263-264`; `ObservabilityView` |
+| 17. Developer APIs / tooling | **Functional** | Limited | Real (`api.ts` + `core-engine /api/v1/*`) | Operational | `api.ts`; `core-engine/src/main.rs:702-714`; `ci.yml` |
+| 18. Domain / DNS / CDN / SSL | Record-only | Record-only | **No DNS/SSL/CDN**; cache revalidate 501 | Stores `status: "recorded"`; nothing is published | `api.ts:700-716`; `main.rs:638-642` |
+| 19. Billing / metering / payment | Record-only | Record-only | **No payment/metering engine** | Saves a plan string; `charged: false` always | `api.ts:1059-1068` |
+
+## C. Verified record-only functionality
+
+Each row was traced from UI entry point → API handler → persistence → (absence of) execution.
+
+| Feature | UI entry point | API handler | Execution reality | Evidence |
+| :--- | :--- | :--- | :--- | :--- |
+| **Functions** | `FunctionsView` / `FunctionsPage` | `POST /api/functions` stores name+route; `POST /api/functions/:id/invoke` | **No execution runtime.** Invoke returns HTTP **409** "No handler source is stored for this function, so it was not executed." | `api.ts:744-764` |
+| **Workflows** | `WorkflowsView` / `WorkflowsPage` | `POST /api/workflows`, `POST /api/workflows/:id/run` | **Runs are not executed.** A `workflow_runs` row is written with `status: 'not_executed'`. | `api.ts:1149-1171`; `platform.ts:273` |
+| **Builds / Deployments** | `BuildsView`, `DeploymentsView` / pages | `POST /api/builds`, `POST /api/deployments`, `POST /api/deployments/:id/rollback` | **Blocked.** Records `status:'blocked'` with `BUILDER_DISABLED`; rollback returns **503**. | `api.ts:659-698,1128-1147`; `platform.ts:270` |
+| **Billing** | `BillingView` / `BillingPage` | `POST /api/billing` | **No payment.** Updates `users.plan`; returns `{ charged: false }`. | `api.ts:1059-1068` |
+| **Domains** | `DomainsView` / `DomainsPage` | `POST /api/domains` | **No DNS/TLS.** Stores `status:'recorded'`, "No DNS provider is configured". | `api.ts:700-716` |
+| **Team** | `TeamView` / `TeamPage` | `POST /api/team` | **No delivery.** Stores invite with `email_sent = 0`; "SMTP is not configured". | `api.ts:807-821` |
+| **Webhooks** | `SettingsView` | `POST /api/webhooks` | **No delivery.** Stores URL + secret; returns `deliveryEnabled: false`. | `api.ts:1018-1036`; `platform.ts:274` |
+
+The engine's own capability manifest confirms these states verbatim (`apps/web-dashboard/lib/server/platform.ts:260-277`), including `AI Gateway: unavailable`, `Workflow worker: unavailable`, `Webhook delivery: unavailable`, `Firecracker sandboxes: unavailable`, `Mobile CI runners: unavailable`.
+
+## D. Financial Systems: Cross-Client Reality
+
+Separating the six financial layers (a robust lower layer does **not** imply an operational upper layer):
+
+| Layer | Status | Evidence |
+| :--- | :--- | :--- |
+| 1. Financial computation (PoR kernel) | **Implemented — Limited** | `por-kernel` U256 checked math, T+1 window, zero-rehypothecation; 58 tests. Rust/library only. |
+| 2. Evidence ingestion (custodian parsers) | **Implemented — Limited** | Alpaca JWS, ISO 20022 XMLDSig, Dinari TA parsers exist; **no live custodian feed is wired**. |
+| 3. Attestation generation | **Implemented — Limited** | `tools/por-attestor` signs envelopes; `por-submitter` builds the Stellar tx; `por-xdr-toolkit` encodes. Not invoked by any running service. |
+| 4. On-chain verification | **Testnet Only** | `contracts/por-verifier`; deployed contract `CDWNCMD6…OEDPI` on testnet; 26 regression snapshots. No mainnet. |
+| 5. Client presentation | **Mock / simulation** | Android `ProofOfReserveScreen.kt` is 100% hard-coded specimen values (`MISSING` statuses); **the web app has no PoR route at all**. |
+| 6. Transaction / execution capability | **Not Implemented / Demo** | Trading engine is paper/demo; no exchange connectivity; no orders signed. |
+
+**Client availability:**
+
+| Surface | Web | Android | Reality |
+| :--- | :--- | :--- | :--- |
+| Trading route/screen | **Missing** | Present but **mock** (`TradingScreen.kt`, specimen trades) | Only functional element is the emergency-halt toggle persisting to `SharedPreferences` (`core/NodeMode.kt`). |
+| PoR route/screen | **Missing** | Present but **mock** (`ProofOfReserveScreen.kt`) | Balances, attestation hash, and solvency state are literal constants. |
+
+**Financial state is not shared between clients.** The Android financial screens do not read the Rust engine or any chain; they render constants. Do **not** describe production financial functionality on the basis of the kernel, the testnet contract, mock data, or paper trading.
+
+## E. AI/ML Feature Audit
+
+| Claimed capability | Present in repo? | Implemented? | Client-invokable? |
+| :--- | :--- | :--- | :--- |
+| ONNX Runtime | ❌ No | ❌ Not Implemented | ❌ |
+| TensorFlow Lite | ❌ No | ❌ Not Implemented | ❌ |
+| NPU / Hexagon / hardware acceleration | ❌ No | ❌ Not Implemented | ❌ |
+| Model registry | ❌ No | ❌ Not Implemented | ❌ |
+| Embedding API | ❌ No | ❌ Not Implemented | ❌ |
+| Inference API | ❌ No (no route) | ❌ Not Implemented | ❌ |
+| Classification | ❌ No | ❌ Not Implemented | ❌ |
+| NLP | ❌ No | ❌ Not Implemented | ❌ |
+| Object detection | ❌ No | ❌ Not Implemented | ❌ |
+
+A repository-wide search for `onnx|ort|tflite|tensorflow|npu|hexagon|neural` returns **no implementation**. The engine manifest states `AI Gateway: unavailable — No model provider key is configured.` (`platform.ts:272`). The report's System 14 is **Not Implemented in full**.
+
+## F. Coverage quantification
+
+**System-level (denominator = 19 listed systems; one primary status each).**
+
+| Status | Count | Systems |
+| :--- | ---: | :--- |
+| **Operational** | 7 | Web console, Android client, Edge tunnel, Real-time sync, Security/crypto, Observability, Developer APIs |
+| **Implemented — Limited** | 6 | CompileCloud build engine, Terminal/CloudShell/SSH, Edge shield, Agentic deploy+cache, FurlPay PoR, Storage/DB/file |
+| **Testnet Only** | 1 | Soroban contract |
+| **Demo / Simulation** | 1 | Trading engine |
+| **Architecture Only** | 1 | Fleet mesh |
+| **Not Implemented** | 1 | AI/ML inference |
+| **UI/API — Record Only** | 2 | Domain/DNS/CDN/SSL, Billing/metering |
+| **Not Verified** | 0 | — |
+
+**Feature-level (denominator = 278 catalogued rows in §22, using the corrected §20 matrix).** 248 rows have a code artifact, 6 are UI-only, and 24 are architecture-only or absent. Within the 248, the seven record-only surfaces in §C still count as "code artifacts" (the handler exists) but **do not execute** their advertised function — which is why the feature-level 248 and the system-level 7/19 tell different, both-true stories.
+
+> **Do not** compute a single headline percentage by counting UI elements as operational features. The source report's "259 implemented / 93.2% complete" is not supported by the evidence and is withdrawn.
+
+## G. Prioritized recommendations roadmap
+
+| Priority | Gap | Recommended Implementation | Dependencies | Acceptance Criteria |
+| :--- | :--- | :--- | :--- | :--- |
+| **P0** | Engine builds run as the engine user with **no sandbox and no tenant isolation** (`core-engine/src/main.rs:800`) | Isolate builds (Firecracker/microVM or cgroup+user namespace); per-tenant working dirs | Linux host; `MOBILECLOUD_TRUSTED_LOCAL_PREVIEW` gating | A hostile build cannot read another tenant's tree or the operator token; integration test proves cross-tenant file access is denied |
+| **P0** | Financial screens show **hard-coded** balances/attestations (`ProofOfReserveScreen.kt`) | Remove mock data or gate it behind an explicit "DEMO DATA" banner; wire to `por-kernel` output or hide | PoR read API; evidence source | No screen displays a numeric balance that is not traceable to a signed envelope or an explicit demo label |
+| **P0** | Cache revalidation advertised as implemented but returns **501** (`main.rs:638-642`) | Implement tag/path invalidation against the proxy cache, or remove the claim from all docs/UI | Proxy cache index | `POST /api/v1/cache/revalidate` returns 200 and a subsequent request misses the cache for the named tag/path |
+| **P1** | Console builds/deploys are permanently `blocked` (`api.ts:684-686`) | Wire the console's deploy action to the engine's `/api/v1/deploy/agent` (with auth), or relabel the UI as "engine-gated" | Engine auth bridge; tenant auth (P0) | A console "deploy" produces a real build with logs, or the button is removed |
+| **P1** | Functions cannot execute (`409`, `api.ts:763`) | Add an execution runtime (WASI/isolate) or mark the surface read-only | Worker isolation (P0) | Invoking a registered function runs code and returns its output |
+| **P1** | Workflows never run (`not_executed`, `api.ts:1165`) | Add a workflow worker that executes persisted steps | Function runtime | A run's status transitions from `not_executed` to `succeeded` after executing at least one real step |
+| **P1** | Webhooks never deliver (`deliveryEnabled:false`) | Implement signed outbound delivery with retry/backoff | Egress + secret storage | A registered webhook receives a signed POST for a subscribed event within N seconds |
+| **P1** | Team invites never email (`email_sent:0`, `api.ts:815`) | SMTP/provider integration, or label invites as "record only" | Mail credentials | An invited address receives a working invite link |
+| **P1** | Domains never published; no TLS (`api.ts:706`) | DNS provider integration + ACME issuance, or relabel as "records only" | DNS API; ACME | A stored domain resolves to the node and serves a valid certificate |
+| **P2** | No automated SQLite backup/restore (`api.ts`; §13.3 "Planned") | Scheduled `VACUUM INTO` snapshot + documented restore | Storage | A restore from the latest snapshot reproduces the outbox cursor exactly |
+| **P2** | No health-check failover | Health probes + node draining | Fleet (P3) | A failed node is drained within a measurable window without dropping in-flight requests |
+| **P2** | Certificate management absent | ACME automation | DNS (P1) | Certificates renew unattended 30 days before expiry |
+| **P2** | **CI does not run the edge crates** (`.github/workflows/ci.yml`) | Add `cargo test -p mobilecloud-tunnel -p mobilecloud-shield` to the `rust` job | none | CI fails if the edge crates regress |
+| **P3** | Fleet mesh is UI-only (`MeshScreen.kt`) | Discovery, join/leave, LB integration, write forwarding, CRDT | Networking + P0/P1 | Two nodes form a mesh and survive one node's removal |
+| **P3** | AI/ML absent | ONNX Runtime + NPU backend + inference/embedding API | Model runtime | An inference endpoint returns model output on-device |
+| **P3** | Plugins, scheduled tasks, edge functions, GraphQL | Expansion work | Platform stable | Each ships behind an opt-in flag with tests |
+
+---
+
+**Report version:** 2026.11.27 (audited) · **Classification:** Verified feature-system inventory + cross-client execution audit · **Systems catalogued:** 19 · **Operational systems:** 7 · **Limited systems:** 6 · **Record-only systems:** 2 · **Demo:** 1 · **Architecture-only:** 1 · **Not implemented:** 1 · **Testnet-only:** 1 · **Features catalogued:** 278 · **Backed by code:** 248 · **Automated tests:** 185.

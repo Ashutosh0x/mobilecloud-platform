@@ -53,6 +53,7 @@ on testnet on 2026-11-21 — including live rejections of six attack classes.
 | [CLOUDSHELL.md](CLOUDSHELL.md) | The tri-modal terminal: Android app, browser CloudShell, SSH; credential model, web preview, file transfer, session durability |
 | [ROADMAP.md](ROADMAP.md) | Phase 1–6 plan with honest status tags |
 | [AUDIT-EVIDENCE.md](AUDIT-EVIDENCE.md) | Integrity manifests, verification scripts, commit anchors |
+| [FEATURE-REPORT.md](FEATURE-REPORT.md) | Verified feature-system inventory + cross-client execution audit (operational vs limited vs record-only vs mock vs absent) |
 
 ## Engineering specs (internal)
 
