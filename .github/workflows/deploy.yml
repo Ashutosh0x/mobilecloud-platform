@@ -30,7 +30,7 @@ on:
       - ".github/workflows/deploy.yml"
 
 env:
-  IMAGE: ghcr.io/${{ github.repository }}/identity-console
+  IMAGE_NAME: identity-console
 
 jobs:
   build:
@@ -51,14 +51,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The registry rejects an uppercase repository name, and the owner name is
+      # not lowercase everywhere. The metadata action normalises it.
+      - name: Compute the image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/identity-console
+          tags: |
+            type=sha
+            type=raw,value=latest
+
       - name: Build the console image
         uses: docker/build-push-action@v6
         with:
           context: apps/web-dashboard
           push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ github.sha }}
-            ${{ env.IMAGE }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
