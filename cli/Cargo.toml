@@ -1,0 +1,24 @@
+[package]
+name = "mobilecloud-cli"
+description = "MobileCloud command line client: device authorization, sessions, devices and revocation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mobilecloud"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "5"
+hex = { workspace = true }
+open = "5"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }

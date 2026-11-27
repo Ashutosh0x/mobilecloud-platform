@@ -65,18 +65,44 @@ export function userFromBearer(db: DatabaseSync, header: string | null) {
   const raw = header.slice("Bearer ".length);
   const now = Date.now();
   const row = db.prepare(
-    `SELECT u.id, u.email, u.name, u.role, u.plan, t.id AS tokenId, d.id AS deviceId
+    `SELECT u.id, u.email, u.name, u.role, u.plan, t.id AS tokenId, d.id AS deviceId,
+            t.name AS tokenName, t.scope AS tokenScope, t.client_type AS clientType, t.expires_at AS expiresAt
      FROM access_tokens t JOIN users u ON u.id = t.owner_id
      LEFT JOIN connected_devices d ON d.token_id = t.id AND d.owner_id = u.id
      WHERE t.token_hash = ? AND t.expires_at > ? AND (d.id IS NULL OR d.revoked = 0)`,
-  ).get(tokenHash(raw), now) as { id: string; email: string; name: string; role: string; plan: string; tokenId: string; deviceId: string | null } | undefined;
+  ).get(tokenHash(raw), now) as {
+    id: string;
+    email: string;
+    name: string;
+    role: string;
+    plan: string;
+    tokenId: string;
+    deviceId: string | null;
+    tokenName: string;
+    tokenScope: string | null;
+    clientType: string | null;
+    expiresAt: number;
+  } | undefined;
   if (!row) return null;
-  const { tokenId, deviceId, ...user } = row;
+  const { tokenId, deviceId, tokenName, tokenScope, clientType, expiresAt, ...user } = row;
   try {
     db.prepare("UPDATE access_tokens SET last_used = ? WHERE id = ? AND (last_used IS NULL OR last_used < ?)").run(now, tokenId, now - 60_000);
     if (deviceId) db.prepare("UPDATE connected_devices SET last_active = ? WHERE id = ? AND last_active < ?").run(now, deviceId, now - 60_000);
   } catch { /* Activity is advisory. */ }
-  return { user, tokenId, deviceId };
+  // The scope and class travel with the credential so a caller can tell a
+  // full-access CLI token from a read-only API token without a second query.
+  return {
+    user,
+    tokenId,
+    deviceId,
+    token: {
+      id: tokenId,
+      name: tokenName,
+      scope: tokenScope ?? "api:read",
+      client_type: clientType ?? "api",
+      expires_at: expiresAt,
+    },
+  };
 }
 
 export function startDevice(db: DatabaseSync) {

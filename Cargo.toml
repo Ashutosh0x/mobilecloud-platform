@@ -9,13 +9,15 @@ members = [
     "tools/por-submitter",
     "edge/mobilecloud-shield",
     "edge/mobilecloud-tunnel",
+    "fleet-mesh",
+    "cli",
 ]
 
 # The contracts crate compiles to `wasm32-unknown-unknown` for Stellar Soroban
 # and is excluded from the default host build/test target when the Soroban SDK
 # is not desired on the host toolchain. It stays a workspace member so that
 # `cargo build -p por-verifier --target wasm32-unknown-unknown` works directly.
-default-members = ["core-engine", "por-kernel", "trading-engine", "tools/por-attestor", "tools/por-submitter", "edge/mobilecloud-shield", "edge/mobilecloud-tunnel"]
+default-members = ["core-engine", "por-kernel", "trading-engine", "tools/por-attestor", "tools/por-submitter", "edge/mobilecloud-shield", "edge/mobilecloud-tunnel", "fleet-mesh", "cli"]
 
 [workspace.package]
 version = "1.0.0"

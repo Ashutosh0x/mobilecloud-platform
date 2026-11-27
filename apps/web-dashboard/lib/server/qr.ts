@@ -69,3 +69,19 @@ export async function renderPairingQr(payload: string): Promise<string> {
     color: { dark: "#0b1220", light: "#ffffff" },
   });
 }
+
+/**
+ * Renders a "Login with MobileCloud" ticket as a PNG data URL.
+ *
+ * The payload is longer than a pairing ticket, so the image is a little wider
+ * and uses a higher error correction level: a code that a camera cannot read
+ * is a login that never happens.
+ */
+export async function renderLoginQr(payload: string): Promise<string> {
+  return QRCode.toDataURL(payload, {
+    errorCorrectionLevel: "L",
+    margin: 1,
+    width: 360,
+    color: { dark: "#0b1220", light: "#ffffff" },
+  });
+}

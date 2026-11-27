@@ -9,6 +9,11 @@ import { dataRoot, isRetiredPassword, newId, openDb, tokenHash, verifyPassword }
 import { collectAnalytics, collectHost, collectMetrics } from "./metrics.ts";
 import { capabilities, collectObservability, inspectRequest, listBuilds, listDrives, listFirewallEvents, listRules, listWorkflows, observedJa4, summarizeVitals, trafficSummary } from "./platform.ts";
 import { approveDevice, clearProtection, createToken, gateCookie, identityProviders, listNotifications, listSessions, listTokens, listWebhooks, notify, pollDevice, protectionStatus, readGate, setProtection, startDevice, unlockProtection, userFromBearer } from "./identity.ts";
+import { assessLoginRisk, geoFor, listAuthEvents, logAuthEvent } from "./audit.ts";
+import { approveDeviceCode, checkScope, createAuthorizationCode, denyDeviceCode, findClient, findDeviceCode, OAuthError, redeemAuthorizationCode, redeemDeviceCode, refreshTokens, startDeviceGrant } from "./oauth.ts";
+import { beginAuthentication, beginRegistration, finishAuthentication, finishRegistration, PasskeyError, verifyAssertion } from "./passkey.ts";
+import { approveQrLogin, consumeQrLogin, createQrLogin, denyQrLogin, QrLoginError, qrLoginStatus, scanQrLogin } from "./qrlogin.ts";
+import { createSession, listAccountSessions, type ClientType } from "./sessions.ts";
 import { EVENT_TYPES, changesSince, latestSeq, publish, snapshot, tx } from "./events.ts";
 import { collectUsage, record as recordUsage } from "./metering.ts";
 import { FunctionError, validateSource, runFunction } from "./runtime.ts";
@@ -17,6 +22,7 @@ import { parseSteps, runWorkflow } from "./workflows.ts";
 import { insertAttestation, porState, validateAttestation } from "./por.ts";
 import { approveFromBrowser, approvePairing, closePairing, createPairing, expireStale, listDevices, markAwaitingApproval, publicPairing, readPairing, renameDevice, revokeDevice, scanPairing, scanProofMatches, secretMatches } from "./pairing.ts";
 import { encodePairingTicket, renderPairingQr } from "./qr.ts";
+import { renderLoginQr } from "./qr.ts";
 
 const COOKIE = "mc_session";
 const WEEK = 7 * 24 * 3600 * 1000;
@@ -29,7 +35,13 @@ function realtimePort(): number {
 }
 
 type Authentication =
-  | { user: User; via: "bearer"; tokenId: string; deviceId: string | null }
+  | {
+      user: User;
+      via: "bearer";
+      tokenId: string;
+      deviceId: string | null;
+      token: { id: string; name: string; scope: string; client_type: string; expires_at: number };
+    }
   | { user: User; via: "cookie"; hash: string; csrf: string; deviceId: string | null; createdAt: number | null };
 
 class RequestError extends Error {
@@ -45,6 +57,21 @@ function json(body: unknown, status = 200, headers?: Headers) {
   h.set("content-type", "application/json");
   h.set("cache-control", "no-store");
   return new Response(JSON.stringify(body), { status, headers: h });
+}
+
+/**
+ * Answers a consent decision.
+ *
+ * A browser form submits a normal navigation and wants the 302; the console's
+ * own consent page calls this endpoint with `accept: application/json` and
+ * navigates itself, which keeps the authorization code out of a fetch response
+ * the page cannot read across origins.
+ */
+function consentRedirect(req: Request, target: string) {
+  if ((req.headers.get("accept") ?? "").toLowerCase().includes("application/json")) {
+    return json({ redirect: target }, 200);
+  }
+  return new Response(null, { status: 302, headers: { location: target } });
 }
 
 function publicOrigin(): string | null {
@@ -142,9 +169,31 @@ function authenticate(req: Request, db: DatabaseSync): Authentication | null {
 }
 
 function requireRecentLogin(auth: Authentication) {
-  if (auth.via !== "cookie" || auth.deviceId || !auth.createdAt || Date.now() - auth.createdAt > 15 * 60_000) {
+  // A bearer credential is presented on every request, so there is no older
+  // cookie session to re-confirm. Its scope is checked by bearerMayWrite.
+  if (auth.via === "bearer") return;
+  if (auth.deviceId || !auth.createdAt || Date.now() - auth.createdAt > 15 * 60_000) {
     throw new RequestError(403, "Sign in again with your password to perform this action");
   }
+}
+
+/**
+ * The mutations a CLI bearer token may perform.
+ *
+ * Bearer tokens stay read-only by default: a leaked API token should not be
+ * able to change the account. A token issued with the `cli:full` scope is
+ * different — it is the credential `mobilecloud login` just created, and the
+ * CLI is expected to manage the very sessions and devices it belongs to. Only
+ * that narrow set of routes is writable; everything else still requires a
+ * cookie session with CSRF.
+ */
+function bearerMayWrite(auth: Authentication, method: string, parts: string[]): boolean {
+  if (auth.via !== "bearer") return true;
+  if (!auth.token.scope.split(/\s+/).includes("cli:full")) return false;
+  if (method === "POST" && parts[0] === "auth" && parts[1] === "logout") return true;
+  if (method === "POST" && parts[0] === "auth" && parts[1] === "refresh") return true;
+  if (method === "DELETE" && parts[0] === "devices" && parts[1] !== undefined) return true;
+  return method === "DELETE" && parts[0] === "auth" && parts[1] === "sessions" && parts[2] !== undefined;
 }
 
 function log(ownerId: string, level: "info" | "warn" | "error", source: string, message: string) {
@@ -393,13 +442,68 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       throw new RequestError(400, "A valid email and password are required");
     }
     throttle("login", email);
-    const row = db.prepare("SELECT id, password_hash FROM users WHERE email = ?").get(email) as { id: string; password_hash: string } | undefined;
+    const row = db.prepare("SELECT id, password_hash, locked_until FROM users WHERE email = ?").get(email) as
+      { id: string; password_hash: string; locked_until: number | null } | undefined;
     // Run the same costly verifier for missing and reset-required accounts.
-    const stored = row?.password_hash.includes(":") ? row.password_hash : `00000000000000000000000000000000:${"0".repeat(64)}`;
+    const stored = row?.password_hash.includes(":") ? row.password_hash : `${"0".repeat(32)}:${"0".repeat(64)}`;
     if (!verifyPassword(password, stored) || !row || isRetiredPassword(password)) {
+      logAuthEvent(db, {
+        userId: row?.id ?? null,
+        eventType: "auth.login.failed",
+        clientType: "web",
+        credentialType: "password",
+        ipAddress: requestIp(req),
+        userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+        geo: geoFor(requestIp(req)),
+        outcome: "failure",
+        failureReason: "invalid_credentials",
+      });
+      if (row) lockIfRepeatedFailures(db, row.id);
       throw new RequestError(401, "Email or password is wrong");
     }
+    if (row.locked_until && row.locked_until > Date.now()) {
+      throw new RequestError(429, "Too many failed attempts. Try again later.");
+    }
+    const risk = assessLoginRisk(db, {
+      userId: row.id,
+      ipAddress: requestIp(req),
+      userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+      geo: geoFor(requestIp(req)),
+      credentialType: "password",
+      timezone: userTimezone(db, row.id),
+    });
+    if (risk.action === "block") {
+      logAuthEvent(db, {
+        userId: row.id,
+        eventType: "auth.login.failed",
+        clientType: "web",
+        credentialType: "password",
+        ipAddress: requestIp(req),
+        geo: geoFor(requestIp(req)),
+        outcome: "suspicious",
+        failureReason: "risk_blocked",
+        riskScore: risk.riskScore,
+        metadata: { factors: risk.factors },
+      });
+      throw new RequestError(403, "This sign-in was blocked because it did not look like your usual sign-in.");
+    }
+    db.prepare("UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = ?").run(row.id);
     log(row.id, "info", "auth", "signed in");
+    logAuthEvent(db, {
+      userId: row.id,
+      eventType: "auth.login.password",
+      clientType: "web",
+      credentialType: "password",
+      ipAddress: requestIp(req),
+      userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+      geo: geoFor(requestIp(req)),
+      outcome: risk.action === "allow_with_notification" ? "suspicious" : "success",
+      riskScore: risk.riskScore,
+      metadata: { factors: risk.factors },
+    });
+    if (risk.action === "allow_with_notification") {
+      notify(db, row.id, "auth.suspicious", "New sign-in", "A sign-in happened from a place you have not used before.");
+    }
     return issueSession(db, row.id, req);
   }
 
@@ -527,6 +631,9 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
         }
       } else if (auth.via === "bearer") {
         db.prepare("DELETE FROM access_tokens WHERE owner_id = ? AND id = ?").run(owner, auth.tokenId);
+        // A refresh token outliving its access token would let a signed-out
+        // client mint a fresh one, so the whole chain is retired here.
+        db.prepare("UPDATE refresh_tokens SET revoked = 1 WHERE access_token_id = ?").run(auth.tokenId);
         publish(db, owner, "configuration.updated", auth.tokenId, { resource: "token", id: auth.tokenId, deleted: true });
       }
     });
@@ -547,7 +654,555 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     if (csrfToken && readCookie(req, CSRF_COOKIE) !== csrfToken) {
       headers.append("set-cookie", csrfCookieHeader(req, csrfToken, WEEK / 1000));
     }
-    return { response: json({ user: auth?.user ?? null, csrfToken }, 200, headers), status: 200, owner: auth?.user.id ?? null };
+    return { response: json({ user: auth?.user ?? null, csrfToken, token: auth?.via === "bearer" ? auth.token : null }, 200, headers), status: 200, owner: auth?.user.id ?? null };
+  }
+
+  // ---- Unified authentication ---------------------------------------------
+  // Passkey ceremonies, phone approved web login, and the OAuth grants the
+  // CLI uses. Everything below runs before the "sign in required" gate, because
+  // these endpoints are how a client signs in.
+
+  if (method === "POST" && parts[0] === "auth" && parts[1] === "passkey" && parts[2] === "register" && parts[3] === "begin") {
+    const input = await body(req, 16 * 1024);
+    const deviceName = str(input.deviceName) || null;
+    const devicePlatform = str(input.devicePlatform) || "android";
+    const session = authenticate(req, db);
+    if (session) requireCsrf(req, session);
+    let userId: string;
+    let email: string;
+    let displayName: string;
+    if (session) {
+      userId = session.user.id;
+      email = session.user.email;
+      displayName = session.user.name;
+    } else {
+      // A passkey never bootstraps an account. Without a session the caller
+      // proves the account with its password, once.
+      const emailInput = str(input.email).toLowerCase();
+      const password = str(input.password);
+      if (!emailInput || !password) throw new RequestError(401, "Sign in, or prove the account with its password, to add a passkey.");
+      throttle("passkey-register", emailInput, 6);
+      const row = db.prepare("SELECT id, email, name, password_hash FROM users WHERE email = ?").get(emailInput) as
+        { id: string; email: string; name: string; password_hash: string } | undefined;
+      const stored = row?.password_hash.includes(":") ? row.password_hash : `${"0".repeat(32)}:${"0".repeat(64)}`;
+      if (!row || !verifyPassword(password, stored) || isRetiredPassword(password)) {
+        logAuthEvent(db, {
+          eventType: "auth.login.failed",
+          clientType: "android",
+          credentialType: "password",
+          ipAddress: requestIp(req),
+          userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+          outcome: "failure",
+          failureReason: "invalid_credentials",
+        });
+        throw new RequestError(401, "Email or password is wrong");
+      }
+      userId = row.id;
+      email = row.email;
+      displayName = row.name;
+    }
+    const options = beginRegistration(db, passkeyConfig(req), { userId, email, displayName, deviceName, devicePlatform });
+    return { response: json(options), status: 200, owner: userId };
+  }
+
+  if (method === "POST" && parts[0] === "auth" && parts[1] === "passkey" && parts[2] === "register" && parts[3] === "finish") {
+    const input = await body(req, 256 * 1024);
+    throttle("passkey-register-finish");
+    let registered;
+    try {
+      registered = finishRegistration(db, passkeyConfig(req), { challengeId: str(input.challengeId), credential: input.credential });
+    } catch (error) {
+      if (error instanceof PasskeyError) throw new RequestError(error.status, error.message);
+      throw error;
+    }
+    const deviceName = str(input.deviceName) || "Android device";
+    const devicePlatform = str(input.devicePlatform) || "android";
+    const deviceId = linkPasskeyDevice(db, registered.userId, deviceName, devicePlatform, registered.credentialId);
+    const headers = startSession(db, registered.userId, req, deviceId, "android", registered.credentialId);
+    const user = db.prepare("SELECT id, email, name, role, plan FROM users WHERE id = ?").get(registered.userId);
+    logAuthEvent(db, {
+      userId: registered.userId,
+      eventType: "auth.credential.created",
+      clientType: "android",
+      credentialType: "passkey",
+      deviceId,
+      ipAddress: requestIp(req),
+      userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+      geo: geoFor(requestIp(req)),
+      outcome: "success",
+    });
+    return { response: json({ user, credential_id: registered.credentialId, device_id: deviceId }, 200, headers), status: 200, owner: registered.userId };
+  }
+
+  if (method === "POST" && parts[0] === "auth" && parts[1] === "passkey" && parts[2] === "login" && parts[3] === "begin") {
+    const input = await body(req, 8 * 1024);
+    const email = str(input.email).toLowerCase() || null;
+    const options = beginAuthentication(db, passkeyConfig(req), {
+      email,
+      deviceName: str(input.deviceName) || null,
+      devicePlatform: str(input.devicePlatform) || "android",
+    });
+    return { response: json(options), status: 200, owner: null };
+  }
+
+  if (method === "POST" && parts[0] === "auth" && parts[1] === "passkey" && parts[2] === "login" && parts[3] === "finish") {
+    const input = await body(req, 256 * 1024);
+    throttle("passkey-login");
+    let signed;
+    try {
+      signed = finishAuthentication(db, passkeyConfig(req), { challengeId: str(input.challengeId), credential: input.credential });
+    } catch (error) {
+      if (error instanceof PasskeyError) {
+        logAuthEvent(db, {
+          eventType: "auth.login.failed",
+          clientType: str(input.devicePlatform) || "android",
+          credentialType: "passkey",
+          ipAddress: requestIp(req),
+          userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+          outcome: "failure",
+          failureReason: "invalid_assertion",
+        });
+        throw new RequestError(error.status, error.message);
+      }
+      throw error;
+    }
+    const ip = requestIp(req);
+    const geo = geoFor(ip);
+    const risk = assessLoginRisk(db, {
+      userId: signed.userId,
+      ipAddress: ip,
+      userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+      geo,
+      credentialType: "passkey",
+      timezone: userTimezone(db, signed.userId),
+    });
+    if (risk.action === "block") {
+      logAuthEvent(db, {
+        userId: signed.userId,
+        eventType: "auth.login.failed",
+        clientType: str(input.devicePlatform) || "android",
+        credentialType: "passkey",
+        ipAddress: ip,
+        geo,
+        outcome: "suspicious",
+        failureReason: "risk_blocked",
+        riskScore: risk.riskScore,
+        metadata: { factors: risk.factors },
+      });
+      throw new RequestError(403, "This sign-in was blocked because it did not look like your usual sign-in.");
+    }
+    const deviceName = str(input.deviceName) || "Android device";
+    const devicePlatform = str(input.devicePlatform) || "android";
+    const deviceId = linkPasskeyDevice(db, signed.userId, deviceName, devicePlatform, signed.credentialId);
+    const headers = startSession(db, signed.userId, req, deviceId, "android", signed.credentialId);
+    const user = db.prepare("SELECT id, email, name, role, plan FROM users WHERE id = ?").get(signed.userId);
+    logAuthEvent(db, {
+      userId: signed.userId,
+      eventType: "auth.login.passkey",
+      clientType: devicePlatform,
+      credentialType: "passkey",
+      deviceId,
+      ipAddress: ip,
+      userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+      geo,
+      outcome: risk.action === "allow_with_notification" ? "suspicious" : "success",
+      riskScore: risk.riskScore,
+      metadata: { factors: risk.factors },
+    });
+    if (risk.action === "allow_with_notification") {
+      notify(db, signed.userId, "auth.suspicious", "New sign-in", "A sign-in happened from a place you have not used before.");
+    }
+    return { response: json({ user, device_id: deviceId }, 200, headers), status: 200, owner: signed.userId };
+  }
+
+  if (method === "POST" && parts[0] === "auth" && parts[1] === "qr-login" && parts[2] === "init") {
+    const input = await body(req, 8 * 1024);
+    throttle("qr-login-init");
+    const browser = str(input.browser).slice(0, 180) || null;
+    const created = createQrLogin(db, passkeyConfig(req), { browserInfo: browser, ipAddress: requestIp(req) });
+    const qrDataUrl = await renderLoginQr(created.qrPayload);
+    logAuthEvent(db, {
+      eventType: "auth.login.qr_requested",
+      clientType: "web",
+      credentialType: "qr",
+      ipAddress: requestIp(req),
+      userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+      outcome: "success",
+    });
+    return {
+      response: json({
+        challenge_id: created.challengeId,
+        verification_code: created.verificationCode,
+        qr_data_url: qrDataUrl,
+        // The payload is the same string the QR encodes. Returning it lets the
+        // console offer "open in app" and lets tests exercise the phone half.
+        qr_payload: created.qrPayload,
+        poll_secret: created.pollSecret,
+        expires_in_ms: created.expiresInMs,
+      }),
+      status: 200,
+      owner: null,
+    };
+  }
+
+  if (method === "POST" && parts[0] === "auth" && parts[1] === "qr-login" && parts[2] && parts[3] === "scan") {
+    const input = await body(req, 8 * 1024);
+    try {
+      scanQrLogin(db, parts[2], { deviceName: str(input.deviceName) || null, devicePlatform: str(input.devicePlatform) || null });
+    } catch (error) {
+      if (error instanceof QrLoginError) throw new RequestError(error.status, error.message);
+      throw error;
+    }
+    return { response: json({ ok: true }), status: 200, owner: null };
+  }
+
+  if (method === "POST" && parts[0] === "auth" && parts[1] === "qr-login" && parts[2] && parts[3] === "approve") {
+    const input = await body(req, 256 * 1024);
+    throttle("qr-login-approve");
+    const challenge = str(input.challenge);
+    const verificationCode = str(input.verification_code) || str(input.verificationCode);
+    let userId: string;
+    let credentialId: string | null = null;
+    let deviceId: string | null = null;
+    if (input.credential) {
+      // The phone proved itself with a passkey over the browser's challenge.
+      let asserted;
+      try {
+        asserted = verifyAssertion(db, passkeyConfig(req), { credential: input.credential, expectedChallengeHex: challenge });
+      } catch (error) {
+        if (error instanceof PasskeyError) throw new RequestError(error.status, error.message);
+        throw error;
+      }
+      userId = asserted.userId;
+      credentialId = asserted.credentialId;
+    } else {
+      // Without a passkey the phone's own signed in session stands in.
+      const session = authenticate(req, db);
+      if (!session) throw new RequestError(401, "Sign in on the phone before approving this request.");
+      requireCsrf(req, session);
+      userId = session.user.id;
+      deviceId = session.deviceId;
+    }
+    try {
+      approveQrLogin(db, { challengeId: parts[2], challenge, verificationCode, userId, credentialId, deviceId });
+    } catch (error) {
+      if (error instanceof QrLoginError) throw new RequestError(error.status, error.message);
+      throw error;
+    }
+    logAuthEvent(db, {
+      userId,
+      eventType: "auth.login.qr_approved",
+      clientType: "web",
+      credentialType: credentialId ? "passkey" : "token",
+      deviceId,
+      ipAddress: requestIp(req),
+      userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+      outcome: "success",
+    });
+    notify(db, userId, "auth.session", "Web sign-in approved", "A browser signed in to your account from your phone.");
+    return { response: json({ ok: true }), status: 200, owner: userId };
+  }
+
+  if (method === "POST" && parts[0] === "auth" && parts[1] === "qr-login" && parts[2] && parts[3] === "deny") {
+    try {
+      denyQrLogin(db, parts[2]);
+    } catch (error) {
+      if (error instanceof QrLoginError) throw new RequestError(error.status, error.message);
+      throw error;
+    }
+    return { response: json({ ok: true }), status: 200, owner: null };
+  }
+
+  if (method === "GET" && parts[0] === "auth" && parts[1] === "qr-login" && parts[2] && !parts[3]) {
+    const pollSecret = new URL(req.url).searchParams.get("poll") ?? "";
+    let state;
+    try {
+      state = qrLoginStatus(db, parts[2], pollSecret);
+    } catch (error) {
+      if (error instanceof QrLoginError) throw new RequestError(error.status, error.message);
+      throw error;
+    }
+    if (state.status !== "approved" || !state.row) {
+      return { response: json({ status: state.status.toUpperCase() }), status: 200, owner: null };
+    }
+    // The browser that started the flow now receives the session. Claiming the
+    // challenge and issuing the session happen in one transaction, so two polls
+    // racing cannot both walk away with a credential.
+    const row = state.row;
+    const headers = tx(db, () => {
+      if (!consumeQrLogin(db, parts[2])) return null;
+      return startSession(db, row.approved_by ?? "", req, row.device_id, "web", row.credential_id);
+    });
+    if (!headers) {
+      return { response: json({ status: "CONSUMED" }), status: 200, owner: null };
+    }
+    logAuthEvent(db, {
+      userId: row.approved_by,
+      eventType: "auth.login.qr_approved",
+      clientType: "web",
+      credentialType: "qr",
+      deviceId: row.device_id,
+      ipAddress: requestIp(req),
+      userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+      outcome: "success",
+    });
+    return { response: json({ status: "APPROVED" }, 200, headers), status: 200, owner: row.approved_by };
+  }
+
+  // ---- OAuth: device authorization grant and PKCE -------------------------
+
+  if (method === "POST" && parts[0] === "oauth" && parts[1] === "device" && parts[2] === "code") {
+    const input = await body(req, 8 * 1024);
+    throttle("oauth-device-code");
+    try {
+      const grant = startDeviceGrant(db, {
+        clientId: str(input.client_id) || str(input.clientId),
+        scope: str(input.scope) || null,
+        verificationUri: `${originOf(req)}/activate`,
+      });
+      return {
+        response: json({
+          device_code: grant.deviceCode,
+          user_code: grant.userCode,
+          verification_uri: grant.verificationUri,
+          verification_uri_complete: grant.verificationUriComplete,
+          expires_in: grant.expiresIn,
+          interval: grant.interval,
+        }),
+        status: 200,
+        owner: null,
+      };
+    } catch (error) {
+      if (error instanceof OAuthError) throw new RequestError(error.status, error.message);
+      throw error;
+    }
+  }
+
+  if (method === "POST" && parts[0] === "oauth" && parts[1] === "device" && parts[2] === "verify") {
+    const input = await body(req, 8 * 1024);
+    const session = authenticate(req, db);
+    if (!session) throw new RequestError(401, "Sign in to approve this request.");
+    requireCsrf(req, session);
+    const code = findDeviceCode(db, str(input.user_code) || str(input.userCode));
+    if (!code || code.expires_at <= Date.now()) throw new RequestError(404, "That code is not valid.");
+    if (code.approved_by) throw new RequestError(409, "That request was already approved.");
+    return {
+      response: json({
+        id: code.id,
+        user_code: code.user_code,
+        client_id: code.client_id,
+        scope: code.scope,
+        status: code.status,
+        expires_in_ms: Math.max(0, code.expires_at - Date.now()),
+      }),
+      status: 200,
+      owner: session.user.id,
+    };
+  }
+
+  if (method === "POST" && parts[0] === "oauth" && parts[1] === "device" && parts[2] && parts[3] === "approve") {
+    const session = authenticate(req, db);
+    if (!session) throw new RequestError(401, "Sign in to approve this request.");
+    requireCsrf(req, session);
+    const input = await body(req, 4096);
+    try {
+      approveDeviceCode(db, parts[2], session.user.id, {
+        name: str(input.device_name) || str(input.deviceName) || null,
+        platform: str(input.device_platform) || str(input.devicePlatform) || null,
+      });
+    } catch (error) {
+      if (error instanceof OAuthError) throw new RequestError(error.status, error.message);
+      throw error;
+    }
+    logAuthEvent(db, {
+      userId: session.user.id,
+      eventType: "auth.login.device_grant",
+      clientType: "cli",
+      credentialType: "device_grant",
+      ipAddress: requestIp(req),
+      userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+      outcome: "success",
+    });
+    notify(db, session.user.id, "auth.session", "CLI signed in", "A command line client was authorized.");
+    return { response: json({ ok: true }), status: 200, owner: session.user.id };
+  }
+
+  if (method === "POST" && parts[0] === "oauth" && parts[1] === "device" && parts[2] && parts[3] === "deny") {
+    const session = authenticate(req, db);
+    if (!session) throw new RequestError(401, "Sign in to answer this request.");
+    requireCsrf(req, session);
+    try {
+      denyDeviceCode(db, parts[2]);
+    } catch (error) {
+      if (error instanceof OAuthError) throw new RequestError(error.status, error.message);
+      throw error;
+    }
+    return { response: json({ ok: true }), status: 200, owner: session.user.id };
+  }
+
+  if (method === "POST" && parts[0] === "oauth" && parts[1] === "token") {
+    const input = await body(req, 16 * 1024);
+    const grantType = str(input.grant_type) || str(input.grantType);
+    throttle("oauth-token", undefined, 240);
+    try {
+      if (grantType === "urn:ietf:params:oauth:grant-type:device_code") {
+        const pair = redeemDeviceCode(db, {
+          deviceCode: str(input.device_code) || str(input.deviceCode),
+          clientId: str(input.client_id) || str(input.clientId),
+        });
+        return {
+          response: json({
+            access_token: pair.accessToken,
+            token_type: pair.tokenType,
+            expires_in: pair.expiresIn,
+            refresh_token: pair.refreshToken,
+            scope: pair.scope,
+          }),
+          status: 200,
+          owner: null,
+        };
+      }
+      if (grantType === "refresh_token") {
+        const pair = refreshTokens(db, str(input.refresh_token) || str(input.refreshToken));
+        return {
+          response: json({
+            access_token: pair.accessToken,
+            token_type: pair.tokenType,
+            expires_in: pair.expiresIn,
+            refresh_token: pair.refreshToken,
+            scope: pair.scope,
+          }),
+          status: 200,
+          owner: null,
+        };
+      }
+      if (grantType === "authorization_code") {
+        const pair = redeemAuthorizationCode(db, {
+          code: str(input.code),
+          codeVerifier: str(input.code_verifier) || str(input.codeVerifier),
+          clientId: str(input.client_id) || str(input.clientId),
+          redirectUri: str(input.redirect_uri) || str(input.redirectUri),
+        });
+        return {
+          response: json({
+            access_token: pair.accessToken,
+            token_type: pair.tokenType,
+            expires_in: pair.expiresIn,
+            refresh_token: pair.refreshToken,
+            scope: pair.scope,
+          }),
+          status: 200,
+          owner: null,
+        };
+      }
+    } catch (error) {
+      if (error instanceof OAuthError) {
+        return {
+          response: json({ error: error.code, error_description: error.message }, error.status),
+          status: error.status,
+          owner: null,
+        };
+      }
+      throw error;
+    }
+    throw new RequestError(400, `That grant type is not supported: ${grantType}`);
+  }
+
+  if (method === "GET" && parts[0] === "oauth" && parts[1] === "authorize") {
+    const params = new URL(req.url).searchParams;
+    const clientId = params.get("client_id") ?? "";
+    const redirectUri = params.get("redirect_uri") ?? "";
+    const challenge = params.get("code_challenge") ?? "";
+    const client = findClient(clientId);
+    if (!client) throw new RequestError(400, "That client is not registered.");
+    if (!isLoopbackRedirect(redirectUri)) throw new RequestError(400, "That redirect address is not registered.");
+    if (!challenge) throw new RequestError(400, "A code challenge is required.");
+    const target = new URL("/authorize", originOf(req));
+    target.search = params.toString();
+    return { response: new Response(null, { status: 302, headers: { location: target.toString() } }), status: 302, owner: null };
+  }
+
+  if (method === "POST" && parts[0] === "oauth" && parts[1] === "authorize") {
+    const input = await body(req, 8 * 1024);
+    const session = authenticate(req, db);
+    if (!session) throw new RequestError(401, "Sign in to authorize this client.");
+    requireCsrf(req, session);
+    const clientId = str(input.client_id) || str(input.clientId);
+    const redirectUri = str(input.redirect_uri) || str(input.redirectUri);
+    const challenge = str(input.code_challenge) || str(input.codeChallenge);
+    const state = str(input.state);
+    const client = findClient(clientId);
+    if (!client) throw new RequestError(400, "That client is not registered.");
+    if (!isLoopbackRedirect(redirectUri)) throw new RequestError(400, "That redirect address is not registered.");
+    const scope = checkScope(client, str(input.scope) || null);
+    if (str(input.decision) !== "approve") {
+      const denied = new URL(redirectUri);
+      denied.searchParams.set("error", "access_denied");
+      if (state) denied.searchParams.set("state", state);
+      const response = consentRedirect(req, denied.toString());
+      return { response, status: response.status, owner: session.user.id };
+    }
+    const code = createAuthorizationCode(db, {
+      clientId,
+      userId: session.user.id,
+      redirectUri,
+      scope,
+      codeChallenge: challenge,
+      codeChallengeMethod: "S256",
+    });
+    const target = new URL(redirectUri);
+    target.searchParams.set("code", code);
+    if (state) target.searchParams.set("state", state);
+    logAuthEvent(db, {
+      userId: session.user.id,
+      eventType: "auth.login.device_grant",
+      clientType: "cli",
+      credentialType: "device_grant",
+      ipAddress: requestIp(req),
+      userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+      outcome: "success",
+    });
+    const response = consentRedirect(req, target.toString());
+    return { response, status: response.status, owner: session.user.id };
+  }
+
+  if (method === "GET" && parts[0] === "auth" && parts[1] === "events") {
+    const auth = authenticate(req, db);
+    if (!auth) throw new RequestError(401, "Sign in required");
+    return { response: json({ events: listAuthEvents(db, auth.user.id) }), status: 200, owner: auth.user.id };
+  }
+
+  if (method === "POST" && parts[0] === "auth" && parts[1] === "refresh") {
+    const input = await body(req, 8 * 1024);
+    const session = authenticate(req, db);
+    if (!session) throw new RequestError(401, "Sign in required");
+    requireCsrf(req, session);
+    let pair;
+    try {
+      pair = refreshTokens(db, str(input.refresh_token) || str(input.refreshToken));
+    } catch (error) {
+      if (error instanceof OAuthError) throw new RequestError(error.status, error.message);
+      throw error;
+    }
+    logAuthEvent(db, {
+      userId: session.user.id,
+      eventType: "auth.token.refreshed",
+      clientType: "cli",
+      credentialType: "token",
+      ipAddress: requestIp(req),
+      outcome: "success",
+    });
+    return {
+      response: json({
+        access_token: pair.accessToken,
+        token_type: pair.tokenType,
+        expires_in: pair.expiresIn,
+        refresh_token: pair.refreshToken,
+        scope: pair.scope,
+      }),
+      status: 200,
+      owner: session.user.id,
+    };
   }
 
   const auth = authenticate(req, db);
@@ -556,13 +1211,60 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   const owner = user.id;
   const operatorMetrics = user.role === "owner" && auth.via === "cookie" && auth.deviceId === null;
   requireCsrf(req, auth);
-  if (auth.via === "bearer" && method !== "GET" && method !== "HEAD") {
-    throw new RequestError(403, "Bearer credentials are read-only; use an authenticated session for changes");
+  if (method !== "GET" && method !== "HEAD" && !bearerMayWrite(auth, method, parts)) {
+    throw new RequestError(403, "This credential may only read the account. Sign in to make changes.");
   }
   if (method !== "GET" && (parts[0] === "tokens" || parts[0] === "sessions" || parts[0] === "webhooks" || parts[0] === "devices"
+    || (parts[0] === "auth" && parts[1] === "sessions")
     || key === "POST device/approve" || (parts[0] === "device" && parts[1] === "pairing")
     || key === "POST protection" || key === "DELETE protection")) {
     requireRecentLogin(auth);
+  }
+  // Client scoped sessions, listed and revoked by the console and by
+  // `mobilecloud sessions` / `mobilecloud revoke-session`.
+  if (key === "GET auth/sessions") {
+    return {
+      response: json({ sessions: listAccountSessions(db, owner, auth.via === "cookie" ? auth.hash : null) }),
+      status: 200,
+      owner,
+    };
+  }
+  if (method === "DELETE" && parts[0] === "auth" && parts[1] === "sessions" && parts[2]) {
+    const target = db.prepare(
+      "SELECT id, token_hash AS tokenHash FROM sessions WHERE user_id = ? AND (id = ? OR token_hash = ?)",
+    ).get(owner, parts[2], parts[2]) as { id: string | null; tokenHash: string } | undefined;
+    if (!target) {
+      // A CLI or API credential has no session row; `sessions` lists it as a
+      // token, and revoking it retires the token and its refresh chain.
+      const token = db.prepare(
+        "SELECT id, client_type AS clientType FROM access_tokens WHERE owner_id = ? AND id = ? AND expires_at > ?",
+      ).get(owner, parts[2], Date.now()) as { id: string; clientType: string | null } | undefined;
+      if (!token) throw new RequestError(404, "Session not found");
+      const now = Date.now();
+      tx(db, () => {
+        db.prepare("UPDATE access_tokens SET expires_at = ? WHERE id = ?").run(now, token.id);
+        db.prepare("UPDATE refresh_tokens SET revoked = 1 WHERE access_token_id = ?").run(token.id);
+        publish(db, owner, "session.revoked", token.id, {
+          sessionId: token.id,
+          reason: "revoked_by_user",
+          clientType: token.clientType ?? "cli",
+        });
+      });
+      log(owner, "info", "auth", "revoked a client token");
+      return { response: json({ ok: true }), status: 200, owner };
+    }
+    if (auth.via === "cookie" && target.tokenHash === auth.hash) {
+      throw new RequestError(400, "That is the current browser session. Sign out instead.");
+    }
+    tx(db, () => {
+      db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(target.tokenHash);
+      publish(db, owner, "session.revoked", target.id ?? target.tokenHash, {
+        sessionId: target.id ?? target.tokenHash,
+        reason: "revoked_by_user",
+      });
+    });
+    log(owner, "info", "auth", "revoked a client session");
+    return { response: json({ ok: true }), status: 200, owner };
   }
   const blocked = inspectRequest(db, owner, req, parts.join("/"));
   if (blocked) {
@@ -1284,22 +1986,133 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   return { response: json({ error: "Not found" }, 404), status: 404, owner };
 }
 
-/** Caller holds the transaction for credential issuance and its outbox rows. */
-function startSession(db: DatabaseSync, userId: string, req: Request, deviceId: string | null = null): Headers {
-  const token = randomBytes(32).toString("hex");
-  const csrf = randomBytes(32).toString("hex");
-  const agent = (req.headers.get("user-agent") ?? "unknown").slice(0, 180);
-  const sessionId = newId();
+/**
+ * The relying party a passkey ceremony is bound to.
+ *
+ * The relying party id is the host of the console, and the origin is the
+ * console's public address. Both come from the server's own configuration
+ * when there is one, so a request cannot talk the server into accepting a
+ * passkey for somebody else's site.
+ */
+function passkeyConfig(req: Request): { rpId: string; rpName: string; origin: string } {
+  const origin = publicOrigin() ?? originOf(req);
+  const url = new URL(origin);
+  return { rpId: url.hostname, rpName: "MobileCloud", origin };
+}
+
+/** The address a request came from, when the deployment can be trusted for it. */
+function requestIp(req: Request): string | null {
+  const forwarded = req.headers.get("x-forwarded-for");
+  if (forwarded) {
+    const first = forwarded.split(",")[0]?.trim();
+    if (first && first.length <= 64) return first;
+  }
+  return req.headers.get("x-real-ip")?.slice(0, 64) ?? null;
+}
+
+/**
+ * Locks an account after a run of failed password attempts.
+ *
+ * Ten failures inside fifteen minutes close the account for fifteen minutes.
+ * The account, not the address, is what gets locked, so a shared address
+ * cannot lock an account out and a distributed attempt cannot spread over it.
+ */
+function lockIfRepeatedFailures(db: DatabaseSync, userId: string): void {
+  const failures = db.prepare(
+    "SELECT COUNT(*) AS n FROM auth_events WHERE user_id = ? AND event_type = 'auth.login.failed' AND created_at > ?",
+  ).get(userId, Date.now() - 15 * 60_000) as { n: number };
+  if (Number(failures?.n ?? 0) < 10) return;
+  db.prepare("UPDATE users SET failed_attempts = failed_attempts + 1, locked_until = ? WHERE id = ?").run(Date.now() + 15 * 60_000, userId);
+  logAuthEvent(db, {
+    userId,
+    eventType: "auth.suspicious.brute_force",
+    clientType: "web",
+    credentialType: "password",
+    outcome: "suspicious",
+    riskScore: "critical",
+    failureReason: "account_locked",
+  });
+  notify(db, userId, "auth.suspicious", "Account locked", "Too many failed sign-in attempts. The account was locked for 15 minutes.");
+}
+
+/** The timezone an account records, used by the unusual hour risk factor. */
+function userTimezone(db: DatabaseSync, userId: string): string | null {
+  const row = db.prepare("SELECT timezone FROM users WHERE id = ?").get(userId) as { timezone: string | null } | undefined;
+  return row?.timezone ?? null;
+}
+
+/**
+ * Records the device a passkey belongs to.
+ *
+ * A phone that registers a passkey becomes a linked device with its own
+ * durable credential, so it can be listed and revoked like any other device.
+ */
+function linkPasskeyDevice(db: DatabaseSync, userId: string, name: string, platform: string, credentialId: string): string {
+  const existing = db.prepare(
+    "SELECT id FROM connected_devices WHERE owner_id = ? AND platform = ? AND revoked = 0 AND method = 'passkey' ORDER BY created_at DESC LIMIT 1",
+  ).get(userId, platform) as { id: string } | undefined;
   const now = Date.now();
+  if (existing) {
+    db.prepare("UPDATE connected_devices SET name = ?, last_active = ? WHERE id = ?").run(name.slice(0, 60), now, existing.id);
+    return existing.id;
+  }
+  const issued = createToken(db, userId, `device: ${name}`.slice(0, 60), 30);
+  const deviceId = newId();
   db.prepare(
-    "INSERT INTO sessions (id, token_hash, user_id, expires_at, user_agent, created_at, csrf, device_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  ).run(sessionId, tokenHash(token), userId, now + WEEK, agent, now, csrf, deviceId);
-  publish(db, userId, "session.created", sessionId, { sessionId, userAgent: agent });
-  notify(db, userId, "auth.session", "New session", agent);
-  const headers = new Headers();
-  headers.append("set-cookie", cookieHeader(req, token, WEEK / 1000));
-  headers.append("set-cookie", csrfCookieHeader(req, csrf, WEEK / 1000));
-  return headers;
+    `INSERT INTO connected_devices (id, owner_id, token_id, name, platform, method, created_at, paired_at, last_active, revoked)
+     VALUES (?, ?, ?, ?, ?, 'passkey', ?, ?, ?, 0)`,
+  ).run(deviceId, userId, issued.id, name.slice(0, 60), platform, now, now, now);
+  db.prepare("UPDATE credentials SET device_name = ? WHERE id = ? AND user_id = ?").run(name.slice(0, 60), credentialId, userId);
+  return deviceId;
+}
+
+/**
+ * Accepts a loopback redirect for the PKCE flow.
+ *
+ * RFC 8252 lets a native client use any port on the loopback address, so the
+ * port is checked for range but not for an exact match. Nothing else is
+ * accepted: a redirect to a remote host would leak the authorization code.
+ */
+function isLoopbackRedirect(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:") return false;
+  if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost" && url.hostname !== "[::1]") return false;
+  if (url.username || url.password) return false;
+  return url.pathname.length > 0 && url.pathname.length <= 64;
+}
+
+/** Caller holds the transaction for credential issuance and its outbox rows. */
+function startSession(
+  db: DatabaseSync,
+  userId: string,
+  req: Request,
+  deviceId: string | null = null,
+  clientType: ClientType = "web",
+  credentialId: string | null = null,
+): Headers {
+  const build = () => {
+    const created = createSession(db, {
+      userId,
+      clientType,
+      userAgent: req.headers.get("user-agent") ?? "unknown",
+      deviceId,
+      credentialId,
+      ipAddress: requestIp(req),
+    });
+    const maxAge = Math.max(1, Math.floor((created.expiresAt - Date.now()) / 1000));
+    notify(db, userId, "auth.session", "New session", req.headers.get("user-agent") ?? "unknown");
+    const headers = new Headers();
+    headers.append("set-cookie", cookieHeader(req, created.token, maxAge));
+    headers.append("set-cookie", csrfCookieHeader(req, created.csrf, maxAge));
+    return headers;
+  };
+  // The session row and the event that announces it belong together.
+  return db.isTransaction ? build() : tx(db, build);
 }
 
 function issueSession(db: DatabaseSync, userId: string, req: Request) {

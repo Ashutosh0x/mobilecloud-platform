@@ -235,6 +235,12 @@ dialog.modal::backdrop { background: rgba(0,0,0,0.72); }
 }
 .eye:hover { color: var(--text); }
 .field input, .auth-card input { width: 100%; }
+/* Sign-in with the phone: the QR, the shared code, and the consent links. */
+.auth-qr-flow { display: grid; gap: 10px; }
+.auth-qr { width: 220px; height: 220px; display: block; margin: 4px auto; border-radius: 12px; background: #fff; padding: 10px; }
+.auth-code { font-family: var(--mono); font-size: 20px; letter-spacing: 3px; text-align: center; text-transform: uppercase; }
+.auth-link { display: grid; place-items: center; height: 36px; border: 1px solid var(--accent); }
+.auth-card code { font-family: var(--mono); font-size: 14px; letter-spacing: 1px; }
 @keyframes shine { to { background-position: -200% 0; } }
 @keyframes blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
 

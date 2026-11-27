@@ -1,0 +1,27 @@
+[package]
+name = "fleet-mesh"
+description = "MobileCloud Fleet Mesh: multi-device orchestration, discovery, load balancing, and CRDT replication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "fleet_mesh"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+axum = { version = "0.7", features = ["ws"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+dashmap = "6"
+rand = "0.8"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

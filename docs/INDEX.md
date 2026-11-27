@@ -51,9 +51,14 @@ on testnet on 2026-11-21 — including live rejections of six attack classes.
 | [ACURAST-TEE.md](ACURAST-TEE.md) | Attestor signing architecture and TEE roadmap |
 | [INTEGRATION-GUIDE.md](INTEGRATION-GUIDE.md) | How to read and independently verify the proof-of-reserve |
 | [CLOUDSHELL.md](CLOUDSHELL.md) | The tri-modal terminal: Android app, browser CloudShell, SSH; credential model, web preview, file transfer, session durability |
+| [AUTH.md](AUTH.md) | Unified authentication: passkeys, Login with MobileCloud, CLI device and PKCE grants, scoped sessions, refresh rotation, audit and login risk |
 | [ROADMAP.md](ROADMAP.md) | Phase 1–6 plan with honest status tags |
 | [AUDIT-EVIDENCE.md](AUDIT-EVIDENCE.md) | Integrity manifests, verification scripts, commit anchors |
 | [FEATURE-REPORT.md](FEATURE-REPORT.md) | Verified feature-system inventory + cross-client execution audit (operational vs limited vs record-only vs mock vs absent) |
+| [IMPLEMENTATION_AUDIT.md](IMPLEMENTATION_AUDIT.md) | Phase 0 repository audit: component inventory, executed test baseline, and the honest list of absent subsystems |
+| [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) | The 12-phase engineering program with per-phase status, acceptance criteria, and the architecture decision record |
+| [SECURITY_THREAT_MODEL.md](SECURITY_THREAT_MODEL.md) | Platform-plane assets, trust boundaries, threat table with control status, and the adversarial test plan |
+| [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) | What is deployable today, secrets posture, health/backup/DR gaps, and the pre-launch checklist |
 
 ## Engineering specs (internal)
 

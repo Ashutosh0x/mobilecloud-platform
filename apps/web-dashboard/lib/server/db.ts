@@ -328,6 +328,131 @@ CREATE TABLE IF NOT EXISTS event_cursors (
   seq INTEGER NOT NULL,
   at INTEGER NOT NULL
 );
+-- ============================================================================
+-- UNIFIED AUTHENTICATION (schema v5)
+-- ============================================================================
+-- WebAuthn / passkey credentials. The public key is stored as the COSE_Key
+-- bytes the authenticator produced, so verification never re-encodes it.
+CREATE TABLE IF NOT EXISTS credentials (
+  id              TEXT    PRIMARY KEY,              -- credential id (base64url)
+  user_id         TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  credential_type TEXT    NOT NULL DEFAULT 'passkey', -- passkey | recovery
+  public_key      BLOB    NOT NULL,                 -- COSE_Key bytes
+  sign_count      INTEGER NOT NULL DEFAULT 0,      -- authenticator counter
+  transports      TEXT,                             -- internal,hybrid,ble,...
+  aaguid          TEXT,                             -- authenticator model GUID
+  device_name     TEXT,                             -- user-visible label
+  backed_up       INTEGER NOT NULL DEFAULT 0,      -- 1 when the passkey syncs
+  created_at      INTEGER NOT NULL,
+  last_used_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_credentials_user ON credentials(user_id);
+-- In-flight WebAuthn ceremonies. The challenge is stored hashed and expires in
+-- five minutes; a replayed challenge can never be redeemed twice.
+CREATE TABLE IF NOT EXISTS webauthn_challenges (
+  id              TEXT    PRIMARY KEY,
+  challenge_hash  TEXT    NOT NULL UNIQUE,          -- SHA-256 of the challenge bytes
+  kind            TEXT    NOT NULL,                 -- register | authenticate
+  user_id         TEXT    REFERENCES users(id) ON DELETE CASCADE,
+  email           TEXT,
+  display_name    TEXT,
+  rp_id           TEXT    NOT NULL,
+  origin          TEXT    NOT NULL,
+  credential_ids  TEXT,                             -- JSON array (authenticate)
+  device_name     TEXT,
+  device_platform TEXT,
+  created_at      INTEGER NOT NULL,
+  expires_at      INTEGER NOT NULL
+);
+-- Rotating refresh tokens. Only the SHA-256 of the token is stored, and a
+-- replayed token revokes the whole family (see lib/server/oauth.ts).
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+  id              TEXT    PRIMARY KEY,
+  user_id         TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash      TEXT    NOT NULL UNIQUE,
+  session_id      TEXT,
+  access_token_id TEXT,
+  client_type     TEXT    NOT NULL,                 -- android | cli | api
+  scope           TEXT    NOT NULL DEFAULT 'cli:full',
+  created_at      INTEGER NOT NULL,
+  expires_at      INTEGER NOT NULL,
+  used_at         INTEGER,                          -- set on rotation
+  replaced_by     TEXT,                             -- next token in the chain
+  revoked         INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_session ON refresh_tokens(session_id);
+-- RFC 8628 device authorization codes. The device code is stored hashed; the
+-- user code is what a human types into the console.
+CREATE TABLE IF NOT EXISTS oauth_device_codes (
+  id              TEXT    PRIMARY KEY,
+  device_code_hash TEXT   NOT NULL UNIQUE,          -- SHA-256 of device_code
+  user_code       TEXT    NOT NULL UNIQUE,          -- ABCD-1234
+  client_id       TEXT    NOT NULL,                 -- mobilecloud-cli
+  scope           TEXT    NOT NULL DEFAULT 'cli:full',
+  approved_by     TEXT    REFERENCES users(id),
+  status          TEXT    NOT NULL DEFAULT 'pending', -- pending|approved|denied|consumed|expired
+  device_name     TEXT,
+  device_platform TEXT,
+  created_at      INTEGER NOT NULL,
+  expires_at      INTEGER NOT NULL,
+  interval_sec    INTEGER NOT NULL DEFAULT 5
+);
+-- OAuth 2.1 authorization codes with PKCE. Single use, five minute lifetime.
+CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
+  id                  TEXT    PRIMARY KEY,
+  code_hash           TEXT    NOT NULL UNIQUE,
+  client_id           TEXT    NOT NULL,
+  user_id             TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  redirect_uri        TEXT    NOT NULL,
+  scope               TEXT    NOT NULL,
+  code_challenge      TEXT    NOT NULL,
+  code_challenge_method TEXT  NOT NULL DEFAULT 'S256',
+  used                INTEGER NOT NULL DEFAULT 0,
+  created_at          INTEGER NOT NULL,
+  expires_at          INTEGER NOT NULL
+);
+-- "Login with MobileCloud": the browser shows a QR code and the phone approves
+-- it. poll_secret_hash proves the request came from the browser that started
+-- the flow, so only that browser can claim the resulting session.
+CREATE TABLE IF NOT EXISTS qr_login_challenges (
+  id              TEXT    PRIMARY KEY,
+  challenge_hash  TEXT    NOT NULL UNIQUE,          -- SHA-256 of the challenge bytes
+  poll_secret_hash TEXT   NOT NULL UNIQUE,          -- SHA-256 of the browser poll secret
+  verification_code TEXT  NOT NULL,                 -- 6 characters shown on both screens
+  browser_info    TEXT,
+  ip_address      TEXT,
+  status          TEXT    NOT NULL DEFAULT 'waiting', -- waiting|scanned|approved|denied|expired|consumed
+  approved_by     TEXT    REFERENCES users(id),
+  device_id       TEXT,
+  credential_id   TEXT,
+  session_id      TEXT,
+  created_at      INTEGER NOT NULL,
+  expires_at      INTEGER NOT NULL,
+  scanned_at      INTEGER,
+  approved_at     INTEGER
+);
+-- Structured authentication audit trail (see lib/server/audit.ts).
+CREATE TABLE IF NOT EXISTS auth_events (
+  id              TEXT    PRIMARY KEY,
+  user_id         TEXT    REFERENCES users(id),
+  event_type      TEXT    NOT NULL,                 -- auth.login.passkey, auth.login.failed, ...
+  client_type     TEXT,                             -- android | web | cli | api
+  credential_type TEXT,                             -- passkey | password | token | qr
+  session_id      TEXT,
+  device_id       TEXT,
+  ip_address      TEXT,
+  user_agent      TEXT,
+  geo_location    TEXT,                             -- JSON {country,lat,lon}
+  outcome         TEXT    NOT NULL,                 -- success | failure | suspicious
+  failure_reason  TEXT,
+  risk_score      TEXT    NOT NULL DEFAULT 'low',   -- low | medium | high | critical
+  metadata        TEXT,                             -- JSON context
+  created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_events_user ON auth_events(user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_events_type ON auth_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_auth_events_created ON auth_events(created_at);
 `;
 
 let singleton: DatabaseSync | null = null;
@@ -380,15 +505,49 @@ function migrate(db: DatabaseSync) {
   // v4 gives functions a stored handler source, lets workflows persist their
   // step list, so both can actually run instead of only being recorded.
   if (!db.prepare("SELECT 1 FROM control_plane_migrations WHERE version = 4").get()) {
-    const addColumns = (table: string, columns: Record<string, string>) => {
-      const present = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name));
-      for (const [name, type] of Object.entries(columns)) {
-        if (!present.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
-      }
-    };
-    addColumns("functions", { source: "TEXT" });
-    addColumns("workflows", { steps: "TEXT" });
+    addColumns(db, "functions", { source: "TEXT" });
+    addColumns(db, "workflows", { steps: "TEXT" });
     db.exec("INSERT INTO control_plane_migrations (version) VALUES (4)");
+  }
+  // v5 is the unified authentication system: passkey credentials, client-scoped
+  // sessions, rotating refresh tokens, device grants and an audit trail. The
+  // new tables are created by the schema above; only the ALTERs live here.
+  if (!db.prepare("SELECT 1 FROM control_plane_migrations WHERE version = 5").get()) {
+    addColumns(db, "sessions", {
+      client_type: "TEXT DEFAULT 'web'",
+      credential_id: "TEXT",
+      ip_address: "TEXT",
+      geo_location: "TEXT",
+      last_active_at: "INTEGER",
+    });
+    addColumns(db, "access_tokens", {
+      scope: "TEXT DEFAULT 'api:read'",
+      client_type: "TEXT DEFAULT 'api'",
+      session_id: "TEXT",
+    });
+    addColumns(db, "connected_devices", {
+      hardware_public_key: "TEXT",
+      hardware_security_level: "TEXT",
+      push_token: "TEXT",
+      push_platform: "TEXT",
+    });
+    addColumns(db, "users", {
+      locked_until: "INTEGER",
+      failed_attempts: "INTEGER NOT NULL DEFAULT 0",
+      timezone: "TEXT",
+    });
+    // A passkey-only account has no password. The column is NOT NULL, so it
+    // stores an explicit sentinel instead of a hash that could ever match.
+    db.prepare("UPDATE users SET password_hash = ? WHERE password_hash = ''").run(NO_PASSWORD);
+    db.exec("INSERT INTO control_plane_migrations (version) VALUES (5)");
+  }
+}
+
+/** Adds a column only when the table does not already have it. */
+function addColumns(db: DatabaseSync, table: string, columns: Record<string, string>) {
+  const present = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name));
+  for (const [name, type] of Object.entries(columns)) {
+    if (!present.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
   }
 }
 
@@ -444,6 +603,12 @@ function ensureOperator(db: DatabaseSync) {
       .run(newId(), email, hashPassword(password), Date.now());
   }
 }
+
+/**
+ * Sentinel stored in `users.password_hash` for accounts that authenticate with a
+ * passkey only. It is not a hash and can never match a verifier result.
+ */
+export const NO_PASSWORD = "!";
 
 export function hashPassword(password: string): string {
   const salt = randomBytes(16).toString("hex");

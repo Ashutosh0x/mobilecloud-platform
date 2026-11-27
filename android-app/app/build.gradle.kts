@@ -86,6 +86,11 @@ dependencies {
     implementation("androidx.biometric:biometric:1.1.0")
     // FragmentActivity host required by BiometricPrompt (App Lock gate).
     implementation("androidx.fragment:fragment-ktx:1.8.5")
+    // Passkeys for the unified authentication flows. The Play services provider
+    // supplies the Android 11-13 backend that the platform Credential Manager
+    // only ships from Android 14.
+    implementation("androidx.credentials:credentials:1.3.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.3.0")
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("androidx.glance:glance-appwidget:1.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")

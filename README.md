@@ -5,7 +5,7 @@
 ### **The Autonomous Smartphone Edge Cloud & Institutional Proof-of-Reserve Protocol**
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-219%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-304%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 [![Rust](https://img.shields.io/badge/Rust-1.100-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![Android](https://img.shields.io/badge/Android-API%2030--35-3ddc84?style=for-the-badge&logo=android&logoColor=white)](android-app)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7f52ff?style=for-the-badge&logo=kotlin&logoColor=white)](android-app)
@@ -48,7 +48,7 @@ The web console and the Android app are two synchronized clients of one backend:
 | Trading engine | **Paper / demo.** Not validated for live execution. |
 | Proof of reserve | The control plane stores the Rust kernel's reconciliation output **read-only** and reports an explicit unverified state when no attestation exists; it never computes a ratio itself. Verified against the Stellar **testnet**. Custody and CPA attestation are `NOT_ESTABLISHED`. |
 | On-device AI/ML inference (ONNX, TFLite, NPU) | **Not implemented.** No inference code exists in this repository. |
-| Fleet mesh | **Not implemented.** A console screen exists; there is no discovery, load-balancing, or replication engine. |
+| Fleet mesh | **Node-management slice implemented** in the `fleet-mesh` crate: enrollment, Ed25519 device identity, replay-protected signed heartbeats, revocation, liveness sweeps, capability/energy telemetry with measurement provenance, and deterministic resource-aware placement, behind a fail-closed authenticated API. **Not yet implemented:** peer discovery, device-to-device transport (NAT traversal/encryption), load balancing, replication, distributed job orchestration, and dashboard wiring. No device-to-device traffic has been exercised on real hardware. |
 | Billing & payments | **Not implemented.** Usage is metered (append-only counters per meter), but there is no payment provider, invoicing, or charging. |
 | Hardware battery bypass, energy figures, "zero-millisecond UPS" | **Not claimed.** No measurement in this repository supports them. |
 
@@ -242,6 +242,14 @@ MobileCloud combines two decoupled, high-performance engines within one monorepo
 * **Usage Metering**: append-only `usage_events` rows per meter (`function_invocations`, `workflow_runs`, `webhook_deliveries`, `object_bytes`), surfaced through `GET /api/v1/usage`. There is no payment provider, invoicing, or charging.
 * **Proof-of-Reserve Console View**: a `/reserve` route renders the Rust kernel's reconciliation output **read-only** — the control plane never computes a ratio itself — and reports an explicit `unverified` state when no attestation exists.
 
+### 13. Unified Authentication & the `mobilecloud` CLI
+* **Passkeys (WebAuthn)**: registration and login on Android through Credential Manager and in the browser through `navigator.credentials`. Discoverable ES256 credentials, required user verification, a relying party bound to the console's own origin, signature-counter replay defence, per-credential device labels, and COSE-key storage. Attestation is `none`: the AAGUID is recorded but not cryptographically verified.
+* **Login with MobileCloud**: the browser shows a 256-bit challenge as a QR code; the phone scans it, displays the verification code and the requesting browser, and approves with a biometric. Only the browser holding the poll secret can collect the session, and claiming it is atomic.
+* **Device Authorization Grant (RFC 8628) and Authorization Code + PKCE (OAuth 2.1)**: `mobilecloud login` either approves a short code in the console or completes a browser flow with a loopback callback. Refresh tokens rotate on every use; replaying a consumed token revokes the entire family.
+* **Client-scoped sessions**: `android`, `web`, `cli`, and `api` sessions get their own lifetimes, device bindings, and credentials. Tokens are stored as SHA-256 hashes and returned exactly once.
+* **Audit trail and login risk**: every credential event is appended to `auth_events`, and a weighted engine scores new addresses and countries, impossible travel, brute force, unusual hours, and password use — then allows, notifies, requires a second factor, or blocks.
+* **CLI**: `mobilecloud login|logout|whoami|devices|sessions|revoke-device|revoke-session`, with automatic token refresh and credentials written atomically to a `0600` file. See [docs/AUTH.md](docs/AUTH.md).
+
 ---
 
 ## System Architecture
@@ -366,6 +374,7 @@ graph TD
         TRADING["trading-engine (bin/lib)<br/>• Solana Cross-DEX Arbitrage<br/>• 4 Non-Negotiable Risk Invariants<br/>• Soroban Circuit Breaker Client"]
         TUNNEL["edge/mobilecloud-tunnel (bins)<br/>• mc-tunnel-client<br/>• mc-tunnel-relay<br/>• Ed25519 handshake · yamux mux · WSS"]
         SHIELD["edge/mobilecloud-shield (lib)<br/>• IP Blocklist (CrowdSec JSON)<br/>• Sliding-Window Rate Limiter<br/>• Regex WAF (traversal/SQLi/XSS/CMDi)"]
+        FLEET["fleet-mesh (lib)<br/>• Node Registry + Revocation<br/>• Ed25519 Device Identity<br/>• Replay-Protected Heartbeats<br/>• Resource-Aware Placement"]
 
         subgraph Tools["Workspace Tools"]
             ATTESTOR["tools/por-attestor<br/>Pre-sorted 5-Key Ed25519 Signer"]
@@ -395,6 +404,8 @@ graph TD
     CLOUDSHELL <-->|WebSocket :3000 + file/preview API| CORE
     DASHBOARD <-->|REST API / Metrics| CORE
     CORE --> TRADING
+    FLEET <-->|Enrollment · signed heartbeats| ANDROID
+    FLEET -.->|node inventory| DASHBOARD
 ```
 
 ---
@@ -425,16 +436,21 @@ k6 run -e TARGET=https://your.edge.host benchmarks/k6-load-test.js
 | **`trading-engine`** | 17 tests | Arbitrage profitability checks, integer-exact fee calculations, 4 risk invariants (atomic reverts, 2.5% max exposure, 15 bps slippage, 20% T+1 buffer). |
 | **`mobilecloud-tunnel`** | 7 tests | Ed25519 handshake sign → verify round-trip, `Host`-to-service-name routing (subdomain, nested subdomain, bare domain, unknown domain), and raw HTTP response parsing (with and without a body). |
 | **`mobilecloud-shield`** | 11 tests | Post-percent-decode WAF matching (SQL injection, path traversal, XSS) with a clean-request allow, sliding-window rate-limit admission, CrowdSec-JSON blocklist load/add/check/expiry-prune, and client-IP extraction from `X-Forwarded-For` / `X-Real-IP` with loopback fallback. |
+| **`fleet-mesh`** | 43 tests | Ed25519 device-identity sign → verify round-trip and fail-closed verification of malformed keys/signatures; constant-time token comparison; strictly-increasing heartbeat sequence numbers that reject replays, gaps and unknown/revoked nodes; enrollment-token and operator-bearer authorization (401 on any missing, malformed, or wrong credential); deterministic resource-aware node selection (cores → RAM → storage → id); telemetry that refuses an `Unsupported` measurement carrying data and rejects battery > 100% or used > total; liveness classification and stale/offline sweeps; enrollment idempotency per device public key. |
 | **`por-xdr-toolkit`** | 4 tests | Protocol 30 XDR encoding/decoding, RFC 4506 `Option<ScVec>` presence-flag alignment. |
-| **`apps/web-dashboard`** | 58 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Platform services: a function runs inside a `node:vm` context with no `require`/`process`/`fetch`/timers and is rejected when over the source or output byte cap or the 250 ms timeout; a workflow threads each step's output into the next and stops at the first failure; a webhook delivery is queued once per subscriber in the event's own transaction, signed HMAC-SHA256, backoff-capped at 5 attempts, and refused against loopback/private targets; usage counters append per meter; a PoR attestation is validated and stored read-only, and a missing attestation reports `unverified`. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
+| **`apps/web-dashboard`** | 92 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. Authentication: a device grant issues a scoped CLI token once after approval and is refused before it; refresh tokens rotate and a replayed token revokes the family; a `cli:full` bearer can revoke devices and sessions but cannot mutate the account; QR login reaches `APPROVED` only through the phone's signature over the browser's challenge and the challenge is single use; WebAuthn options are bound to the console's RP id and require user verification; the risk engine blocks impossible travel and scores a new country and address as `medium`. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Platform services: a function runs inside a `node:vm` context with no `require`/`process`/`fetch`/timers and is rejected when over the source or output byte cap or the 250 ms timeout; a workflow threads each step's output into the next and stops at the first failure; a webhook delivery is queued once per subscriber in the event's own transaction, signed HMAC-SHA256, backoff-capped at 5 attempts, and refused against loopback/private targets; usage counters append per meter; a PoR attestation is validated and stored read-only, and a missing attestation reports `unverified`. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
 | **`android-app`** | `assembleDebug` + `lintDebug` | No JVM unit-test suite ships; the Compose console, JNI `forkpty` terminal, two-row `VirtualKeyBar`, and the foreground `TerminalSessionService` are verified by a passing debug build and lint, not by an automated suite. |
+| **`mobilecloud-cli`** | 8 tests | PKCE S256 against the RFC 7636 test vector, query decoding, UTC timestamp and relative-time formatting, table truncation, server-URL validation (HTTPS only except loopback, no credentials/path/query), and a credentials-file round trip with the profile lifecycle. |
 | **`web-cloudshell`** | `tsc --noEmit` + `vite build` | Type-checked and bundled; the WebGL Xterm.js client, files panel, and preview picker are verified by a passing build, not by an automated suite. |
 
-**219 tests** in total (Rust default members `132` + `por-verifier` `25` + dashboard `58` + `por-xdr-toolkit` `4`).
+**304 tests** in total (Rust default members `183` + `por-verifier` `25` + dashboard `92` + `por-xdr-toolkit` `4`).
 
 ```bash
 # Rust workspace (default members)
 cargo test
+
+# The MobileCloud CLI
+cargo test -p mobilecloud-cli
 
 # The Soroban contract crate (host build) and the standalone audit tool
 cargo test -p por-verifier
@@ -460,9 +476,9 @@ cd apps/web-dashboard && npm test
 git clone https://github.com/Ashutosh0x/mobilecloud-platform.git
 cd mobilecloud-platform
 
-cargo test                      # 132 tests in the default members
+cargo test                      # 183 tests in the default members
 cargo test -p por-verifier      # 25 contract tests
-cd apps/web-dashboard && npm test && cd ../..   # 58 dashboard tests
+cd apps/web-dashboard && npm test && cd ../..   # 92 dashboard tests
 ```
 
 ### 3. Run the web console
@@ -477,7 +493,18 @@ npm run dev     # console :3210, realtime gateway :3211
 
 Open `http://localhost:3210`. The database defaults to `apps/web-dashboard/data/mobilecloud.db`; set `MOBILECLOUD_DB` to relocate it. The gateway is a separate process on purpose: a Next.js route handler cannot answer an HTTP `upgrade`, so the WebSocket listener runs beside the API and tails the same WAL file.
 
-### 4. Run the browser CloudShell
+Sign in with the password once, then add a passkey on `/device` (or from the Android app). After that, the login page offers **Login with MobileCloud**: scan the QR code with the phone and approve it there.
+
+### 4. Sign in from the CLI
+
+```bash
+cargo build -p mobilecloud-cli --release
+./target/release/mobilecloud login --server https://console.example.com
+```
+
+The CLI prints a short code and a link to `/activate`; approve it in the console (or scan the link with the Android app) and the terminal receives its own scoped token. `mobilecloud whoami`, `devices`, `sessions`, `revoke-device`, and `revoke-session` are available afterwards; see [`docs/AUTH.md`](docs/AUTH.md).
+
+### 5. Run the browser CloudShell
 
 The dev server proxies the engine's routes and attaches the operator credential — the only place that credential appears:
 
@@ -489,7 +516,7 @@ cd web-cloudshell && npm ci && npm run dev  # http://localhost:5173
 
 In production the same role is played by the reverse proxy in front of the engine; the configuration is in [`docs/CLOUDSHELL.md`](docs/CLOUDSHELL.md).
 
-### 5. Build and connect Android
+### 6. Build and connect Android
 
 Use an ARM64 device running Android 11 (API 30) or newer. Point `android-app/local.properties` at your SDK.
 
@@ -503,7 +530,7 @@ Enter and confirm the phone-reachable HTTPS origin, then sign in with the operat
 
 From the repository root, [`scripts/build-and-sign-apk.sh`](scripts/build-and-sign-apk.sh) aligns, signs, and verifies the APK against a trusted certificate fingerprint. It requires an existing release keystore and protected signing inputs. **Do not distribute an APK until historical signing-credential exposure has been assessed and the signed build has been verified on physical hardware.**
 
-### 6. What still needs a physical device
+### 7. What still needs a physical device
 
 Backup and migration recovery, HTTPS/WSS routing, pairing, reconnect, and revocation on real hardware, and a signed release verified on an ARM64 device. Keep public builds disabled until workers and tenant authorization are isolated. Reserve and trading claims require independent validation.
 
@@ -554,6 +581,6 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 **MobileCloud & FurlPay** — one account, one data model, one durable event log.
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-219%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-304%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 
 </div>

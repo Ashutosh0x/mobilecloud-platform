@@ -102,7 +102,35 @@ Key decisions:
 | Explicit connection state machine | `401` is "sign in required", not "unreachable"; `403` is not a reason to re-discover |
 
 Honest status: the outbox, gateway, authorization and offline-recovery paths are
-covered by automated tests (`apps/web-dashboard`, 14 tests) that spawn the real
+covered by automated tests (`apps/web-dashboard`, 92 tests) that spawn the real
 gateway. Conflict handling is last-write-wins; multi-control-plane scaling and a
 packaged public tunnel are **not** implemented. See REALTIME-SYNC.md §13.
+
+## Repository component map (recounted 2026-11-27)
+
+Verified test counts below were produced by the commands in
+[`IMPLEMENTATION_AUDIT.md`](IMPLEMENTATION_AUDIT.md) §2. This map is the
+authoritative component inventory for the whole repository; the PoR trust path
+(the top of this document) is one plane within it.
+
+| Component | Kind | Role | Tests |
+| :--- | :--- | :--- | ---: |
+| `core-engine` | binary (axum) | Build pipeline, Build-Output-v3 router (cached route table, sidecar serving), tri-modal terminal gateway, web preview, file transfer. | 39 |
+| `por-kernel` | library | Checked `U256` reconciliation, RFC 8785 canonical JSON, financial parsers, T+1 transit. | 45 + 13 |
+| `trading-engine` | library + bin | Paper/demo arbitrage, four risk invariants, Soroban circuit-breaker client. | 17 |
+| `contracts/por-verifier` | Soroban contract | On-chain quorum verifier (wasm; excluded from default members). | 25 |
+| `tools/por-attestor`, `tools/por-submitter` | bins | Digest derivation + signing; quorum submission. | 0 |
+| `tools/por-xdr-toolkit` | lib/bin | RFC 4506 `LedgerKey` encoder. | 4 |
+| `edge/mobilecloud-shield` | library | Blocklist, sliding-window rate limiter, regex WAF. | 11 |
+| `edge/mobilecloud-tunnel` | bins | `mc-tunnel-client` / `mc-tunnel-relay`; Ed25519 handshake, yamux, WSS. | 7 |
+| `fleet-mesh` | library | Node registry, Ed25519 device identity, replay-protected heartbeats, revocation, telemetry provenance, health sweeps, placement, authenticated API. | 43 |
+| `apps/web-dashboard` | Next.js app | Console, realtime gateway, unified authentication (passkeys, QR login, device and PKCE grants), QR pairing, platform services, metering, PoR read-only view. | 92 |
+| `android-app` | Android app | Compose console, JNI `forkpty` terminal, foreground session service. | build + lint |
+| `mobilecloud-cli` | binary | `login` (device grant and PKCE), `logout`, `whoami`, `devices`, `sessions`, revocation; rotating tokens in a 0600 credentials file. | 8 |
+| `web-cloudshell` | Vite app | Browser WebGL XTerm.js PTY, file manager, preview picker. | build only |
+
+Related engineering documents: [`IMPLEMENTATION_AUDIT.md`](IMPLEMENTATION_AUDIT.md),
+[`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md),
+[`SECURITY_THREAT_MODEL.md`](SECURITY_THREAT_MODEL.md),
+[`PRODUCTION_READINESS.md`](PRODUCTION_READINESS.md).
 
