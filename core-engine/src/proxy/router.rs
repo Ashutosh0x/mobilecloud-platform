@@ -130,12 +130,14 @@ pub async fn route_request(
     let project = project.to_owned();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let output = state
+        let (deploy_id, output) = state
             .deployments
-            .active_output(&project)
+            .active(&project)
             .map_err(RouterError::Store)?
             .ok_or(RouterError::NoDeployment)?;
-        let table = RouteTable::compile(output)?;
+        // The active id is content-addressed, so the compiled table can be
+        // reused until the deployment changes instead of on every request.
+        let table = state.route_table(&project, &deploy_id, output)?;
         dispatch(&table, method, path, &encoding)
     })
     .await?
@@ -272,43 +274,52 @@ fn serve_destination(
         };
         let candidate = root.join(relative);
         if std::fs::symlink_metadata(&root).is_ok_and(|meta| meta.is_dir()) {
-            if let Ok(file) = candidate.canonicalize() {
-                let meta = std::fs::metadata(&file)?;
-                if file.starts_with(root.canonicalize()?) && meta.is_file() {
-                    if meta.len() > MAX_STATIC_FILE {
-                        return Ok(Some(StatusCode::PAYLOAD_TOO_LARGE.into_response()));
+            if let Ok(root_canonical) = root.canonicalize() {
+                if let Ok(file) = candidate.canonicalize() {
+                    let meta = std::fs::metadata(&file)?;
+                    if file.starts_with(&root_canonical) && meta.is_file() {
+                        if meta.len() > MAX_STATIC_FILE {
+                            return Ok(Some(StatusCode::PAYLOAD_TOO_LARGE.into_response()));
+                        }
+                        let mime = table
+                            .config
+                            .overrides
+                            .get(relative)
+                            .and_then(|rule| rule.content_type.as_deref())
+                            .unwrap_or_else(|| mime_for(&file));
+                        // Prefer a build-time precompressed sidecar when the
+                        // client accepts it, avoiding repeat compression work.
+                        if let Some((bytes, used)) =
+                            sidecar_bytes(&file, &root_canonical, encoding)?
+                        {
+                            return Ok(Some(sidecar_response(mime, bytes, used, method)?));
+                        }
+                        let mut bytes = Vec::new();
+                        std::fs::File::open(&file)?
+                            .take(MAX_STATIC_FILE + 1)
+                            .read_to_end(&mut bytes)?;
+                        if bytes.len() as u64 > MAX_STATIC_FILE {
+                            return Ok(Some(StatusCode::PAYLOAD_TOO_LARGE.into_response()));
+                        }
+                        let (bytes, used) =
+                            super::compression::compress_if_worthwhile(&bytes, encoding, mime);
+                        let mut builder = Response::builder()
+                            .header(header::CONTENT_TYPE, mime)
+                            .header(header::CONTENT_LENGTH, bytes.len())
+                            .header(header::VARY, "Accept-Encoding");
+                        if let Some(used) = used {
+                            builder = builder.header(header::CONTENT_ENCODING, used);
+                        }
+                        return Ok(Some(
+                            builder
+                                .body(if *method == Method::HEAD {
+                                    Body::empty()
+                                } else {
+                                    Body::from(bytes)
+                                })
+                                .map_err(|_| RouterError::InvalidConfig)?,
+                        ));
                     }
-                    let mime = table
-                        .config
-                        .overrides
-                        .get(relative)
-                        .and_then(|rule| rule.content_type.as_deref())
-                        .unwrap_or_else(|| mime_for(&file));
-                    let mut bytes = Vec::new();
-                    std::fs::File::open(file)?
-                        .take(MAX_STATIC_FILE + 1)
-                        .read_to_end(&mut bytes)?;
-                    if bytes.len() as u64 > MAX_STATIC_FILE {
-                        return Ok(Some(StatusCode::PAYLOAD_TOO_LARGE.into_response()));
-                    }
-                    let (bytes, used) =
-                        super::compression::compress_if_worthwhile(&bytes, encoding, mime);
-                    let mut builder = Response::builder()
-                        .header(header::CONTENT_TYPE, mime)
-                        .header(header::CONTENT_LENGTH, bytes.len())
-                        .header(header::VARY, "Accept-Encoding");
-                    if let Some(used) = used {
-                        builder = builder.header(header::CONTENT_ENCODING, used);
-                    }
-                    return Ok(Some(
-                        builder
-                            .body(if *method == Method::HEAD {
-                                Body::empty()
-                            } else {
-                                Body::from(bytes)
-                            })
-                            .map_err(|_| RouterError::InvalidConfig)?,
-                    ));
                 }
             }
         }
@@ -329,6 +340,59 @@ fn serve_destination(
         ));
     }
     Ok(None)
+}
+
+/// Read a build-time precompressed sidecar (`<file>.br` / `<file>.gz`) for
+/// `file` when the client accepts that encoding. The sidecar must resolve to a
+/// regular file inside the artifact root, so a repository cannot point it at a
+/// file outside the artifact.
+fn sidecar_bytes(
+    file: &Path,
+    root: &Path,
+    encoding: &str,
+) -> Result<Option<(Vec<u8>, &'static str)>, RouterError> {
+    let Some(used) = super::compression::sidecar_encoding(encoding) else {
+        return Ok(None);
+    };
+    let mut name = file.as_os_str().to_owned();
+    name.push(if used == "br" { ".br" } else { ".gz" });
+    let Ok(real) = PathBuf::from(name).canonicalize() else {
+        return Ok(None);
+    };
+    if !real.starts_with(root) {
+        return Ok(None);
+    }
+    let meta = std::fs::metadata(&real)?;
+    if !meta.is_file() || meta.len() > MAX_STATIC_FILE {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(&real)?
+        .take(MAX_STATIC_FILE + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_STATIC_FILE {
+        return Ok(None);
+    }
+    Ok(Some((bytes, used)))
+}
+
+fn sidecar_response(
+    mime: &str,
+    bytes: Vec<u8>,
+    used: &'static str,
+    method: &Method,
+) -> Result<Response, RouterError> {
+    Response::builder()
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::CONTENT_ENCODING, used)
+        .header(header::CONTENT_LENGTH, bytes.len())
+        .header(header::VARY, "Accept-Encoding")
+        .body(if *method == Method::HEAD {
+            Body::empty()
+        } else {
+            Body::from(bytes)
+        })
+        .map_err(|_| RouterError::InvalidConfig)
 }
 
 fn mime_for(path: &Path) -> &'static str {
@@ -382,6 +446,50 @@ mod tests {
                 .unwrap()
                 .status(),
             StatusCode::NOT_IMPLEMENTED
+        );
+    }
+
+    #[test]
+    fn serves_precompressed_sidecar_when_client_accepts_it() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("static")).unwrap();
+        std::fs::write(root.path().join("static/app.js"), "console.log('hi');").unwrap();
+        std::fs::write(root.path().join("static/app.js.br"), "BROTLI-BYTES").unwrap();
+        let table = RouteTable::compile(root.path().into()).unwrap();
+
+        let brotli = dispatch(&table, Method::GET, "/app.js".into(), "br").unwrap();
+        assert_eq!(brotli.status(), StatusCode::OK);
+        assert_eq!(brotli.headers()[header::CONTENT_ENCODING], "br");
+        assert_eq!(brotli.headers()[header::CONTENT_LENGTH], "12");
+        assert_eq!(
+            brotli.headers()[header::CONTENT_TYPE],
+            "text/javascript; charset=utf-8"
+        );
+
+        // A client without brotli support receives the raw file unchanged.
+        let raw = dispatch(&table, Method::GET, "/app.js".into(), "identity").unwrap();
+        assert!(raw.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(raw.headers()[header::CONTENT_LENGTH], "18");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignores_sidecar_that_escapes_the_artifact_root() {
+        let root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("static")).unwrap();
+        std::fs::write(root.path().join("static/app.js"), "small").unwrap();
+        std::fs::write(external.path().join("evil.br"), "outside-content").unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("evil.br"),
+            root.path().join("static/app.js.br"),
+        )
+        .unwrap();
+        let table = RouteTable::compile(root.path().into()).unwrap();
+        let response = dispatch(&table, Method::GET, "/app.js".into(), "br").unwrap();
+        assert!(
+            response.headers().get(header::CONTENT_ENCODING).is_none(),
+            "a sidecar resolving outside the artifact root must be ignored"
         );
     }
 }

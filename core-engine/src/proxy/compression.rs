@@ -90,6 +90,20 @@ fn preferred_encoding(accept_encoding: &str) -> Option<&'static str> {
     }
 }
 
+/// Encoding of a build-time sidecar to serve for a client, restricted to the
+/// two precompressed formats (`br`, `gzip`). Zstandard has no sidecar
+/// convention and is always produced dynamically.
+pub fn sidecar_encoding(accept_encoding: &str) -> Option<&'static str> {
+    let accepts = accept_encoding.to_ascii_lowercase();
+    if accepts.contains("br") {
+        Some("br")
+    } else if accepts.contains("gzip") {
+        Some("gzip")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +114,14 @@ mod tests {
         assert_eq!(preferred_encoding("br, gzip"), Some("br"));
         assert_eq!(preferred_encoding("gzip"), Some("gzip"));
         assert_eq!(preferred_encoding("identity"), None);
+    }
+
+    #[test]
+    fn sidecar_selection_ignores_zstd_and_identity() {
+        assert_eq!(sidecar_encoding("gzip, br, zstd"), Some("br"));
+        assert_eq!(sidecar_encoding("gzip"), Some("gzip"));
+        assert_eq!(sidecar_encoding("zstd"), None);
+        assert_eq!(sidecar_encoding("identity"), None);
     }
 
     #[test]

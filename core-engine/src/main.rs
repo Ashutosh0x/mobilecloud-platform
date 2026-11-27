@@ -95,6 +95,9 @@ pub struct AppState {
     /// Content-addressed cache root (`home/cache`); revalidating a project
     /// evicts its transformed-image entries.
     pub cache: PathBuf,
+    /// Compiled Build Output route tables keyed by project. An entry is reused
+    /// only while its deployment id matches the active content-addressed id.
+    route_cache: std::sync::Mutex<HashMap<String, (String, Arc<proxy::router::RouteTable>)>>,
     deployments: DeploymentStore,
     projects: HashMap<String, PreviewProject>,
     logs: HashMap<String, broadcast::Sender<String>>,
@@ -134,6 +137,7 @@ impl AppState {
         Ok(Self {
             engine_bin: home.join("engine/bin"),
             cache: home.join("cache"),
+            route_cache: std::sync::Mutex::new(HashMap::new()),
             deployments: DeploymentStore::new(home.join("deployments")),
             home,
             projects,
@@ -163,6 +167,31 @@ impl AppState {
 
     fn preview_enabled(&self) -> bool {
         self.trusted_preview && !self.projects.is_empty()
+    }
+
+    /// Return the compiled Build Output route table for a live deployment,
+    /// reusing the cached table while the active deployment id is unchanged.
+    /// A content-addressed id maps to exactly one config.json, so a cache hit
+    /// cannot serve a stale route configuration.
+    fn route_table(
+        &self,
+        project: &str,
+        deploy_id: &str,
+        output: PathBuf,
+    ) -> Result<Arc<proxy::router::RouteTable>, proxy::router::RouterError> {
+        if let Ok(cache) = self.route_cache.lock() {
+            if let Some((cached_id, table)) = cache.get(project) {
+                if cached_id == deploy_id {
+                    return Ok(table.clone());
+                }
+            }
+        }
+        let table = Arc::new(proxy::router::RouteTable::compile(output)?);
+        // A poisoned lock only costs us the cache, never correctness.
+        if let Ok(mut cache) = self.route_cache.lock() {
+            cache.insert(project.to_owned(), (deploy_id.to_owned(), table.clone()));
+        }
+        Ok(table)
     }
 }
 
@@ -1411,6 +1440,50 @@ mod tests {
                 .0,
             404
         );
+    }
+
+    #[test]
+    fn route_table_cache_reuses_matching_deployments_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let checkout = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(checkout.path().join("dist")).unwrap();
+        std::fs::write(checkout.path().join("dist/index.html"), "cached v1").unwrap();
+        let promote = |commit: &str| {
+            atomic_promoter::promote(
+                &state.deployments,
+                DeployRecord {
+                    project: "demo".into(),
+                    deploy_id: String::new(),
+                    commit: commit.into(),
+                    branch: "main".into(),
+                    framework: "static".into(),
+                    built_at: 1,
+                    ttfb_hint_ms: None,
+                    trigger_source: None,
+                },
+                &checkout,
+                "dist",
+            )
+            .unwrap()
+        };
+        let first = promote("c1");
+        let (id, output) = state.deployments.active("demo").unwrap().unwrap();
+        assert_eq!(id, first);
+        let cached = state.route_table("demo", &id, output.clone()).unwrap();
+        let again = state.route_table("demo", &id, output).unwrap();
+        assert!(
+            Arc::ptr_eq(&cached, &again),
+            "the same deployment id must reuse the compiled route table"
+        );
+
+        // A new content-addressed id must recompile rather than serve stale routes.
+        std::fs::write(checkout.path().join("dist/index.html"), "cached v2").unwrap();
+        let second = promote("c2");
+        assert_ne!(first, second);
+        let (next_id, next_output) = state.deployments.active("demo").unwrap().unwrap();
+        let refreshed = state.route_table("demo", &next_id, next_output).unwrap();
+        assert!(!Arc::ptr_eq(&cached, &refreshed));
     }
 
     #[test]

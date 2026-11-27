@@ -96,6 +96,15 @@ impl DeploymentStore {
         }
     }
 
+    /// The active deployment id and its immutable output directory, if any.
+    /// The id is content-addressed, so a caller may safely key caches on it.
+    pub fn active(&self, project: &str) -> anyhow::Result<Option<(String, PathBuf)>> {
+        match self.read(project)?.active {
+            Some(id) => Ok(self.artifact(project, &id)?.map(|output| (id, output))),
+            None => Ok(None),
+        }
+    }
+
     pub fn rollback(&self, project: &str, deploy_id: &str) -> anyhow::Result<Option<DeployRecord>> {
         anyhow::ensure!(valid_deploy_id(deploy_id), "invalid deployment identifier");
         let _guard = self
@@ -247,15 +256,32 @@ fn package(source: &Path, dest: &Path, relative: &str, hasher: &mut Sha256) -> a
         );
         hasher.update(b"F");
         frame(hasher, relative.as_bytes());
-        let mut file = File::open(source)?.take(MAX_STATIC_FILE + 1);
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        // Frame the file by its declared length, then hash and copy it in
+        // bounded chunks so a 16 MiB asset never sits fully in memory.
+        hasher.update(meta.len().to_be_bytes());
+        let mut source_file = File::open(source)?;
+        let mut dest_file = File::create_new(dest)?;
+        let mut buffer = [0u8; 64 * 1024];
+        let mut total: u64 = 0;
+        loop {
+            let read = source_file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+            anyhow::ensure!(
+                total <= MAX_STATIC_FILE,
+                "preview artifact file exceeds size limit"
+            );
+            hasher.update(&buffer[..read]);
+            dest_file.write_all(&buffer[..read])?;
+        }
+        // A short or long read means the source changed mid-packaging; refuse
+        // rather than publish an artifact whose hash omits bytes.
         anyhow::ensure!(
-            bytes.len() as u64 <= MAX_STATIC_FILE,
-            "preview artifact file exceeds size limit"
+            total == meta.len(),
+            "preview artifact file changed while packaging"
         );
-        frame(hasher, &bytes);
-        File::create_new(dest)?.write_all(&bytes)?;
     } else {
         anyhow::bail!("preview artifacts must not contain symlinks or special files");
     }
