@@ -944,7 +944,14 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       geo,
       outcome: risk.action === "allow_with_notification" ? "suspicious" : "success",
       riskScore: risk.riskScore,
-      metadata: { factors: risk.factors },
+      metadata: {
+        factors: risk.factors,
+        // Proof the assertion carried user verification, and the counter the
+        // server accepted. No biometric data ever leaves the device.
+        uv: signed.userVerified,
+        signCount: signed.signCount,
+        credentialId: signed.credentialId,
+      },
     });
     if (risk.action === "allow_with_notification") {
       notify(db, signed.userId, "auth.suspicious", "New sign-in", "A sign-in happened from a place you have not used before.");

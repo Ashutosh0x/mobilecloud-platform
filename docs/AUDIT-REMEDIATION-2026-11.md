@@ -21,7 +21,7 @@ remains; **open** is not done.
 | P2-5 protocol code | open | Hand-rolled WebSocket/HTTP parsers remain; fuzzing is not wired. |
 | P2-6 terminal/files | partial | Operator token rotation procedure documented; per-client scoped tokens and permission audit remain. |
 | P3 PoR wording | open | `NOT_ESTABLISHED` remains for custody/CPA; Sybil/“off-chain oracle” claims still need rewording. |
-| P4-3 Android auth | open | Approval screen still not routed from `MainActivity`; no push transport. |
+| P4-3 Android auth | partial | Approval intent is now routed from `MainActivity` through `ConsoleRoot` to the biometric approval screen; there is still no FCM/APNs transport. |
 | P4-4 Android backup | fixed | `android:allowBackup="false"` is set. Data-extraction rules should still be added for API 31+. |
 | P5 tests | partial | Added runtime-gate and build-403 tests; Android and CloudShell still have no automated suites; authorization-matrix and fuzz targets are open. |
 | P6 claims drift | fixed | `features/status.json` is authoritative; `docs/FEATURE-STATUS.md` is generated and CI fails on drift. |

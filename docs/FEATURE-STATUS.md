@@ -16,7 +16,7 @@
 | absent | FurlPay live backend integration | No FurlPay backend or credentials in this repository; contract and deployable adapter only |
 | implemented | Web passkey sign-in and management | login page conditional UI and passkey button, /security page, register/list/delete APIs; browser ceremony itself is not unit-testable |
 | implemented | WebAuthn payment step-up | stepup.ts issues action/payload-bound 5-minute tokens after UV assertion; FurlPay adapter verifies signature/aud/action/payload; 4 tests |
-| partial | Android OIDC PKCE migration | Passkey manager and approval UI compile; app still uses its cookie session; approval intent not routed |
+| partial | Android OIDC PKCE migration | Passkey approval intent is routed through MainActivity/ConsoleRoot; app session and CLI login still use the cookie/ticket paths, and no push transport exists |
 | absent | CloudShell OIDC migration | CloudShell still uses the short-lived terminal ticket |
 | partial | Functions runtime | node:vm bounded runtime, disabled in production unless MOBILECLOUD_IN_PROCESS_RUNTIME=1; no process isolation |
 | partial | Workflows | In-process sequential steps over owner functions; inherits the functions-runtime gate |

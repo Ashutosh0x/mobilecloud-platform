@@ -1,5 +1,7 @@
 package com.mobilecloud.ui.console
 
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.SharedPreferences
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -39,9 +41,12 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.fragment.app.FragmentActivity
+import com.mobilecloud.auth.LoginApprovalRequest
 import com.mobilecloud.console.ConsoleOrigin
 import com.mobilecloud.console.ConsoleStatus
 import com.mobilecloud.console.ConsoleStore
+import com.mobilecloud.ui.auth.LoginApprovalScreen
 import com.mobilecloud.ui.theme.Aurora
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -52,10 +57,16 @@ import kotlinx.coroutines.launch
  * `components/Shell.tsx` combined into one mobile flow.
  */
 @Composable
-fun ConsoleRoot(prefs: SharedPreferences? = null) {
+fun ConsoleRoot(
+    prefs: SharedPreferences? = null,
+    approval: LoginApprovalRequest? = null,
+    onApprovalHandled: () -> Unit = {},
+) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current.applicationContext
     val store = remember(prefs, context) { ConsoleStore(scope, prefs, context) }
+    val activity = LocalContext.current.findFragmentActivity()
+    var activeApproval by remember(approval) { mutableStateOf(approval) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(store, lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
@@ -76,8 +87,31 @@ fun ConsoleRoot(prefs: SharedPreferences? = null) {
     when {
         store.status == ConsoleStatus.LOADING -> LoadingSplash()
         store.snapshot == null -> ConsoleLogin(store)
+        activeApproval != null && activity != null -> LoginApprovalScreen(
+            request = activeApproval!!,
+            onApproved = {
+                activeApproval = null
+                onApprovalHandled()
+            },
+            onDenied = {
+                activeApproval = null
+                onApprovalHandled()
+            },
+            activity = activity,
+            client = store.client,
+        )
         else -> key(store.client) { ConsoleShell(store) }
     }
+}
+
+/** The approval screen needs a FragmentActivity for BiometricPrompt. */
+private fun Context.findFragmentActivity(): FragmentActivity? {
+    var current: Context = this
+    while (current is ContextWrapper) {
+        if (current is FragmentActivity) return current
+        current = current.baseContext
+    }
+    return current as? FragmentActivity
 }
 
 @Composable

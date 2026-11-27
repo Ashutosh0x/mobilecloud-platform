@@ -18,7 +18,7 @@
     { "name": "FurlPay live backend integration", "status": "absent", "evidence": "No FurlPay backend or credentials in this repository; contract and deployable adapter only" },
     { "name": "Web passkey sign-in and management", "status": "implemented", "evidence": "login page conditional UI and passkey button, /security page, register/list/delete APIs; browser ceremony itself is not unit-testable" },
     { "name": "WebAuthn payment step-up", "status": "implemented", "evidence": "stepup.ts issues action/payload-bound 5-minute tokens after UV assertion; FurlPay adapter verifies signature/aud/action/payload; 4 tests" },
-    { "name": "Android OIDC PKCE migration", "status": "partial", "evidence": "Passkey manager and approval UI compile; app still uses its cookie session; approval intent not routed" },
+    { "name": "Android OIDC PKCE migration", "status": "partial", "evidence": "Passkey approval intent is routed through MainActivity/ConsoleRoot; app session and CLI login still use the cookie/ticket paths, and no push transport exists" },
     { "name": "CloudShell OIDC migration", "status": "absent", "evidence": "CloudShell still uses the short-lived terminal ticket" },
     { "name": "Functions runtime", "status": "partial", "evidence": "node:vm bounded runtime, disabled in production unless MOBILECLOUD_IN_PROCESS_RUNTIME=1; no process isolation" },
     { "name": "Workflows", "status": "partial", "evidence": "In-process sequential steps over owner functions; inherits the functions-runtime gate" },

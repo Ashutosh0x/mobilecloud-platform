@@ -70,11 +70,14 @@ wrong fingerprint, because iOS/Android cache malformed associations.
 endpoints, and returns a sealed result for cancellation, missing credential and
 errors. `LoginApprovalScreen.kt` uses `BIOMETRIC_STRONG | DEVICE_CREDENTIAL`
 before approving a QR/CLI request, and `AuthRequestNotifier.kt` prepares the
-notification channel.
+notification channel. `MainActivity` now reads the approval intent on create and
+on new intent, passes it to `ConsoleRoot`, and shows the approval screen once a
+console session exists; the server audit event records the UV flag and accepted
+sign counter.
 
-**Still missing:** `MainActivity`/`ConsoleRoot` do not route the approval intent
-or start the passkey flow from the console shell, and no push transport is
-configured. The screen compiles but is not reachable end to end.
+**Still missing:** no push transport (FCM/APNs) delivers the approval intent
+yet, so the flow is reachable from a notification/deep link but not from a
+remote phone notification.
 
 ## iOS
 
