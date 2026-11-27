@@ -69,7 +69,7 @@ export function userFromBearer(db: DatabaseSync, header: string | null) {
             t.name AS tokenName, t.scope AS tokenScope, t.client_type AS clientType, t.expires_at AS expiresAt
      FROM access_tokens t JOIN users u ON u.id = t.owner_id
      LEFT JOIN connected_devices d ON d.token_id = t.id AND d.owner_id = u.id
-     WHERE t.token_hash = ? AND t.expires_at > ? AND (d.id IS NULL OR d.revoked = 0)`,
+     WHERE t.token_hash = ? AND t.expires_at > ? AND u.active = 1 AND (d.id IS NULL OR d.revoked = 0)`,
   ).get(tokenHash(raw), now) as {
     id: string;
     email: string;

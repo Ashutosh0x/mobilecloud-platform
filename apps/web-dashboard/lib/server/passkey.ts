@@ -670,7 +670,11 @@ export function verifyAssertion(
   if (!parsedAuth.userPresent) throw new PasskeyError(400, "The authenticator did not confirm a user was present.");
   if (!parsedAuth.userVerified) throw new PasskeyError(400, "The authenticator did not verify the user.");
 
-  const stored = db.prepare("SELECT id, user_id, public_key, sign_count FROM credentials WHERE id = ?").get(credential.id) as {
+  const stored = db.prepare(
+    `SELECT c.id, c.user_id, c.public_key, c.sign_count
+     FROM credentials c JOIN users u ON u.id = c.user_id
+     WHERE c.id = ? AND u.active = 1`,
+  ).get(credential.id) as {
     id: string;
     user_id: string;
     public_key: string | Buffer;

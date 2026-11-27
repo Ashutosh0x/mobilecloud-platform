@@ -3,6 +3,18 @@ const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   allowedDevOrigins: ["127.0.0.1"],
+  async rewrites() {
+    // The identity endpoints are implemented by the catch-all API route. These
+    // rewrites give them the paths the standards name, so a relying party can
+    // be configured with the discovery document alone and never learns that
+    // the implementation happens to live under /api.
+    return [
+      { source: "/.well-known/:path*", destination: "/api/.well-known/:path*" },
+      { source: "/oauth/:path*", destination: "/api/oauth/:path*" },
+      { source: "/saml/:path*", destination: "/api/saml/:path*" },
+      { source: "/scim/:path*", destination: "/api/scim/:path*" },
+    ];
+  },
   async headers() {
     return [{
       source: "/:path*",

@@ -5,7 +5,7 @@
 ### **The Autonomous Smartphone Edge Cloud & Institutional Proof-of-Reserve Protocol**
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-304%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-344%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 [![Rust](https://img.shields.io/badge/Rust-1.100-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![Android](https://img.shields.io/badge/Android-API%2030--35-3ddc84?style=for-the-badge&logo=android&logoColor=white)](android-app)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7f52ff?style=for-the-badge&logo=kotlin&logoColor=white)](android-app)
@@ -14,6 +14,7 @@
 [![Terminal](https://img.shields.io/badge/Terminal-Xterm.js%20WebGL%20%2B%20PTY%20%2B%20SSH-F80000?style=for-the-badge&logo=iterm2&logoColor=white)](docs/CLOUDSHELL.md)
 [![Real-Time Sync](https://img.shields.io/badge/Real--Time%20Sync-WebSocket%20%2B%20Outbox-0070f3?style=for-the-badge&logo=socketdotio&logoColor=white)](docs/REALTIME-SYNC.md)
 [![Auth](https://img.shields.io/badge/Auth-Passkeys%20%2B%20OAuth%202.1-00B4AB?style=for-the-badge&logoColor=white)](docs/AUTH.md)
+[![SSO](https://img.shields.io/badge/SSO-OIDC%20%2B%20SAML%20%2B%20SCIM-6E40C9?style=for-the-badge&logoColor=white)](docs/SSO.md)
 [![CLI](https://img.shields.io/badge/CLI-mobilecloud-000000?style=for-the-badge&logo=rust&logoColor=white)](cli)
 [![SQLite](https://img.shields.io/badge/SQLite-WAL%20Outbox-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](docs/REALTIME-SYNC.md)
 [![Stellar](https://img.shields.io/badge/Stellar-Protocol%2030-08b5e5?style=for-the-badge&logo=stellar&logoColor=white)](contracts/por-verifier)
@@ -272,6 +273,7 @@ A passkey is the primary factor on every surface; the password remains only as t
 * **Client-scoped sessions**: `android`, `web`, `cli`, and `api` sessions get their own lifetimes, device bindings, and credentials. Tokens are stored as SHA-256 hashes and returned exactly once.
 * **Audit trail and login risk**: every credential event is appended to `auth_events`, and a weighted engine scores new addresses and countries, impossible travel, brute force, unusual hours, and password use — then allows, notifies, requires a second factor, or blocks.
 * **CLI**: `mobilecloud login|logout|whoami|devices|sessions|revoke-device|revoke-session`, with automatic token refresh and credentials written atomically to a `0600` file. See [docs/AUTH.md](docs/AUTH.md).
+* **Custom SSO provider**: the same identity is exposed as a standards-based IdP — OIDC discovery with PKCE and signed ID tokens, a SAML 2.0 SP-initiated IdP, SCIM 2.0 user and group provisioning, RFC 7009 revocation, and back-channel single logout, with owner-only client administration. See [docs/SSO.md](docs/SSO.md).
 
 ---
 
@@ -469,11 +471,12 @@ k6 run -e TARGET=https://your.edge.host benchmarks/k6-load-test.js
 | **`fleet-mesh`** | 43 tests | Ed25519 device-identity sign → verify round-trip and fail-closed verification of malformed keys/signatures; constant-time token comparison; strictly-increasing heartbeat sequence numbers that reject replays, gaps and unknown/revoked nodes; enrollment-token and operator-bearer authorization (401 on any missing, malformed, or wrong credential); deterministic resource-aware node selection (cores → RAM → storage → id); telemetry that refuses an `Unsupported` measurement carrying data and rejects battery > 100% or used > total; liveness classification and stale/offline sweeps; enrollment idempotency per device public key. |
 | **`por-xdr-toolkit`** | 4 tests | Protocol 30 XDR encoding/decoding, RFC 4506 `Option<ScVec>` presence-flag alignment. |
 | **`apps/web-dashboard`** | 92 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. Authentication: a device grant issues a scoped CLI token once after approval and is refused before it; refresh tokens rotate and a replayed token revokes the family; a `cli:full` bearer can revoke devices and sessions but cannot mutate the account; QR login reaches `APPROVED` only through the phone's signature over the browser's challenge and the challenge is single use; WebAuthn options are bound to the console's RP id and require user verification; the risk engine blocks impossible travel and scores a new country and address as `medium`. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Platform services: a function runs inside a `node:vm` context with no `require`/`process`/`fetch`/timers and is rejected when over the source or output byte cap or the 250 ms timeout; a workflow threads each step's output into the next and stops at the first failure; a webhook delivery is queued once per subscriber in the event's own transaction, signed HMAC-SHA256, backoff-capped at 5 attempts, and refused against loopback/private targets; usage counters append per meter; a PoR attestation is validated and stored read-only, and a missing attestation reports `unverified`. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
+| **SSO provider** (in `apps/web-dashboard`) | 40 tests | OIDC discovery and JWKS; a full PKCE code exchange whose RS256 ID token is verified against the published key; confidential-client authentication (Basic and secret-post); scope-filtered claims; refresh rotation and reuse detection; RFC 7009 revocation; exact redirect and post-logout redirect matching. SAML: metadata, deflated and plain AuthnRequests, signed-request verification against the SP certificate, signature-wrapping rejection, DOCTYPE refusal, and a signed assertion in an auto-submit POST form. SCIM: hashed token auth, user and group CRUD, supported filters, PATCH/PUT deprovisioning that removes sessions and tokens, and a fail-closed `invalidFilter` error. |
 | **`android-app`** | `assembleDebug` + `lintDebug` | No JVM unit-test suite ships; the Compose console, JNI `forkpty` terminal, two-row `VirtualKeyBar`, and the foreground `TerminalSessionService` are verified by a passing debug build and lint, not by an automated suite. |
 | **`mobilecloud-cli`** | 8 tests | PKCE S256 against the RFC 7636 test vector, query decoding, UTC timestamp and relative-time formatting, table truncation, server-URL validation (HTTPS only except loopback, no credentials/path/query), and a credentials-file round trip with the profile lifecycle. |
 | **`web-cloudshell`** | `tsc --noEmit` + `vite build` | Type-checked and bundled; the WebGL Xterm.js client, files panel, and preview picker are verified by a passing build, not by an automated suite. |
 
-**304 tests** in total (Rust default members `183` + `por-verifier` `25` + dashboard `92` + `por-xdr-toolkit` `4`).
+**344 tests** in total (Rust default members `183` + `por-verifier` `25` + dashboard `132` + `por-xdr-toolkit` `4`).
 
 ```bash
 # Rust workspace (default members)
@@ -508,7 +511,7 @@ cd mobilecloud-platform
 
 cargo test                      # 183 tests in the default members
 cargo test -p por-verifier      # 25 contract tests
-cd apps/web-dashboard && npm test && cd ../..   # 92 dashboard tests
+cd apps/web-dashboard && npm test && cd ../..   # 132 dashboard tests
 ```
 
 ### 3. Run the web console
@@ -534,7 +537,20 @@ cargo build -p mobilecloud-cli --release
 
 The CLI prints a short code and a link to `/activate`; approve it in the console (or scan the link with the Android app) and the terminal receives its own scoped token. `mobilecloud whoami`, `devices`, `sessions`, `revoke-device`, and `revoke-session` are available afterwards; see [`docs/AUTH.md`](docs/AUTH.md).
 
-### 5. Run the browser CloudShell
+### 5. Register an SSO application
+
+The console is also an OIDC, SAML and SCIM identity provider. With an owner session and its CSRF token:
+
+```bash
+curl -X POST http://localhost:3210/api/admin/oidc-clients \
+  -H 'content-type: application/json' -H "x-mc-csrf: $CSRF" -b "mc_session=$SESSION" \
+  -d '{"name":"Demo App","redirect_uris":["http://127.0.0.1:4000/callback"],
+       "scopes":["openid","profile","email"],"public":true}'
+```
+
+Point the application at `http://localhost:3210/.well-known/openid-configuration`. SAML service providers are registered at `/api/admin/saml-sps`, SCIM tokens at `/api/admin/scim-tokens`, and the full reference is [`docs/SSO.md`](docs/SSO.md).
+
+### 6. Run the browser CloudShell
 
 The dev server proxies the engine's routes and attaches the operator credential — the only place that credential appears:
 
@@ -546,7 +562,7 @@ cd web-cloudshell && npm ci && npm run dev  # http://localhost:5173
 
 In production the same role is played by the reverse proxy in front of the engine; the configuration is in [`docs/CLOUDSHELL.md`](docs/CLOUDSHELL.md).
 
-### 6. Build and connect Android
+### 7. Build and connect Android
 
 Use an ARM64 device running Android 11 (API 30) or newer. Point `android-app/local.properties` at your SDK.
 
@@ -560,7 +576,7 @@ Enter and confirm the phone-reachable HTTPS origin, then sign in with the operat
 
 From the repository root, [`scripts/build-and-sign-apk.sh`](scripts/build-and-sign-apk.sh) aligns, signs, and verifies the APK against a trusted certificate fingerprint. It requires an existing release keystore and protected signing inputs. **Do not distribute an APK until historical signing-credential exposure has been assessed and the signed build has been verified on physical hardware.**
 
-### 7. What still needs a physical device
+### 8. What still needs a physical device
 
 Backup and migration recovery, HTTPS/WSS routing, pairing, reconnect, and revocation on real hardware, and a signed release verified on an ARM64 device. Keep public builds disabled until workers and tenant authorization are isolated. Reserve and trading claims require independent validation.
 
@@ -591,6 +607,7 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 | :--- | :--- |
 | [CLOUDSHELL.md](docs/CLOUDSHELL.md) | The tri-modal terminal: credential model, web preview, file transfer, session durability, reverse-proxy configuration |
 | [AUTH.md](docs/AUTH.md) | Unified authentication: passkey ceremonies, Login with MobileCloud, CLI device and PKCE grants, session scopes, refresh rotation, audit and login risk |
+| [SSO.md](docs/SSO.md) | Custom SSO provider: OIDC discovery and PKCE, signed ID tokens and JWKS, SAML 2.0 IdP, SCIM 2.0 provisioning, single logout, client administration |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Dual-cadence assurance model, component dataflow, platform real-time plane |
 | [REALTIME-SYNC.md](docs/REALTIME-SYNC.md) | Unified Web ⇄ Android real-time sync: event envelope, transactional outbox, WebSocket gateway protocol, cursor recovery, cross-device auth |
 | [SECURITY-MODEL.md](docs/SECURITY-MODEL.md) | Quorum design, digest scheme, threat matrix |
@@ -616,6 +633,6 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 **MobileCloud & FurlPay** — one account, one data model, one durable event log.
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-304%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-344%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 
 </div>

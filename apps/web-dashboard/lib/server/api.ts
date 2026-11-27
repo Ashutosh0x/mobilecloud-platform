@@ -10,7 +10,10 @@ import { collectAnalytics, collectHost, collectMetrics } from "./metrics.ts";
 import { capabilities, collectObservability, inspectRequest, listBuilds, listDrives, listFirewallEvents, listRules, listWorkflows, observedJa4, summarizeVitals, trafficSummary } from "./platform.ts";
 import { approveDevice, clearProtection, createToken, gateCookie, identityProviders, listNotifications, listSessions, listTokens, listWebhooks, notify, pollDevice, protectionStatus, readGate, setProtection, startDevice, unlockProtection, userFromBearer } from "./identity.ts";
 import { assessLoginRisk, geoFor, listAuthEvents, logAuthEvent } from "./audit.ts";
-import { approveDeviceCode, checkScope, createAuthorizationCode, denyDeviceCode, findClient, findDeviceCode, OAuthError, redeemAuthorizationCode, redeemDeviceCode, refreshTokens, startDeviceGrant } from "./oauth.ts";
+import { approveDeviceCode, authenticateClient, checkScope, createAuthorizationCode, createClient, deleteClient, denyDeviceCode, findClient, findDeviceCode, listClients, OAuthError, redeemAuthorizationCode, redeemDeviceCode, refreshTokens, startDeviceGrant, type OAuthClient, type TokenPair } from "./oauth.ts";
+import { decodeJwtPayload, deliverBackchannelLogout, discovery, ensureSigningKey, issueIdToken, issueLogoutToken, jwks as signingJwks, revokeToken as revokeOAuthToken, userClaims } from "./oidc.ts";
+import { buildMetadata as buildSamlMetadata, buildResponse as buildSamlResponse, createServiceProvider, deleteServiceProvider, findServiceProvider, listServiceProviders, parseAuthnRequest, samlConfig } from "./saml.ts";
+import { authenticateScim, createGroup, createScimToken, createUser, deleteGroup, deleteUser, getGroup, getUser, listGroups, listScimTokens, listUsers, patchGroup, patchUser, replaceUser, revokeScimToken, ScimError, serviceProviderConfig } from "./scim.ts";
 import { beginAuthentication, beginRegistration, finishAuthentication, finishRegistration, PasskeyError, verifyAssertion } from "./passkey.ts";
 import { approveQrLogin, consumeQrLogin, createQrLogin, denyQrLogin, QrLoginError, qrLoginStatus, scanQrLogin } from "./qrlogin.ts";
 import { createSession, listAccountSessions, type ClientType } from "./sessions.ts";
@@ -72,6 +75,85 @@ function consentRedirect(req: Request, target: string) {
     return json({ redirect: target }, 200);
   }
   return new Response(null, { status: 302, headers: { location: target } });
+}
+
+/** Client credentials from the HTTP Basic header (RFC 6749 §2.3.1). */
+function clientCredentials(req: Request): { id: string; secret: string } | null {
+  const header = req.headers.get("authorization") ?? "";
+  if (!header.startsWith("Basic ")) return null;
+  try {
+    const decoded = Buffer.from(header.slice(6), "base64").toString("utf8");
+    const separator = decoded.indexOf(":");
+    if (separator <= 0) return null;
+    return {
+      id: decodeURIComponent(decoded.slice(0, separator)),
+      secret: decodeURIComponent(decoded.slice(separator + 1)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Authenticates a client or fails the token request with `invalid_client`. */
+function requireClient(db: DatabaseSync, clientId: string, secret: string | null): OAuthClient {
+  if (!clientId) throw new OAuthError(401, "invalid_client", "A client_id is required.");
+  const client = authenticateClient(db, clientId, secret);
+  if (!client) throw new OAuthError(401, "invalid_client", "Client authentication failed.");
+  return client;
+}
+
+/** The token response shared by every grant, with an ID token when one was issued. */
+function oauthJson(pair: TokenPair, idToken?: string | null) {
+  return {
+    response: json({
+      access_token: pair.accessToken,
+      token_type: pair.tokenType,
+      expires_in: pair.expiresIn,
+      refresh_token: pair.refreshToken,
+      scope: pair.scope,
+      ...(idToken ? { id_token: idToken } : {}),
+    }),
+    status: 200,
+    owner: null,
+  };
+}
+
+/** OIDC access tokens are short lived; the CLI keeps its own hour. */
+function oidcAccessTtl(): number {
+  const raw = Number(process.env.MOBILECLOUD_OIDC_ACCESS_TTL);
+  return Number.isFinite(raw) && raw >= 60_000 ? Math.floor(raw) : 15 * 60_000;
+}
+
+/** The client fields safe to show an operator: never the secret hash. */
+function publicClient(client: OAuthClient) {
+  return {
+    client_id: client.id,
+    name: client.name,
+    redirect_uris: client.redirectUris,
+    post_logout_redirect_uris: client.postLogoutRedirectUris,
+    scopes: client.scopes,
+    grant_types: client.grantTypes,
+    public: client.public,
+    backchannel_logout_uri: client.backchannelLogoutUri,
+  };
+}
+
+function scimResponse(body: unknown, status = 200) {
+  const headers = new Headers({ "content-type": "application/scim+json", "cache-control": "no-store" });
+  return new Response(status === 204 ? null : JSON.stringify(body), { status, headers });
+}
+
+function scimList(page: { totalResults: number; startIndex: number; itemsPerPage: number; Resources: unknown[] }) {
+  return { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], ...page };
+}
+
+function scimError(status: number, detail: string, scimType?: string) {
+  return {
+    schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
+    detail,
+    status: String(status),
+    ...(scimType ? { scimType } : {}),
+  };
 }
 
 function publicOrigin(): string | null {
@@ -157,7 +239,7 @@ function authenticate(req: Request, db: DatabaseSync): Authentication | null {
   const row = db.prepare(
     `SELECT u.id, u.email, u.name, u.role, u.plan, s.csrf, s.device_id AS deviceId, s.created_at AS createdAt
      FROM sessions s JOIN users u ON u.id = s.user_id
-     WHERE s.token_hash = ? AND s.expires_at > ? AND s.csrf IS NOT NULL
+     WHERE s.token_hash = ? AND s.expires_at > ? AND s.csrf IS NOT NULL AND u.active = 1
        AND (s.device_id IS NULL OR EXISTS (
          SELECT 1 FROM connected_devices d JOIN access_tokens t ON t.id = d.token_id AND t.owner_id = d.owner_id
          WHERE d.id = s.device_id AND d.owner_id = s.user_id AND d.revoked = 0 AND t.expires_at > ?
@@ -269,7 +351,8 @@ function subscription(raw: unknown): string {
 }
 
 function requireJson(req: Request) {
-  if (req.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
+  const type = req.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+  if (type !== "application/json" && type !== "application/scim+json") {
     throw new RequestError(415, "Content-Type must be application/json");
   }
 }
@@ -301,6 +384,32 @@ async function body(req: Request, maxBytes = 64 * 1024): Promise<Record<string, 
 
 function str(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+/** A JSON array of strings, dropping blanks and non-strings. */
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((entry) => str(entry)).filter(Boolean) : [];
+}
+
+/**
+ * Reads request parameters from either a JSON object or a form body.
+ *
+ * OIDC token, revocation, and logout endpoints receive
+ * `application/x-www-form-urlencoded`; the console and CLI use JSON. Accepting
+ * both in one parser keeps the endpoints standard without a second code path.
+ */
+async function parameters(req: Request, maxBytes = 16 * 1024): Promise<Record<string, unknown>> {
+  const type = req.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+  if (type !== "application/x-www-form-urlencoded") return body(req, maxBytes);
+  if (Number(req.headers.get("content-length")) > maxBytes) throw new RequestError(413, "Request body is too large");
+  const text = await req.text();
+  if (Buffer.byteLength(text, "utf8") > maxBytes) throw new RequestError(413, "Request body is too large");
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of new URLSearchParams(text)) {
+    if (key in result) throw new RequestError(400, `The ${key} parameter appears more than once`);
+    result[key] = value;
+  }
+  return result;
 }
 
 function originOf(req: Request) {
@@ -442,11 +551,11 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       throw new RequestError(400, "A valid email and password are required");
     }
     throttle("login", email);
-    const row = db.prepare("SELECT id, password_hash, locked_until FROM users WHERE email = ?").get(email) as
-      { id: string; password_hash: string; locked_until: number | null } | undefined;
+    const row = db.prepare("SELECT id, password_hash, locked_until, active FROM users WHERE email = ?").get(email) as
+      { id: string; password_hash: string; locked_until: number | null; active: number } | undefined;
     // Run the same costly verifier for missing and reset-required accounts.
     const stored = row?.password_hash.includes(":") ? row.password_hash : `${"0".repeat(32)}:${"0".repeat(64)}`;
-    if (!verifyPassword(password, stored) || !row || isRetiredPassword(password)) {
+    if (!verifyPassword(password, stored) || !row || isRetiredPassword(password) || row.active !== 1) {
       logAuthEvent(db, {
         userId: row?.id ?? null,
         eventType: "auth.login.failed",
@@ -682,10 +791,10 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       const password = str(input.password);
       if (!emailInput || !password) throw new RequestError(401, "Sign in, or prove the account with its password, to add a passkey.");
       throttle("passkey-register", emailInput, 6);
-      const row = db.prepare("SELECT id, email, name, password_hash FROM users WHERE email = ?").get(emailInput) as
-        { id: string; email: string; name: string; password_hash: string } | undefined;
+      const row = db.prepare("SELECT id, email, name, password_hash, active FROM users WHERE email = ?").get(emailInput) as
+        { id: string; email: string; name: string; password_hash: string; active: number } | undefined;
       const stored = row?.password_hash.includes(":") ? row.password_hash : `${"0".repeat(32)}:${"0".repeat(64)}`;
-      if (!row || !verifyPassword(password, stored) || isRetiredPassword(password)) {
+      if (!row || !verifyPassword(password, stored) || isRetiredPassword(password) || row.active !== 1) {
         logAuthEvent(db, {
           eventType: "auth.login.failed",
           clientType: "android",
@@ -1041,59 +1150,53 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   }
 
   if (method === "POST" && parts[0] === "oauth" && parts[1] === "token") {
-    const input = await body(req, 16 * 1024);
+    const input = await parameters(req, 16 * 1024);
     const grantType = str(input.grant_type) || str(input.grantType);
     throttle("oauth-token", undefined, 240);
     try {
+      const basic = clientCredentials(req);
+      const clientId = basic?.id || str(input.client_id) || str(input.clientId);
+      const secret = basic?.secret ?? (str(input.client_secret) || null);
       if (grantType === "urn:ietf:params:oauth:grant-type:device_code") {
+        requireClient(db, clientId, secret);
         const pair = redeemDeviceCode(db, {
           deviceCode: str(input.device_code) || str(input.deviceCode),
-          clientId: str(input.client_id) || str(input.clientId),
+          clientId,
         });
-        return {
-          response: json({
-            access_token: pair.accessToken,
-            token_type: pair.tokenType,
-            expires_in: pair.expiresIn,
-            refresh_token: pair.refreshToken,
-            scope: pair.scope,
-          }),
-          status: 200,
-          owner: null,
-        };
+        return oauthJson(pair);
       }
       if (grantType === "refresh_token") {
+        // A refresh token is itself a bearer secret; a client id, when sent,
+        // must still authenticate so a public client cannot impersonate a
+        // confidential one.
+        if (clientId) requireClient(db, clientId, secret);
         const pair = refreshTokens(db, str(input.refresh_token) || str(input.refreshToken));
-        return {
-          response: json({
-            access_token: pair.accessToken,
-            token_type: pair.tokenType,
-            expires_in: pair.expiresIn,
-            refresh_token: pair.refreshToken,
-            scope: pair.scope,
-          }),
-          status: 200,
-          owner: null,
-        };
+        return oauthJson(pair);
       }
       if (grantType === "authorization_code") {
+        const client = requireClient(db, clientId, secret);
         const pair = redeemAuthorizationCode(db, {
           code: str(input.code),
           codeVerifier: str(input.code_verifier) || str(input.codeVerifier),
-          clientId: str(input.client_id) || str(input.clientId),
+          clientId: client.id,
           redirectUri: str(input.redirect_uri) || str(input.redirectUri),
+          accessTtlMs: oidcAccessTtl(),
         });
-        return {
-          response: json({
-            access_token: pair.accessToken,
-            token_type: pair.tokenType,
-            expires_in: pair.expiresIn,
-            refresh_token: pair.refreshToken,
-            scope: pair.scope,
-          }),
-          status: 200,
-          owner: null,
-        };
+        const user = db.prepare("SELECT id, email, name FROM users WHERE id = ? AND active = 1").get(pair.userId) as
+          | Pick<User, "id" | "email" | "name">
+          | undefined;
+        if (!user) throw new OAuthError(400, "invalid_grant", "That account is no longer active.");
+        const idToken = pair.scope.split(/\s+/).includes("openid")
+          ? issueIdToken(db, {
+              origin: originOf(req),
+              client,
+              user,
+              scope: pair.scope,
+              nonce: pair.nonce,
+              authTime: pair.authTime,
+            })
+          : null;
+        return oauthJson(pair, idToken);
       }
     } catch (error) {
       if (error instanceof OAuthError) {
@@ -1113,10 +1216,12 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const clientId = params.get("client_id") ?? "";
     const redirectUri = params.get("redirect_uri") ?? "";
     const challenge = params.get("code_challenge") ?? "";
-    const client = findClient(clientId);
+    const client = findClient(db, clientId);
     if (!client) throw new RequestError(400, "That client is not registered.");
-    if (!isLoopbackRedirect(redirectUri)) throw new RequestError(400, "That redirect address is not registered.");
+    if (!client.redirectUris.includes(redirectUri)) throw new RequestError(400, "That redirect address is not registered.");
     if (!challenge) throw new RequestError(400, "A code challenge is required.");
+    if ((params.get("code_challenge_method") ?? "S256") !== "S256") throw new RequestError(400, "Only the S256 challenge method is supported.");
+    checkScope(client, params.get("scope"));
     const target = new URL("/authorize", originOf(req));
     target.search = params.toString();
     return { response: new Response(null, { status: 302, headers: { location: target.toString() } }), status: 302, owner: null };
@@ -1131,9 +1236,11 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const redirectUri = str(input.redirect_uri) || str(input.redirectUri);
     const challenge = str(input.code_challenge) || str(input.codeChallenge);
     const state = str(input.state);
-    const client = findClient(clientId);
+    const nonce = str(input.nonce);
+    const client = findClient(db, clientId);
     if (!client) throw new RequestError(400, "That client is not registered.");
-    if (!isLoopbackRedirect(redirectUri)) throw new RequestError(400, "That redirect address is not registered.");
+    if (!client.redirectUris.includes(redirectUri)) throw new RequestError(400, "That redirect address is not registered.");
+    if (!/^[A-Za-z0-9_-]{43}$/.test(challenge)) throw new RequestError(400, "A valid PKCE code challenge is required.");
     const scope = checkScope(client, str(input.scope) || null);
     if (str(input.decision) !== "approve") {
       const denied = new URL(redirectUri);
@@ -1149,21 +1256,269 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       scope,
       codeChallenge: challenge,
       codeChallengeMethod: "S256",
+      nonce: nonce || null,
     });
     const target = new URL(redirectUri);
     target.searchParams.set("code", code);
     if (state) target.searchParams.set("state", state);
     logAuthEvent(db, {
       userId: session.user.id,
-      eventType: "auth.login.device_grant",
-      clientType: "cli",
-      credentialType: "device_grant",
+      eventType: client.id === "mobilecloud-cli" ? "auth.login.device_grant" : "auth.login.oidc",
+      clientType: client.id === "mobilecloud-cli" ? "cli" : "web",
+      credentialType: "oidc",
       ipAddress: requestIp(req),
       userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
       outcome: "success",
     });
     const response = consentRedirect(req, target.toString());
     return { response, status: response.status, owner: session.user.id };
+  }
+
+  // ---- Custom SSO: OIDC provider, SAML IdP and SCIM provisioning ----------
+
+  if (method === "GET" && parts[0] === ".well-known" && parts[1] === "openid-configuration") {
+    return { response: json(discovery(originOf(req))), status: 200, owner: null };
+  }
+
+  if (method === "GET" && parts[0] === ".well-known" && parts[1] === "jwks.json") {
+    return { response: json(signingJwks(db)), status: 200, owner: null };
+  }
+
+  if ((method === "GET" || method === "POST") && parts[0] === "oauth" && parts[1] === "userinfo") {
+    const bearer = userFromBearer(db, req.headers.get("authorization"));
+    if (!bearer) {
+      const headers = new Headers({ "www-authenticate": 'Bearer error="invalid_token"' });
+      return {
+        response: json({ error: "invalid_token", error_description: "A bearer access token is required." }, 401, headers),
+        status: 401,
+        owner: null,
+      };
+    }
+    return {
+      response: json({ ...userClaims(bearer.user, bearer.token.scope), role: bearer.user.role }),
+      status: 200,
+      owner: bearer.user.id,
+    };
+  }
+
+  if (method === "POST" && parts[0] === "oauth" && parts[1] === "revoke") {
+    const input = await parameters(req, 8 * 1024);
+    const token = str(input.token);
+    if (token) revokeOAuthToken(db, token);
+    // RFC 7009: an unknown token also answers 200, so the endpoint cannot be
+    // used to test whether a token exists.
+    return { response: json({}), status: 200, owner: null };
+  }
+
+  if ((method === "GET" || method === "POST") && parts[0] === "oauth" && parts[1] === "logout") {
+    const input: Record<string, unknown> =
+      method === "GET" ? Object.fromEntries(new URL(req.url).searchParams) : await parameters(req, 8 * 1024);
+    const auth = authenticate(req, db);
+    const hint = str(input.id_token_hint);
+    const claims = hint ? decodeJwtPayload(hint) : null;
+    const clientId = str(input.client_id) || (typeof claims?.aud === "string" ? claims.aud : "");
+    const client = clientId ? findClient(db, clientId) : null;
+    const redirect = str(input.post_logout_redirect_uri) || str(input.postLogoutRedirectUri);
+    if (redirect && (!client || !client.postLogoutRedirectUris.includes(redirect))) {
+      throw new RequestError(400, "That post-logout redirect address is not registered.");
+    }
+    let sessionId: string | null = null;
+    if (auth) {
+      if (auth.via === "cookie") {
+        const row = db.prepare("SELECT id FROM sessions WHERE token_hash = ?").get(auth.hash) as { id: string | null } | undefined;
+        sessionId = row?.id ?? null;
+        tx(db, () => {
+          db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(auth.hash);
+          publish(db, auth.user.id, "session.revoked", sessionId ?? auth.hash, {
+            sessionId: sessionId ?? auth.hash,
+            reason: "signed_out",
+          });
+        });
+      }
+      if (str(input.all) === "1" || str(input.all) === "true") {
+        tx(db, () => {
+          const rows = db.prepare("SELECT id FROM sessions WHERE user_id = ?").all(auth.user.id) as { id: string }[];
+          db.prepare("DELETE FROM sessions WHERE user_id = ?").run(auth.user.id);
+          db.prepare("UPDATE access_tokens SET expires_at = ? WHERE owner_id = ?").run(Date.now(), auth.user.id);
+          db.prepare("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?").run(auth.user.id);
+          for (const row of rows) {
+            publish(db, auth.user.id, "session.revoked", row.id, { sessionId: row.id, reason: "signed_out_everywhere" });
+          }
+        });
+      }
+      const targets = client ? [client] : listClients(db).filter((candidate) => candidate.backchannelLogoutUri);
+      for (const target of targets) {
+        if (!target.backchannelLogoutUri) continue;
+        const logoutToken = issueLogoutToken(db, { origin: originOf(req), client: target, user: auth.user, sessionId });
+        // Best effort and never awaited: an offline SP must not fail a logout.
+        void deliverBackchannelLogout(target, logoutToken).catch(() => undefined);
+      }
+      logAuthEvent(db, {
+        userId: auth.user.id,
+        eventType: "auth.logout",
+        clientType: auth.via === "cookie" ? "web" : "cli",
+        credentialType: "session",
+        sessionId,
+        ipAddress: requestIp(req),
+        userAgent: req.headers.get("user-agent")?.slice(0, 180) ?? null,
+        outcome: "success",
+      });
+    }
+    const headers = new Headers();
+    headers.append("set-cookie", cookieHeader(req, "", 0));
+    headers.append("set-cookie", csrfCookieHeader(req, "", 0));
+    if (redirect) {
+      const target = new URL(redirect);
+      if (str(input.state)) target.searchParams.set("state", str(input.state));
+      headers.set("location", target.toString());
+      return { response: new Response(null, { status: 302, headers }), status: 302, owner: auth?.user.id ?? null };
+    }
+    return { response: json({ ok: true }, 200, headers), status: 200, owner: auth?.user.id ?? null };
+  }
+
+  if (method === "GET" && parts[0] === "saml" && parts[1] === "metadata") {
+    const config = samlConfig(db, originOf(req));
+    const headers = new Headers({
+      "content-type": "application/samlmetadata+xml; charset=utf-8",
+      "cache-control": "no-store",
+    });
+    return { response: new Response(buildSamlMetadata(config), { status: 200, headers }), status: 200, owner: null };
+  }
+
+  if ((method === "GET" || method === "POST") && parts[0] === "saml" && parts[1] === "sso") {
+    const session = authenticate(req, db);
+    if (!session) {
+      const url = new URL(req.url);
+      // The catch-all route sees /api/saml/sso; the browser should be sent
+      // back to the standards path the metadata advertises.
+      const publicPath = url.pathname.replace(/^\/api\/saml\//, "/saml/");
+      const next = method === "GET" ? `${publicPath}${url.search}` : "/";
+      const target = new URL("/login", originOf(req));
+      target.searchParams.set("next", next);
+      return {
+        response: new Response(null, { status: 302, headers: { location: target.toString() } }),
+        status: 302,
+        owner: null,
+      };
+    }
+    const config = samlConfig(db, originOf(req));
+    const input: Record<string, unknown> =
+      method === "GET" ? Object.fromEntries(new URL(req.url).searchParams) : await parameters(req, 256 * 1024);
+    try {
+      const request = parseAuthnRequest(db, config, {
+        SAMLRequest: str(input.SAMLRequest),
+        RelayState: str(input.RelayState),
+      });
+      const provider = findServiceProvider(db, request.issuer);
+      if (!provider) throw new Error("That service provider is not registered.");
+      const { html } = buildSamlResponse(config, provider, session.user, request);
+      return {
+        response: new Response(html, {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+        }),
+        status: 200,
+        owner: session.user.id,
+      };
+    } catch (error) {
+      throw new RequestError(400, error instanceof Error ? error.message : "That SAML request could not be processed.");
+    }
+  }
+
+  if (parts[0] === "scim" && parts[1] === "v2") {
+    const writer = authenticateScim(db, req.headers.get("authorization"));
+    if (!writer) {
+      return {
+        response: scimResponse(scimError(401, "A SCIM bearer token is required."), 401),
+        status: 401,
+        owner: null,
+      };
+    }
+    const resource = parts[2] ?? "";
+    const id = parts[3] ?? "";
+    const search = new URL(req.url).searchParams;
+    const query = {
+      filter: search.get("filter"),
+      startIndex: Number(search.get("startIndex") ?? 1),
+      count: Number(search.get("count") ?? 100),
+    };
+    if (method === "GET" && resource === "ServiceProviderConfig") {
+      return { response: scimResponse(serviceProviderConfig()), status: 200, owner: writer.ownerId };
+    }
+    try {
+      if (resource === "Users") {
+        if (method === "GET" && !id) {
+          return { response: scimResponse(scimList(listUsers(db, query))), status: 200, owner: writer.ownerId };
+        }
+        if (method === "POST" && !id) {
+          const result = createUser(db, await body(req));
+          return { response: scimResponse(result.body, result.status), status: result.status, owner: writer.ownerId };
+        }
+        if (method === "GET" && id) {
+          const user = getUser(db, id);
+          return user
+            ? { response: scimResponse(user), status: 200, owner: writer.ownerId }
+            : { response: scimResponse(scimError(404, "No such user."), 404), status: 404, owner: writer.ownerId };
+        }
+        if (method === "PUT" && id) {
+          const result = replaceUser(db, id, await body(req));
+          return { response: scimResponse(result.body, result.status), status: result.status, owner: writer.ownerId };
+        }
+        if (method === "PATCH" && id) {
+          const result = patchUser(db, id, await body(req));
+          return { response: scimResponse(result.body, result.status), status: result.status, owner: writer.ownerId };
+        }
+        if (method === "DELETE" && id) {
+          const removed = deleteUser(db, id);
+          return removed
+            ? { response: scimResponse(null, 204), status: 204, owner: writer.ownerId }
+            : { response: scimResponse(scimError(404, "No such user."), 404), status: 404, owner: writer.ownerId };
+        }
+      }
+      if (resource === "Groups") {
+        if (method === "GET" && !id) {
+          return { response: scimResponse(scimList(listGroups(db, query))), status: 200, owner: writer.ownerId };
+        }
+        if (method === "POST" && !id) {
+          const result = createGroup(db, await body(req));
+          return { response: scimResponse(result.body, result.status), status: result.status, owner: writer.ownerId };
+        }
+        if (method === "GET" && id) {
+          const group = getGroup(db, id);
+          return group
+            ? { response: scimResponse(group), status: 200, owner: writer.ownerId }
+            : { response: scimResponse(scimError(404, "No such group."), 404), status: 404, owner: writer.ownerId };
+        }
+        if (method === "PATCH" && id) {
+          const result = patchGroup(db, id, await body(req));
+          return { response: scimResponse(result.body, result.status), status: result.status, owner: writer.ownerId };
+        }
+        if (method === "DELETE" && id) {
+          const removed = deleteGroup(db, id);
+          return removed
+            ? { response: scimResponse(null, 204), status: 204, owner: writer.ownerId }
+            : { response: scimResponse(scimError(404, "No such group."), 404), status: 404, owner: writer.ownerId };
+        }
+      }
+    } catch (error) {
+      if (error instanceof ScimError) {
+        return {
+          response: scimResponse(error.body, error.status),
+          status: error.status,
+          owner: writer.ownerId,
+        };
+      }
+      return {
+        response: scimResponse(scimError(400, error instanceof Error ? error.message : "That SCIM request was rejected."), 400),
+        status: 400,
+        owner: writer.ownerId,
+      };
+    }
+    return {
+      response: scimResponse(scimError(404, "That SCIM endpoint does not exist."), 404),
+      status: 404,
+      owner: writer.ownerId,
+    };
   }
 
   if (method === "GET" && parts[0] === "auth" && parts[1] === "events") {
@@ -1215,7 +1570,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     throw new RequestError(403, "This credential may only read the account. Sign in to make changes.");
   }
   if (method !== "GET" && (parts[0] === "tokens" || parts[0] === "sessions" || parts[0] === "webhooks" || parts[0] === "devices"
-    || (parts[0] === "auth" && parts[1] === "sessions")
+    || (parts[0] === "auth" && parts[1] === "sessions") || parts[0] === "admin"
     || key === "POST device/approve" || (parts[0] === "device" && parts[1] === "pairing")
     || key === "POST protection" || key === "DELETE protection")) {
     requireRecentLogin(auth);
@@ -1270,6 +1625,102 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   if (blocked) {
     notify(db, owner, "firewall.denied", "Request blocked", blocked.error);
     return { response: json({ error: blocked.error }, blocked.status), status: blocked.status, owner };
+  }
+
+  // ---- SSO administration (owner only) ------------------------------------
+  // Registering an application that can receive identity claims is an
+  // account-wide trust decision, so it is limited to the owner role.
+  if (parts[0] === "admin") {
+    if (user.role !== "owner") throw new RequestError(403, "Only the account owner may manage SSO.");
+    const resource = parts[1] ?? "";
+    const id = parts[2] ?? "";
+    if (resource === "sso" && method === "GET") {
+      return {
+        response: json({
+          issuer: originOf(req),
+          clients: listClients(db).map(publicClient),
+          serviceProviders: listServiceProviders(db),
+          signingKey: ensureSigningKey(db).kid,
+        }),
+        status: 200,
+        owner,
+      };
+    }
+    if (resource === "oidc-clients") {
+      if (method === "GET" && !id) {
+        return { response: json({ clients: listClients(db).map(publicClient) }), status: 200, owner };
+      }
+      if (method === "POST" && !id) {
+        const input = await body(req, 16 * 1024);
+        try {
+          const created = createClient(db, {
+            clientId: str(input.client_id) || null,
+            name: str(input.name),
+            redirectUris: stringArray(input.redirect_uris),
+            postLogoutRedirectUris: stringArray(input.post_logout_redirect_uris),
+            scopes: Array.isArray(input.scopes) ? stringArray(input.scopes) : undefined,
+            grantTypes: Array.isArray(input.grant_types) ? stringArray(input.grant_types) : undefined,
+            public: input.public !== false,
+            backchannelLogoutUri: str(input.backchannel_logout_uri) || null,
+          });
+          log(owner, "info", "auth", `registered OIDC client ${created.client.id}`);
+          return {
+            response: json({ client: publicClient(created.client), client_secret: created.secret }, 201),
+            status: 201,
+            owner,
+          };
+        } catch (error) {
+          if (error instanceof OAuthError) throw new RequestError(error.status, error.message);
+          throw error;
+        }
+      }
+      if (method === "DELETE" && id) {
+        if (!deleteClient(db, id)) throw new RequestError(404, "Client not found");
+        log(owner, "warn", "auth", `deleted OIDC client ${id}`);
+        return { response: json({ ok: true }), status: 200, owner };
+      }
+    }
+    if (resource === "saml-sps") {
+      if (method === "GET" && !id) {
+        return { response: json({ service_providers: listServiceProviders(db) }), status: 200, owner };
+      }
+      if (method === "POST" && !id) {
+        const input = await body(req, 64 * 1024);
+        try {
+          const provider = createServiceProvider(db, {
+            entityId: str(input.entity_id) || str(input.entityId),
+            acsUrl: str(input.acs_url) || str(input.acsUrl),
+            sloUrl: str(input.slo_url) || str(input.sloUrl) || null,
+            certificatePem: str(input.certificate_pem) || str(input.certificatePem) || null,
+            nameIdFormat: str(input.name_id_format) || str(input.nameIdFormat) || null,
+          });
+          log(owner, "info", "auth", `registered SAML SP ${provider.entityId}`);
+          return { response: json({ service_provider: provider }, 201), status: 201, owner };
+        } catch (error) {
+          throw new RequestError(400, error instanceof Error ? error.message : "That service provider was rejected.");
+        }
+      }
+      if (method === "DELETE" && id) {
+        if (!deleteServiceProvider(db, id)) throw new RequestError(404, "Service provider not found");
+        return { response: json({ ok: true }), status: 200, owner };
+      }
+    }
+    if (resource === "scim-tokens") {
+      if (method === "GET" && !id) {
+        return { response: json({ tokens: listScimTokens(db, owner) }), status: 200, owner };
+      }
+      if (method === "POST" && !id) {
+        const input = await body(req, 8 * 1024);
+        const created = createScimToken(db, owner, str(input.name) || "SCIM provisioning");
+        log(owner, "info", "auth", "issued a SCIM token");
+        return { response: json(created, 201), status: 201, owner };
+      }
+      if (method === "DELETE" && id) {
+        if (!revokeScimToken(db, owner, id)) throw new RequestError(404, "Token not found");
+        return { response: json({ ok: true }), status: 200, owner };
+      }
+    }
+    throw new RequestError(404, "Unknown SSO administration endpoint");
   }
 
   // Authorized catch-up feed. A client that was offline (or whose socket
@@ -2064,26 +2515,6 @@ function linkPasskeyDevice(db: DatabaseSync, userId: string, name: string, platf
   ).run(deviceId, userId, issued.id, name.slice(0, 60), platform, now, now, now);
   db.prepare("UPDATE credentials SET device_name = ? WHERE id = ? AND user_id = ?").run(name.slice(0, 60), credentialId, userId);
   return deviceId;
-}
-
-/**
- * Accepts a loopback redirect for the PKCE flow.
- *
- * RFC 8252 lets a native client use any port on the loopback address, so the
- * port is checked for range but not for an exact match. Nothing else is
- * accepted: a redirect to a remote host would leak the authorization code.
- */
-function isLoopbackRedirect(value: string): boolean {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return false;
-  }
-  if (url.protocol !== "http:") return false;
-  if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost" && url.hostname !== "[::1]") return false;
-  if (url.username || url.password) return false;
-  return url.pathname.length > 0 && url.pathname.length <= 64;
 }
 
 /** Caller holds the transaction for credential issuance and its outbox rows. */

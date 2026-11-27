@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { newId, tokenHash } from "./db.ts";
 import { tx } from "./events.ts";
@@ -26,18 +26,22 @@ const USER_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 export type OAuthClient = {
   id: string;
   name: string;
+  secretHash: string | null;
   scopes: string[];
   redirectUris: string[];
+  postLogoutRedirectUris: string[];
+  grantTypes: string[];
+  public: boolean;
+  backchannelLogoutUri: string | null;
 };
 
-const CLIENTS: Record<string, OAuthClient> = {
-  "mobilecloud-cli": {
-    id: "mobilecloud-cli",
-    name: "MobileCloud CLI",
-    scopes: ["cli:full"],
-    redirectUris: ["http://127.0.0.1/callback", "http://localhost/callback"],
-  },
-};
+const GRANT_TYPES = new Set([
+  "authorization_code",
+  "refresh_token",
+  "urn:ietf:params:oauth:grant-type:device_code",
+]);
+const CLIENT_ID = /^[A-Za-z0-9._-]{3,64}$/;
+const SCOPE_TOKEN = /^[A-Za-z0-9:._-]{1,64}$/;
 
 export class OAuthError extends Error {
   status: number;
@@ -49,18 +53,165 @@ export class OAuthError extends Error {
   }
 }
 
-export function findClient(clientId: string): OAuthClient | null {
-  return CLIENTS[clientId] ?? null;
+type ClientRow = {
+  client_id: string;
+  name: string;
+  secret_hash: string | null;
+  redirect_uris: string;
+  post_logout_redirect_uris: string;
+  scopes: string;
+  grant_types: string;
+  public: number;
+  backchannel_logout_uri: string | null;
+};
+
+function stringList(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
-/** Every scope a client may ask for, in the order the console lists them. */
-export function knownScopes(): string[] {
-  return [...new Set(Object.values(CLIENTS).flatMap((client) => client.scopes))];
+function toClient(row: ClientRow): OAuthClient {
+  return {
+    id: row.client_id,
+    name: row.name,
+    secretHash: row.secret_hash,
+    scopes: row.scopes.split(/\s+/).filter(Boolean),
+    redirectUris: stringList(row.redirect_uris),
+    postLogoutRedirectUris: stringList(row.post_logout_redirect_uris),
+    grantTypes: row.grant_types.split(/\s+/).filter(Boolean),
+    public: row.public === 1,
+    backchannelLogoutUri: row.backchannel_logout_uri,
+  };
+}
+
+/**
+ * A redirect target either serves HTTPS or is a loopback development origin.
+ * Fragments are refused because they never reach the server and a browser may
+ * interpret them unexpectedly; embedded credentials are refused outright.
+ */
+export function isSafeRedirect(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.hash || url.username || url.password) return false;
+  if (url.protocol === "https:") return true;
+  if (url.protocol !== "http:") return false;
+  return url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
+}
+
+export function findClient(db: DatabaseSync, clientId: string): OAuthClient | null {
+  if (!clientId) return null;
+  const row = db.prepare(
+    `SELECT client_id, name, secret_hash, redirect_uris, post_logout_redirect_uris, scopes, grant_types,
+            public, backchannel_logout_uri
+     FROM oauth_clients WHERE client_id = ?`,
+  ).get(clientId) as ClientRow | undefined;
+  return row ? toClient(row) : null;
+}
+
+export function listClients(db: DatabaseSync): OAuthClient[] {
+  return (db.prepare(
+    `SELECT client_id, name, secret_hash, redirect_uris, post_logout_redirect_uris, scopes, grant_types,
+            public, backchannel_logout_uri
+     FROM oauth_clients ORDER BY created_at DESC`,
+  ).all() as ClientRow[]).map(toClient);
+}
+
+export type CreateClientInput = {
+  clientId?: string | null;
+  name: string;
+  redirectUris: string[];
+  postLogoutRedirectUris?: string[];
+  scopes?: string[];
+  grantTypes?: string[];
+  public?: boolean;
+  backchannelLogoutUri?: string | null;
+};
+
+/** Registers an OIDC client. The secret is returned once and only its hash is stored. */
+export function createClient(db: DatabaseSync, input: CreateClientInput): { client: OAuthClient; secret: string | null } {
+  const name = input.name.trim();
+  if (!name || name.length > 80) throw new OAuthError(400, "invalid_client_metadata", "A client name of 1-80 characters is required.");
+  const redirects = input.redirectUris.map((uri) => uri.trim()).filter(Boolean);
+  if (!redirects.length || redirects.length > 16) throw new OAuthError(400, "invalid_redirect_uri", "Between 1 and 16 redirect URIs are required.");
+  for (const uri of redirects) {
+    if (!isSafeRedirect(uri)) throw new OAuthError(400, "invalid_redirect_uri", `${uri} is not an HTTPS redirect URI (loopback HTTP is allowed for development).`);
+  }
+  const postLogout = (input.postLogoutRedirectUris ?? []).map((uri) => uri.trim()).filter(Boolean);
+  for (const uri of postLogout) {
+    if (!isSafeRedirect(uri)) throw new OAuthError(400, "invalid_redirect_uri", `${uri} is not a valid post-logout redirect URI.`);
+  }
+  const scopes = (input.scopes ?? ["openid", "profile", "email"]).map((scope) => scope.trim()).filter(Boolean);
+  if (!scopes.length || scopes.some((scope) => !SCOPE_TOKEN.test(scope))) {
+    throw new OAuthError(400, "invalid_scope", "A scope must be a space-free token such as openid or profile.");
+  }
+  const grants = (input.grantTypes ?? ["authorization_code", "refresh_token"]).map((grant) => grant.trim()).filter(Boolean);
+  if (!grants.length || grants.some((grant) => !GRANT_TYPES.has(grant))) {
+    throw new OAuthError(400, "invalid_client_metadata", "That grant type is not supported.");
+  }
+  const isPublic = input.public !== false;
+  const clientId = (input.clientId?.trim() || `client_${randomBytes(12).toString("hex")}`);
+  if (!CLIENT_ID.test(clientId)) throw new OAuthError(400, "invalid_client_metadata", "A client id must be 3-64 letters, digits, dot, underscore or hyphen.");
+  if (findClient(db, clientId)) throw new OAuthError(409, "invalid_client_metadata", "That client id is already registered.");
+  const backchannel = input.backchannelLogoutUri?.trim() || null;
+  if (backchannel && !/^https:\/\//.test(backchannel)) {
+    throw new OAuthError(400, "invalid_client_metadata", "A back-channel logout URI must use HTTPS.");
+  }
+  const secret = isPublic ? null : `mcs_${randomBytes(32).toString("hex")}`;
+  db.prepare(
+    `INSERT INTO oauth_clients (client_id, name, secret_hash, redirect_uris, post_logout_redirect_uris,
+       scopes, grant_types, public, backchannel_logout_uri, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    clientId,
+    name,
+    secret ? tokenHash(secret) : null,
+    JSON.stringify(redirects),
+    JSON.stringify(postLogout),
+    scopes.join(" "),
+    grants.join(" "),
+    isPublic ? 1 : 0,
+    backchannel,
+    Date.now(),
+  );
+  const client = findClient(db, clientId);
+  if (!client) throw new OAuthError(500, "server_error", "The client could not be stored.");
+  return { client, secret };
+}
+
+export function deleteClient(db: DatabaseSync, clientId: string): boolean {
+  return Number(db.prepare("DELETE FROM oauth_clients WHERE client_id = ?").run(clientId).changes) > 0;
+}
+
+/**
+ * Authenticates a client at the token or revocation endpoint.
+ *
+ * A public client (PKCE) presents no secret and is accepted by id alone; a
+ * confidential client must present the secret it was issued once.
+ */
+export function authenticateClient(db: DatabaseSync, clientId: string, secret: string | null): OAuthClient | null {
+  const client = findClient(db, clientId);
+  if (!client) return null;
+  if (client.public) return secret ? null : client;
+  if (!secret || !client.secretHash) return null;
+  const presented = Buffer.from(tokenHash(secret));
+  const stored = Buffer.from(client.secretHash);
+  if (presented.length !== stored.length || !timingSafeEqual(presented, stored)) return null;
+  return client;
 }
 
 /** Rejects a scope the client is not allowed to ask for. */
 export function checkScope(client: OAuthClient, requested: string | null | undefined): string {
-  const scope = (requested ?? "cli:full").trim();
+  const fallback = client.scopes.includes("openid") ? "openid" : client.scopes[0] ?? "";
+  const scope = (requested ?? "").trim() || fallback;
   if (!scope) throw new OAuthError(400, "invalid_scope", "A scope is required.");
   for (const part of scope.split(/\s+/)) {
     if (!client.scopes.includes(part)) {
@@ -88,8 +239,11 @@ function newUserCode(): string {
 
 /** Starts a device authorization. */
 export function startDeviceGrant(db: DatabaseSync, input: { clientId: string; scope?: string | null; verificationUri: string }): DeviceGrant {
-  const client = findClient(input.clientId);
+  const client = findClient(db, input.clientId);
   if (!client) throw new OAuthError(400, "invalid_client", "That client is not registered.");
+  if (!client.grantTypes.includes("urn:ietf:params:oauth:grant-type:device_code")) {
+    throw new OAuthError(400, "unauthorized_client", "That client may not use the device grant.");
+  }
   const scope = checkScope(client, input.scope);
   const deviceCode = randomBytes(32).toString("hex");
   const now = Date.now();
@@ -172,7 +326,7 @@ export type TokenPair = {
  */
 export function issueTokenPair(
   db: DatabaseSync,
-  input: { userId: string; scope: string; clientType: "cli" | "api"; sessionId?: string | null; name?: string },
+  input: { userId: string; scope: string; clientType: "cli" | "api"; sessionId?: string | null; name?: string; accessTtlMs?: number },
 ): TokenPair {
   return tx(db, () => insertTokenPair(db, input));
 }
@@ -180,11 +334,14 @@ export function issueTokenPair(
 /** The writes behind {@link issueTokenPair}, without opening a transaction. */
 function insertTokenPair(
   db: DatabaseSync,
-  input: { userId: string; scope: string; clientType: "cli" | "api"; sessionId?: string | null; name?: string },
+  input: { userId: string; scope: string; clientType: "cli" | "api"; sessionId?: string | null; name?: string; accessTtlMs?: number },
 ): TokenPair {
   const accessToken = `mc_${randomBytes(24).toString("hex")}`;
   const refreshToken = `mcr_${randomBytes(32).toString("hex")}`;
   const now = Date.now();
+  // OIDC clients get the short lifetime the report recommends; the CLI keeps
+  // the hour it was designed around. Both are overridable per call.
+  const ttl = Math.max(60_000, input.accessTtlMs ?? ACCESS_TOKEN_TTL_MS);
   const tokenId = newId();
   const refreshId = newId();
   db.prepare(
@@ -199,7 +356,7 @@ function insertTokenPair(
     input.clientType,
     input.sessionId ?? null,
     now,
-    now + ACCESS_TOKEN_TTL_MS,
+    now + ttl,
   );
   db.prepare(
     "INSERT INTO refresh_tokens (id, user_id, token_hash, session_id, access_token_id, client_type, scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -214,7 +371,7 @@ function insertTokenPair(
     now,
     now + REFRESH_TOKEN_TTL_MS,
   );
-  return { accessToken, refreshToken, expiresIn: Math.floor(ACCESS_TOKEN_TTL_MS / 1000), scope: input.scope, tokenType: "Bearer" };
+  return { accessToken, refreshToken, expiresIn: Math.floor(ttl / 1000), scope: input.scope, tokenType: "Bearer" };
 }
 
 /**
@@ -224,8 +381,11 @@ function insertTokenPair(
  * issues the tokens, so a replayed poll cannot mint a second session.
  */
 export function redeemDeviceCode(db: DatabaseSync, input: { deviceCode: string; clientId: string }): TokenPair {
-  const client = findClient(input.clientId);
+  const client = findClient(db, input.clientId);
   if (!client) throw new OAuthError(400, "invalid_client", "That client is not registered.");
+  if (!client.grantTypes.includes("urn:ietf:params:oauth:grant-type:device_code")) {
+    throw new OAuthError(400, "unauthorized_client", "That client may not use the device grant.");
+  }
   const hash = tokenHash(input.deviceCode);
   return tx(db, () => {
     const row = db.prepare(
@@ -251,12 +411,20 @@ export function redeemDeviceCode(db: DatabaseSync, input: { deviceCode: string; 
 /** Creates an authorization code for the PKCE flow. */
 export function createAuthorizationCode(
   db: DatabaseSync,
-  input: { clientId: string; userId: string; redirectUri: string; scope: string; codeChallenge: string; codeChallengeMethod: string },
+  input: {
+    clientId: string;
+    userId: string;
+    redirectUri: string;
+    scope: string;
+    codeChallenge: string;
+    codeChallengeMethod: string;
+    nonce?: string | null;
+  },
 ): string {
   const code = randomBytes(32).toString("hex");
   const now = Date.now();
   db.prepare(
-    "INSERT INTO oauth_authorization_codes (id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO oauth_authorization_codes (id, code_hash, client_id, user_id, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   ).run(
     newId(),
     tokenHash(code),
@@ -264,6 +432,7 @@ export function createAuthorizationCode(
     input.userId,
     input.redirectUri,
     input.scope,
+    input.nonce ?? null,
     input.codeChallenge,
     input.codeChallengeMethod,
     now,
@@ -272,23 +441,38 @@ export function createAuthorizationCode(
   return code;
 }
 
+/** The code exchange result, with the OIDC context the ID token needs. */
+export type AuthorizationCodeResult = TokenPair & {
+  userId: string;
+  clientId: string;
+  nonce: string | null;
+  authTime: number;
+};
+
 /** Exchanges an authorization code for tokens, proving the PKCE verifier. */
 export function redeemAuthorizationCode(
   db: DatabaseSync,
-  input: { code: string; codeVerifier: string; clientId: string; redirectUri: string },
-): TokenPair {
+  input: { code: string; codeVerifier: string; clientId: string; redirectUri: string; accessTtlMs?: number },
+): AuthorizationCodeResult {
   return tx(db, () => {
+    const client = findClient(db, input.clientId);
+    if (!client) throw new OAuthError(400, "invalid_client", "That client is not registered.");
+    if (!client.grantTypes.includes("authorization_code")) {
+      throw new OAuthError(400, "unauthorized_client", "That client may not use the authorization code grant.");
+    }
     const row = db.prepare(
-      "SELECT id, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, used, expires_at FROM oauth_authorization_codes WHERE code_hash = ?",
+      "SELECT id, client_id, user_id, redirect_uri, scope, nonce, code_challenge, code_challenge_method, used, created_at, expires_at FROM oauth_authorization_codes WHERE code_hash = ?",
   ).get(tokenHash(input.code)) as {
       id: string;
       client_id: string;
       user_id: string;
       redirect_uri: string;
       scope: string;
+      nonce: string | null;
       code_challenge: string;
       code_challenge_method: string;
       used: number;
+      created_at: number;
       expires_at: number;
     } | undefined;
     if (!row) throw new OAuthError(400, "invalid_grant", "That authorization code is not valid.");
@@ -301,7 +485,15 @@ export function redeemAuthorizationCode(
       throw new OAuthError(400, "invalid_grant", "That code verifier does not match.");
     }
     db.prepare("UPDATE oauth_authorization_codes SET used = 1 WHERE id = ?").run(row.id);
-    return insertTokenPair(db, { userId: row.user_id, scope: row.scope, clientType: "cli", name: findClient(row.client_id)?.name });
+    const clientType = client.id === "mobilecloud-cli" ? "cli" : "api";
+    const pair = insertTokenPair(db, {
+      userId: row.user_id,
+      scope: row.scope,
+      clientType,
+      name: client.name,
+      accessTtlMs: input.accessTtlMs,
+    });
+    return { ...pair, userId: row.user_id, clientId: row.client_id, nonce: row.nonce, authTime: row.created_at };
   });
 }
 

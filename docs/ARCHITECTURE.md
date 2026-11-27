@@ -102,7 +102,7 @@ Key decisions:
 | Explicit connection state machine | `401` is "sign in required", not "unreachable"; `403` is not a reason to re-discover |
 
 Honest status: the outbox, gateway, authorization and offline-recovery paths are
-covered by automated tests (`apps/web-dashboard`, 92 tests) that spawn the real
+covered by automated tests (`apps/web-dashboard`, 132 tests) that spawn the real
 gateway. Conflict handling is last-write-wins; multi-control-plane scaling and a
 packaged public tunnel are **not** implemented. See REALTIME-SYNC.md §13.
 
@@ -124,7 +124,7 @@ authoritative component inventory for the whole repository; the PoR trust path
 | `edge/mobilecloud-shield` | library | Blocklist, sliding-window rate limiter, regex WAF. | 11 |
 | `edge/mobilecloud-tunnel` | bins | `mc-tunnel-client` / `mc-tunnel-relay`; Ed25519 handshake, yamux, WSS. | 7 |
 | `fleet-mesh` | library | Node registry, Ed25519 device identity, replay-protected heartbeats, revocation, telemetry provenance, health sweeps, placement, authenticated API. | 43 |
-| `apps/web-dashboard` | Next.js app | Console, realtime gateway, unified authentication (passkeys, QR login, device and PKCE grants), QR pairing, platform services, metering, PoR read-only view. | 92 |
+| `apps/web-dashboard` | Next.js app | Console, realtime gateway, unified authentication (passkeys, QR login, device and PKCE grants), a custom SSO provider (OIDC, SAML 2.0, SCIM 2.0), QR pairing, platform services, metering, PoR read-only view. | 132 |
 | `android-app` | Android app | Compose console, JNI `forkpty` terminal, foreground session service. | build + lint |
 | `mobilecloud-cli` | binary | `login` (device grant and PKCE), `logout`, `whoami`, `devices`, `sessions`, revocation; rotating tokens in a 0600 credentials file. | 8 |
 | `web-cloudshell` | Vite app | Browser WebGL XTerm.js PTY, file manager, preview picker. | build only |

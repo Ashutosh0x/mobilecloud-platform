@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL,
   plan TEXT NOT NULL DEFAULT 'community',
+  active INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -406,11 +407,72 @@ CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
   user_id             TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   redirect_uri        TEXT    NOT NULL,
   scope               TEXT    NOT NULL,
+  nonce               TEXT,
   code_challenge      TEXT    NOT NULL,
   code_challenge_method TEXT  NOT NULL DEFAULT 'S256',
   used                INTEGER NOT NULL DEFAULT 0,
   created_at          INTEGER NOT NULL,
   expires_at          INTEGER NOT NULL
+);
+-- ============================================================================
+-- CUSTOM SSO (schema v6): OIDC clients, signing keys, SAML SPs, SCIM
+-- ============================================================================
+-- A public client has no secret (SPA, mobile, PKCE CLI); a confidential client
+-- authenticates at the token endpoint. Redirect lists are JSON arrays and are
+-- matched exactly, never by prefix.
+CREATE TABLE IF NOT EXISTS oauth_clients (
+  client_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  secret_hash TEXT,
+  redirect_uris TEXT NOT NULL DEFAULT '[]',
+  post_logout_redirect_uris TEXT NOT NULL DEFAULT '[]',
+  scopes TEXT NOT NULL DEFAULT 'openid profile email',
+  grant_types TEXT NOT NULL DEFAULT 'authorization_code refresh_token',
+  public INTEGER NOT NULL DEFAULT 1,
+  backchannel_logout_uri TEXT,
+  created_at INTEGER NOT NULL
+);
+-- JWT and SAML signing material. Rotation is explicit: a new row becomes
+-- active and the old one stays published until its overlap window ends.
+CREATE TABLE IF NOT EXISTS signing_keys (
+  id TEXT PRIMARY KEY,
+  kid TEXT NOT NULL UNIQUE,
+  alg TEXT NOT NULL,
+  private_pem TEXT NOT NULL,
+  public_jwk TEXT NOT NULL,
+  certificate_pem TEXT,
+  created_at INTEGER NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS saml_service_providers (
+  id TEXT PRIMARY KEY,
+  entity_id TEXT NOT NULL UNIQUE,
+  acs_url TEXT NOT NULL,
+  slo_url TEXT,
+  certificate_pem TEXT,
+  name_id_format TEXT NOT NULL DEFAULT 'urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress',
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scim_tokens (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  prefix TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_used INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_scim_tokens_owner ON scim_tokens(owner_id);
+CREATE TABLE IF NOT EXISTS scim_groups (
+  id TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  external_id TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scim_group_members (
+  group_id TEXT NOT NULL REFERENCES scim_groups(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  PRIMARY KEY (group_id, user_id)
 );
 -- "Login with MobileCloud": the browser shows a QR code and the phone approves
 -- it. poll_secret_hash proves the request came from the browser that started
@@ -540,6 +602,26 @@ function migrate(db: DatabaseSync) {
     // stores an explicit sentinel instead of a hash that could ever match.
     db.prepare("UPDATE users SET password_hash = ? WHERE password_hash = ''").run(NO_PASSWORD);
     db.exec("INSERT INTO control_plane_migrations (version) VALUES (5)");
+  }
+  // v6 turns the control plane into a standards-based identity provider: OIDC
+  // clients and signing keys, SAML service providers, SCIM provisioning tokens,
+  // and an active flag that deprovisions an account without erasing history.
+  if (!db.prepare("SELECT 1 FROM control_plane_migrations WHERE version = 6").get()) {
+    addColumns(db, "users", { active: "INTEGER NOT NULL DEFAULT 1" });
+    addColumns(db, "oauth_authorization_codes", { nonce: "TEXT" });
+    db.prepare(
+      `INSERT INTO oauth_clients (client_id, name, secret_hash, redirect_uris, post_logout_redirect_uris,
+         scopes, grant_types, public, backchannel_logout_uri, created_at)
+       VALUES (?, ?, NULL, ?, '[]', ?, ?, 1, NULL, ?) ON CONFLICT(client_id) DO NOTHING`,
+    ).run(
+      "mobilecloud-cli",
+      "MobileCloud CLI",
+      JSON.stringify(["http://127.0.0.1/callback", "http://localhost/callback"]),
+      "cli:full",
+      "authorization_code refresh_token urn:ietf:params:oauth:grant-type:device_code",
+      Date.now(),
+    );
+    db.exec("INSERT INTO control_plane_migrations (version) VALUES (6)");
   }
 }
 

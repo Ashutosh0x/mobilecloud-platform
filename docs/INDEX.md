@@ -52,6 +52,7 @@ on testnet on 2026-11-21 — including live rejections of six attack classes.
 | [INTEGRATION-GUIDE.md](INTEGRATION-GUIDE.md) | How to read and independently verify the proof-of-reserve |
 | [CLOUDSHELL.md](CLOUDSHELL.md) | The tri-modal terminal: Android app, browser CloudShell, SSH; credential model, web preview, file transfer, session durability |
 | [AUTH.md](AUTH.md) | Unified authentication: passkeys, Login with MobileCloud, CLI device and PKCE grants, scoped sessions, refresh rotation, audit and login risk |
+| [SSO.md](SSO.md) | Custom SSO provider: OIDC discovery and PKCE, ID tokens and JWKS, SAML 2.0 IdP, SCIM 2.0 provisioning, single logout, client administration |
 | [ROADMAP.md](ROADMAP.md) | Phase 1–6 plan with honest status tags |
 | [AUDIT-EVIDENCE.md](AUDIT-EVIDENCE.md) | Integrity manifests, verification scripts, commit anchors |
 | [FEATURE-REPORT.md](FEATURE-REPORT.md) | Verified feature-system inventory + cross-client execution audit (operational vs limited vs record-only vs mock vs absent) |

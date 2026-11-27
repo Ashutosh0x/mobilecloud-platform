@@ -19,12 +19,24 @@ type Authorization = {
   code_challenge: string;
   code_challenge_method: string;
   state: string;
+  nonce: string;
   scope: string;
 };
 
 const SCOPES: Record<string, string> = {
+  openid: "Confirm your identity and share a stable account identifier.",
+  profile: "Share your display name.",
+  email: "Share your email address.",
   "cli:full": "Read and manage your account from the command line.",
 };
+
+function describeScope(scope: string): string {
+  return scope
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((entry) => SCOPES[entry] ?? `Grant the ${entry} permission.`)
+    .join(" ");
+}
 
 function parse(): Authorization | null {
   const params = new URLSearchParams(window.location.search);
@@ -38,7 +50,8 @@ function parse(): Authorization | null {
     code_challenge: challenge,
     code_challenge_method: params.get("code_challenge_method") ?? "S256",
     state: params.get("state") ?? "",
-    scope: params.get("scope") ?? "cli:full",
+    nonce: params.get("nonce") ?? "",
+    scope: params.get("scope") ?? "openid",
   };
 }
 
@@ -113,7 +126,7 @@ export default function AuthorizePage() {
         {ready && request && state.status === "ready" && (
           <>
             <h3>Authorize {request.client_id}?</h3>
-            <p className="sub">{SCOPES[request.scope] ?? `The client is asking for the ${request.scope} scope.`}</p>
+            <p className="sub">{describeScope(request.scope)}</p>
             <p className="banner">
               It will be sent back to <code>{request.redirect_uri}</code>
             </p>
