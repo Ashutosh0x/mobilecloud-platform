@@ -47,3 +47,8 @@ apps/web-dashboard/data/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# FurlPay deployment secrets
+deploy/furlpay/.env
+deploy/furlpay/cloudflared/*.json
+artifacts/

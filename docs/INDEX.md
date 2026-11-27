@@ -56,6 +56,7 @@ on testnet on 2026-11-21 — including live rejections of six attack classes.
 | [IDENTITY-ARCHITECTURE.md](IDENTITY-ARCHITECTURE.md) | Identity-provider boundary, components, client roles and planned work |
 | [OIDC-PROVIDER.md](OIDC-PROVIDER.md) | OIDC endpoints, flows, claims, clients and consent |
 | [FURLPAY-INTEGRATION.md](FURLPAY-INTEGRATION.md) | FurlPay relying-party integration, logout and financial boundary |
+| [FURLPAY-DEPLOYMENT.md](FURLPAY-DEPLOYMENT.md) | furlpay.com DNS, Cloudflare Tunnel, Docker, PWA and deployment verification |
 | [ACCOUNT-LINKING.md](ACCOUNT-LINKING.md) | Explicit account linking without email merging |
 | [SESSION-AND-LOGOUT.md](SESSION-AND-LOGOUT.md) | Session scopes, revocation and logout semantics |
 | [KEY-MANAGEMENT.md](KEY-MANAGEMENT.md) | Signing keys, rotation overlap and KMS blocker |

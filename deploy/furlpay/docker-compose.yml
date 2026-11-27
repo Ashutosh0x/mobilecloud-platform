@@ -1,0 +1,49 @@
+name: furlpay-identity
+
+# Identity/control plane for auth.furlpay.com, reachable only through
+# Cloudflare Tunnel. No ports are published on the host; cloudflared dials out.
+services:
+  identity:
+    build:
+      context: ../../apps/web-dashboard
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: "3210"
+      MOBILECLOUD_REALTIME_PORT: "3211"
+      MOBILECLOUD_WEB_HOST: 0.0.0.0
+      MOBILECLOUD_DB: /app/data/mobilecloud.db
+      MOBILECLOUD_DATA_ROOT: /app/data
+    volumes:
+      - identity-data:/app/data
+    expose:
+      - "3210"
+      - "3211"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3210/api/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      identity:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  identity-data:

@@ -1,0 +1,21 @@
+# Cloudflare Tunnel ingress for a certificate-based (non-token) tunnel.
+#
+# Place this at /etc/cloudflared/config.yml inside a clone of the compose file,
+# replace the tunnel id/credentials path, and run:
+#   cloudflared tunnel run furlpay-identity
+#
+# With a token-based tunnel, configure the same public hostnames in
+# Cloudflare Zero Trust → Networks → Tunnels → Public Hostnames instead:
+#   auth.furlpay.com  path ^/api/realtime$  → http://identity:3211
+#   auth.furlpay.com  (all paths)           → http://identity:3210
+
+tunnel: <TUNNEL-ID>
+credentials-file: /etc/cloudflared/<TUNNEL-ID>.json
+
+ingress:
+  - hostname: auth.furlpay.com
+    path: ^/api/realtime$
+    service: http://identity:3211
+  - hostname: auth.furlpay.com
+    service: http://identity:3210
+  - service: http_status:404

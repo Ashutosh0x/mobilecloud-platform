@@ -15,6 +15,7 @@
 [![Real-Time Sync](https://img.shields.io/badge/Real--Time%20Sync-WebSocket%20%2B%20Outbox-0070f3?style=for-the-badge&logo=socketdotio&logoColor=white)](docs/REALTIME-SYNC.md)
 [![Auth](https://img.shields.io/badge/Auth-Passkeys%20%2B%20OAuth%202.1-00B4AB?style=for-the-badge&logoColor=white)](docs/AUTH.md)
 [![SSO](https://img.shields.io/badge/SSO-OIDC%20%2B%20SAML%20%2B%20SCIM-6E40C9?style=for-the-badge&logoColor=white)](docs/SSO.md)
+[![Edge](https://img.shields.io/badge/Edge-Cloudflare%20Tunnel%20%2B%20PWA-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)](deploy/furlpay)
 [![CLI](https://img.shields.io/badge/CLI-mobilecloud-000000?style=for-the-badge&logo=rust&logoColor=white)](cli)
 [![SQLite](https://img.shields.io/badge/SQLite-WAL%20Outbox-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](docs/REALTIME-SYNC.md)
 [![Stellar](https://img.shields.io/badge/Stellar-Protocol%2030-08b5e5?style=for-the-badge&logo=stellar&logoColor=white)](contracts/por-verifier)
@@ -277,6 +278,14 @@ A passkey is the primary factor on every surface; the password remains only as t
 * **FurlPay federation**: FurlPay is the first external OIDC relying party. The deployable adapter in `integrations/furlpay/` verifies discovery, JWKS, issuer/audience/nonce/signature, requires explicit account linking (never email merging), and creates FurlPay's own session. Every financial action still requires a FurlPay device-bound passkey step-up; a MobileCloud SSO session cannot authorize a payment, transfer, withdrawal, wallet signature or agent spend. See [docs/FURLPAY-INTEGRATION.md](docs/FURLPAY-INTEGRATION.md).
 
 ---
+
+### 14. FurlPay Edge Deployment & Installable PWA
+* **Cloudflare Tunnel edge**: `deploy/furlpay/` ships a production Docker image and compose service with no published ports; `cloudflared` dials out, TLS/DDoS/WAF terminate at Cloudflare, and `auth.furlpay.com` is routed to the identity container. `scripts/cloudflare-dns.mjs` creates the tunnel CNAME idempotently, and `scripts/furlpay-preflight.mjs` verifies readiness, discovery, JWKS and HSTS after a deploy.
+* **Hardened container**: Node 24 multi-stage build, non-root UID 10001, `cap_drop: ALL`, `no-new-privileges`, read-only application tree except the SQLite data volume, and readiness health checks.
+* **Installable PWA**: manifest, generated maskable icons, safe-area/theme metadata, an offline page, and a service worker that caches only the shell — API, OAuth, SAML, SCIM, login, approve and authorize routes are network-only. No credentials are ever cached.
+* **Honest boundary**: this deploys the identity and console edge. FurlPay's payments, wallets, KYC, card vault, billing and app frontends are separate systems and are not implemented here.
+
+See [docs/FURLPAY-DEPLOYMENT.md](docs/FURLPAY-DEPLOYMENT.md).
 
 ## System Architecture
 
@@ -614,6 +623,7 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 | [IDENTITY-ARCHITECTURE.md](docs/IDENTITY-ARCHITECTURE.md) | Identity-provider boundary, components, client roles and current-vs-planned status |
 | [OIDC-PROVIDER.md](docs/OIDC-PROVIDER.md) | Discovery, authorization/token/userinfo/introspection/revocation/logout, clients and consent |
 | [FURLPAY-INTEGRATION.md](docs/FURLPAY-INTEGRATION.md) | FurlPay as the first relying party: registration, login sequence, logout, financial boundary and what FurlPay must implement |
+| [FURLPAY-DEPLOYMENT.md](docs/FURLPAY-DEPLOYMENT.md) | Namecheap → Cloudflare DNS, tunnel, Docker deployment, PWA, verification, security baseline and cost estimates |
 | [ACCOUNT-LINKING.md](docs/ACCOUNT-LINKING.md) | `(issuer, subject)` identity keys, explicit link confirmation, no email merging, unlinking and recovery |
 | [SESSION-AND-LOGOUT.md](docs/SESSION-AND-LOGOUT.md) | The four logout scopes, session revocation, refresh rotation and back-channel logout |
 | [KEY-MANAGEMENT.md](docs/KEY-MANAGEMENT.md) | RS256/SAML keys, rotation with JWKS overlap, production KMS requirement and emergency rotation |

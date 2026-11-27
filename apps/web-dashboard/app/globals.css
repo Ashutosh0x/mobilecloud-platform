@@ -235,6 +235,22 @@ dialog.modal::backdrop { background: rgba(0,0,0,0.72); }
 }
 .eye:hover { color: var(--text); }
 .field input, .auth-card input { width: 100%; }
+/* Installable PWA: offline state and the install affordance. */
+.offline-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  padding: calc(6px + env(safe-area-inset-top)) 12px 6px;
+  background: var(--amber); color: #000; text-align: center;
+  font-size: 12px; font-weight: 600;
+}
+.install-chip {
+  position: fixed; right: 14px; bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 90;
+  display: flex; gap: 8px; align-items: center; padding: 8px;
+  border: 1px solid var(--line); border-radius: 12px; background: #141414;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+@media (max-width: 800px) {
+  .install-chip { bottom: calc(74px + env(safe-area-inset-bottom)); }
+}
 /* Sign-in with the phone: the QR, the shared code, and the consent links. */
 .auth-qr-flow { display: grid; gap: 10px; }
 .auth-qr { width: 220px; height: 220px; display: block; margin: 4px auto; border-radius: 12px; background: #fff; padding: 10px; }
