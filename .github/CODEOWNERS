@@ -1,0 +1,11 @@
+# Security-sensitive paths need the owner's review.
+* @Ashutosh0x
+
+/apps/web-dashboard/lib/server/ @Ashutosh0x
+/apps/web-dashboard/app/ @Ashutosh0x
+/core-engine/src/terminal_gateway/ @Ashutosh0x
+/edge/mobilecloud-tunnel/ @Ashutosh0x
+/edge/mobilecloud-shield/ @Ashutosh0x
+/contracts/por-verifier/ @Ashutosh0x
+/deploy/ @Ashutosh0x
+/.github/workflows/ @Ashutosh0x

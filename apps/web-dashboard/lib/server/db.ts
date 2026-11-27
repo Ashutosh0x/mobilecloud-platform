@@ -665,6 +665,20 @@ function migrate(db: DatabaseSync) {
       INSERT INTO control_plane_migrations (version) VALUES (7);
     `);
   }
+  // v8 makes the auth audit trail append-only at the database layer. The
+  // application never deletes an event; this trigger proves it even if a future
+  // query forgets. `UPDATE ... SET user_id = NULL` remains allowed for account
+  // deletion, because the row's history must survive while the subject is gone.
+  if (!db.prepare("SELECT 1 FROM control_plane_migrations WHERE version = 8").get()) {
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS auth_events_no_delete
+      BEFORE DELETE ON auth_events
+      BEGIN
+        SELECT RAISE(ABORT, 'auth_events is append-only');
+      END;
+      INSERT INTO control_plane_migrations (version) VALUES (8);
+    `);
+  }
 }
 
 /** Adds a column only when the table does not already have it. */

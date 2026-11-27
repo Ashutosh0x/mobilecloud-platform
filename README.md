@@ -5,7 +5,7 @@
 ### **The Autonomous Smartphone Edge Cloud & Institutional Proof-of-Reserve Protocol**
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-358%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-359%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 [![Rust](https://img.shields.io/badge/Rust-1.100-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![Android](https://img.shields.io/badge/Android-API%2030--35-3ddc84?style=for-the-badge&logo=android&logoColor=white)](android-app)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7f52ff?style=for-the-badge&logo=kotlin&logoColor=white)](android-app)
@@ -58,6 +58,8 @@ The web console and the Android app are two synchronized clients of one backend:
 | Hardware battery bypass, energy figures, "zero-millisecond UPS" | **Not claimed.** No measurement in this repository supports them. |
 
 > The full, evidence-backed audit of every claimed system and feature — including the subsystems above that the source report over-claimed — is in [`docs/FEATURE-REPORT.md`](docs/FEATURE-REPORT.md).
+>
+> Machine-readable status: [`features/status.json`](features/status.json) is the source of truth; [`docs/FEATURE-STATUS.md`](docs/FEATURE-STATUS.md) is generated from it and CI fails when the two drift.
 
 ---
 
@@ -484,11 +486,12 @@ k6 run -e TARGET=https://your.edge.host benchmarks/k6-load-test.js
 | **SSO provider** (in `apps/web-dashboard`) | 40 tests | OIDC discovery and JWKS; a full PKCE code exchange whose RS256 ID token is verified against the published key; confidential-client authentication (Basic and secret-post); scope-filtered claims; refresh rotation and reuse detection; RFC 7009 revocation; exact redirect and post-logout redirect matching. SAML: metadata, deflated and plain AuthnRequests, signed-request verification against the SP certificate, signature-wrapping rejection, DOCTYPE refusal, and a signed assertion in an auto-submit POST form. SCIM: hashed token auth, user and group CRUD, supported filters, PATCH/PUT deprovisioning that removes sessions and tokens, and a fail-closed `invalidFilter` error. |
 | **FurlPay integration** | 9 tests | First federated login creates no account silently; existing account linking requires explicit approval; matching email never merges; state/nonce enforced; issuer/audience/signature checked against real JWKS; code replay and expiry refused; IdP logout does not end FurlPay's session; SSO cannot authorize payment, withdrawal, wallet signing or agent spending; introspection, client management and signing-key overlap rotation. |
 | **Identity configuration** | 5 tests | Production requires an HTTPS origin/issuer and a strong operator password; known defaults are rejected; an unimplemented KMS provider blocks startup; enabling FurlPay requires a client id, HTTPS callback and issuer. |
+| **Runtime gate** | 1 test | In-process `node:vm` Functions/Workflows are fail-closed in production unless `MOBILECLOUD_IN_PROCESS_RUNTIME=1`; the gate is unit-tested across production, opted-in production and development. |
 | **`android-app`** | `assembleDebug` + `lintDebug` | No JVM unit-test suite ships; the Compose console, JNI `forkpty` terminal, two-row `VirtualKeyBar`, and the foreground `TerminalSessionService` are verified by a passing debug build and lint, not by an automated suite. |
 | **`mobilecloud-cli`** | 8 tests | PKCE S256 against the RFC 7636 test vector, query decoding, UTC timestamp and relative-time formatting, table truncation, server-URL validation (HTTPS only except loopback, no credentials/path/query), and a credentials-file round trip with the profile lifecycle. |
 | **`web-cloudshell`** | `tsc --noEmit` + `vite build` | Type-checked and bundled; the WebGL Xterm.js client, files panel, and preview picker are verified by a passing build, not by an automated suite. |
 
-**358 tests** in total (Rust default members `183` + `por-verifier` `25` + dashboard `146` + `por-xdr-toolkit` `4`).
+**359 tests** in total (Rust default members `183` + `por-verifier` `25` + dashboard `147` + `por-xdr-toolkit` `4`).
 
 ```bash
 # Rust workspace (default members)
@@ -503,6 +506,11 @@ cd tools/por-xdr-toolkit && cargo test && cd ../..
 
 # Dashboard synchronization + QR pairing suite (Node's built-in test runner)
 cd apps/web-dashboard && npm test
+cd ../..
+
+# Documentation and integrity gates
+node scripts/render-feature-status.mjs --check
+node scripts/integrity-manifest.mjs
 ```
 
 ---
@@ -523,7 +531,7 @@ cd mobilecloud-platform
 
 cargo test                      # 183 tests in the default members
 cargo test -p por-verifier      # 25 contract tests
-cd apps/web-dashboard && npm test && cd ../..   # 146 dashboard tests
+cd apps/web-dashboard && npm test && cd ../..   # 147 dashboard tests
 ```
 
 ### 3. Run the web console
@@ -642,6 +650,8 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 | [ROADMAP.md](docs/ROADMAP.md) | Phase 1–6 plan with honest status tags |
 | [AUDIT-EVIDENCE.md](docs/AUDIT-EVIDENCE.md) | Integrity manifests, verification scripts, commit anchors |
 | [FEATURE-REPORT.md](docs/FEATURE-REPORT.md) | Verified inventory of every claimed system and feature — implemented vs UI-only vs absent |
+| [FEATURE-STATUS.md](docs/FEATURE-STATUS.md) | Generated feature-status table; `features/status.json` is the source of truth |
+| [AUDIT-REMEDIATION-2026-11.md](docs/AUDIT-REMEDIATION-2026-11.md) | Priority-tier audit remediation: what is fixed, partial or still open |
 | [IMPLEMENTATION_AUDIT.md](docs/IMPLEMENTATION_AUDIT.md) | Phase 0 repository audit: component inventory, executed test baseline, and the honest list of absent subsystems |
 | [IMPLEMENTATION_ROADMAP.md](docs/IMPLEMENTATION_ROADMAP.md) | The 12-phase engineering program with per-phase status, acceptance criteria, and the architecture decision record |
 | [SECURITY_THREAT_MODEL.md](docs/SECURITY_THREAT_MODEL.md) | Platform assets, trust boundaries, threat table with control status, and the adversarial test plan |
@@ -654,6 +664,6 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 **MobileCloud & FurlPay** — one account, one data model, one durable event log.
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-358%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-359%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 
 </div>

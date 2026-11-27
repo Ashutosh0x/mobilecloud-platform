@@ -114,3 +114,18 @@ jobs:
           name: mobilecloud-release-apk
           path: ${{ runner.temp }}/mobilecloud-release/mobilecloud-release-signed.apk
           if-no-files-found: error
+
+  docs-integrity:
+    name: Status and integrity checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Feature status is generated, not hand-edited
+        run: node scripts/render-feature-status.mjs --check
+      - name: Integrity manifest matches tracked files
+        run: node scripts/integrity-manifest.mjs

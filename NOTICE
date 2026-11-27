@@ -1,0 +1,24 @@
+MobileCloud Platform
+Copyright 2026 MobileCloud / FurlPay contributors
+
+This product includes software developed by third parties. The repository's own
+code is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Major third-party components and licences (verify versions in the lockfiles):
+
+- Next.js, React, React DOM — MIT
+- Node.js — MIT (runtime)
+- xml-crypto, @xmldom/xmldom — MIT
+- qrcode — MIT
+- Geist and Geist Mono fonts — SIL Open Font License 1.1
+- JetBrains Mono — SIL Open Font License 1.1
+- libvips (if enabled in the image pipeline) — LGPL-2.1-or-later; dynamically
+  linked, with the licence and source offer requirements applying to distribution
+- Rust crates: axum, tokio, hyper, rustls, russh, git2, image, and others — see
+  each crate's licence in Cargo.lock; the workspace includes MIT, Apache-2.0 and
+  BSD-licensed dependencies
+- Stellar/Soroban SDK crates — Apache-2.0
+
+This NOTICE is not a substitute for a complete licence inventory. Generate one
+from the lockfiles before distributing binaries, and preserve all upstream
+licence texts and notices.

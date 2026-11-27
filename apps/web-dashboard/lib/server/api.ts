@@ -20,7 +20,7 @@ import { approveQrLogin, consumeQrLogin, createQrLogin, denyQrLogin, QrLoginErro
 import { createSession, listAccountSessions, type ClientType } from "./sessions.ts";
 import { EVENT_TYPES, changesSince, latestSeq, publish, snapshot, tx } from "./events.ts";
 import { collectUsage, record as recordUsage } from "./metering.ts";
-import { FunctionError, validateSource, runFunction } from "./runtime.ts";
+import { FunctionError, inProcessRuntimeAllowed, RUNTIME_DISABLED, validateSource, runFunction } from "./runtime.ts";
 import { deliverableHost, listDeliveries } from "./webhook.ts";
 import { parseSteps, runWorkflow } from "./workflows.ts";
 import { insertAttestation, porState, validateAttestation } from "./por.ts";
@@ -2062,12 +2062,12 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       recordDeployment(db, owner, project, "blocked", NO_REPO_NOTE);
       log(owner, "warn", "builder", `${project.name}: ${NO_REPO_NOTE}`);
       notify(db, owner, "deployment.blocked", "Deployment not built", `${project.name}: ${NO_REPO_NOTE}`);
-      return { response: json({ ok: true, status: "blocked", note: NO_REPO_NOTE }), status: 201, owner };
+      return { response: json({ ok: true, status: "blocked", note: NO_REPO_NOTE }), status: 403, owner };
     }
 
     recordDeployment(db, owner, project, "blocked", BUILDER_DISABLED);
     log(owner, "warn", "builder", `${project.name}: ${BUILDER_DISABLED}`);
-    return { response: json({ ok: true, status: "blocked", note: BUILDER_DISABLED }), status: 201, owner };
+    return { response: json({ ok: true, status: "blocked", note: BUILDER_DISABLED }), status: 403, owner };
   }
 
   if (method === "POST" && parts[0] === "deployments" && parts[2] === "rollback") {
@@ -2126,6 +2126,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   }
 
   if (key === "POST functions") {
+    if (!inProcessRuntimeAllowed()) throw new RequestError(503, RUNTIME_DISABLED);
     const input = await body(req);
     const name = safeSlug(str(input.name), "Function name");
     const routePath = str(input.route);
@@ -2142,6 +2143,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     return { response: json({ ok: true, hasSource: true }), status: 201, owner };
   }
   if (method === "POST" && parts[0] === "functions" && parts[2] === "invoke") {
+    if (!inProcessRuntimeAllowed()) throw new RequestError(503, RUNTIME_DISABLED);
     const row = db.prepare("SELECT id, name, route, source FROM functions WHERE owner_id = ? AND id = ?")
       .get(owner, parts[1]) as { id: string; name: string; route: string; source: string | null } | undefined;
     if (!row) return { response: json({ error: "Function not found" }, 404), status: 404, owner };
@@ -2543,16 +2545,17 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       const note = "No bare-metal ARM64 runner, Gradle snapshot, or Android SDK is configured. The build was not started.";
       recordBuild(db, owner, project, target, "blocked", note);
       log(owner, "warn", "builds", `${project.name} ${target}: ${note}`);
-      return { response: json({ ok: true, status: "blocked", note }), status: 201, owner };
+      return { response: json({ ok: true, status: "blocked", note }), status: 403, owner };
     }
 
     const note = project.repoUrl ? BUILDER_DISABLED : NO_REPO_NOTE;
     recordBuild(db, owner, project, target, "blocked", note);
     log(owner, "warn", "builds", `${project.name} ${target}: ${note}`);
-    return { response: json({ ok: true, status: "blocked", note }), status: 201, owner };
+    return { response: json({ ok: true, status: "blocked", note }), status: 403, owner };
   }
 
   if (key === "POST workflows") {
+    if (!inProcessRuntimeAllowed()) throw new RequestError(503, RUNTIME_DISABLED);
     const input = await body(req);
     const name = safeSlug(str(input.name), "Workflow name");
     const steps = parseSteps(input.steps);
@@ -2566,6 +2569,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     return { response: json({ ok: true, steps: steps.length }), status: 201, owner };
   }
   if (method === "POST" && parts[0] === "workflows" && parts[2] === "run") {
+    if (!inProcessRuntimeAllowed()) throw new RequestError(503, RUNTIME_DISABLED);
     const row = db.prepare("SELECT id, name, steps FROM workflows WHERE owner_id = ? AND id = ?")
       .get(owner, parts[1]) as { id: string; name: string; steps: string | null } | undefined;
     if (!row) return { response: json({ error: "Workflow not found" }, 404), status: 404, owner };

@@ -18,6 +18,21 @@ export const MAX_SOURCE_BYTES = 32 * 1024;
 export const MAX_OUTPUT_BYTES = 256 * 1024;
 const EXEC_TIMEOUT_MS = 250;
 
+/**
+ * Whether the in-process runtime may execute untrusted handler code.
+ *
+ * Production is fail-closed: `vm` is not a sandbox, so operators must opt in
+ * explicitly after moving execution to an isolated worker. Development and
+ * tests keep the bounded runtime for the documented feature.
+ */
+export function inProcessRuntimeAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.NODE_ENV !== "production" || /^(1|true|yes|on)$/i.test((env.MOBILECLOUD_IN_PROCESS_RUNTIME ?? "").trim());
+}
+
+/** Stable error text used by API routes and operators. */
+export const RUNTIME_DISABLED =
+  "In-process functions and workflows are disabled in production. Move execution to an isolated worker, or explicitly set MOBILECLOUD_IN_PROCESS_RUNTIME=1 for a non-production evaluation deployment.";
+
 export type FunctionRequest = {
   method: string;
   path: string;

@@ -115,7 +115,7 @@ test("configured engine remains disabled for builds, deployments and management"
   const { id } = await created.json();
   for (const path of ["builds", "deployments"]) {
     const result = await request(path, "POST", { projectId: id, target: "web" }, auth);
-    assert.equal(result.status, 201);
+    assert.equal(result.status, 403);
     assert.equal((await result.json()).status, "blocked");
   }
   const info = await (await request("builder", "GET", undefined, auth)).json();

@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FunctionError, MAX_SOURCE_BYTES, runFunction, validateSource } from "./runtime.ts";
+import { FunctionError, inProcessRuntimeAllowed, MAX_SOURCE_BYTES, runFunction, validateSource } from "./runtime.ts";
+
+test("the in-process runtime is fail-closed in production unless explicitly enabled", () => {
+  assert.equal(inProcessRuntimeAllowed({ NODE_ENV: "production" } as unknown as NodeJS.ProcessEnv), false);
+  assert.equal(
+    inProcessRuntimeAllowed({ NODE_ENV: "production", MOBILECLOUD_IN_PROCESS_RUNTIME: "1" } as unknown as NodeJS.ProcessEnv),
+    true,
+  );
+  assert.equal(inProcessRuntimeAllowed({ NODE_ENV: "development" } as unknown as NodeJS.ProcessEnv), true);
+});
 
 const req = { method: "POST", path: "/fn", query: {}, headers: {}, body: { hello: "world" } };
 

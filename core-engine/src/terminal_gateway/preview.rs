@@ -354,6 +354,21 @@ pub async fn preview_handler(
         Ok(mut response) => {
             rewrite_location(&mut response, port);
             strip_hop_by_hop(response.headers_mut());
+            // A previewed app is untrusted JavaScript on the console origin.
+            // `sandbox` without `allow-same-origin` gives it an opaque origin:
+            // its scripts run, but they cannot read the console cookie, call
+            // the console API with ambient credentials, or mint terminal
+            // tickets. This is the isolation the path-based preview needs.
+            response.headers_mut().insert(
+                HeaderName::from_static("content-security-policy"),
+                HeaderValue::from_static(
+                    "sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads",
+                ),
+            );
+            response.headers_mut().insert(
+                HeaderName::from_static("referrer-policy"),
+                HeaderValue::from_static("no-referrer"),
+            );
             response
         }
         Err(status) => (status, "the preview target did not respond").into_response(),
