@@ -44,7 +44,12 @@ The web console and the Android app are two synchronized clients of one backend:
 | SSH daemon | **Working.** Refuses a non-loopback bind unless an Ed25519 key is authorized. |
 | Trading engine | **Paper / demo.** Not validated for live execution. |
 | Proof of reserve | Verified against the Stellar **testnet**. Custody and CPA attestation are `NOT_ESTABLISHED`. |
+| On-device AI/ML inference (ONNX, TFLite, NPU) | **Not implemented.** No inference code exists in this repository. |
+| Fleet mesh | **Not implemented.** A console screen exists; there is no discovery, load-balancing, or replication engine. |
+| Billing & metering | **Not implemented.** A console screen exists; there is no metering or billing engine. |
 | Hardware battery bypass, energy figures, "zero-millisecond UPS" | **Not claimed.** No measurement in this repository supports them. |
+
+> The full, evidence-backed audit of every claimed system and feature — including the four subsystems above that the source report over-claimed — is in [`docs/FEATURE-REPORT.md`](docs/FEATURE-REPORT.md).
 
 ---
 
@@ -493,6 +498,7 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 | [INTEGRATION-GUIDE.md](docs/INTEGRATION-GUIDE.md) | How to read and independently verify the proof-of-reserve |
 | [ROADMAP.md](docs/ROADMAP.md) | Phase 1–6 plan with honest status tags |
 | [AUDIT-EVIDENCE.md](docs/AUDIT-EVIDENCE.md) | Integrity manifests, verification scripts, commit anchors |
+| [FEATURE-REPORT.md](docs/FEATURE-REPORT.md) | Verified inventory of every claimed system and feature — implemented vs UI-only vs absent |
 
 ---
 
