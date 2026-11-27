@@ -10,8 +10,9 @@ import { collectAnalytics, collectHost, collectMetrics } from "./metrics.ts";
 import { capabilities, collectObservability, inspectRequest, listBuilds, listDrives, listFirewallEvents, listRules, listWorkflows, observedJa4, summarizeVitals, trafficSummary } from "./platform.ts";
 import { approveDevice, clearProtection, createToken, gateCookie, identityProviders, listNotifications, listSessions, listTokens, listWebhooks, notify, pollDevice, protectionStatus, readGate, setProtection, startDevice, unlockProtection, userFromBearer } from "./identity.ts";
 import { assessLoginRisk, geoFor, listAuthEvents, logAuthEvent } from "./audit.ts";
-import { approveDeviceCode, authenticateClient, checkScope, createAuthorizationCode, createClient, deleteClient, denyDeviceCode, findClient, findDeviceCode, listClients, OAuthError, redeemAuthorizationCode, redeemDeviceCode, refreshTokens, startDeviceGrant, type OAuthClient, type TokenPair } from "./oauth.ts";
-import { decodeJwtPayload, deliverBackchannelLogout, discovery, ensureSigningKey, issueIdToken, issueLogoutToken, jwks as signingJwks, revokeToken as revokeOAuthToken, userClaims } from "./oidc.ts";
+import { approveDeviceCode, authenticateClient, checkScope, createAuthorizationCode, createClient, deleteClient, denyDeviceCode, findClient, findDeviceCode, listClients, OAuthError, redeemAuthorizationCode, redeemDeviceCode, refreshTokens, startDeviceGrant, updateClient, type OAuthClient, type TokenPair } from "./oauth.ts";
+import { decodeJwtPayload, deliverBackchannelLogout, discovery, ensureSigningKey, issuer as issuerId, issueIdToken, issueLogoutToken, jwks as signingJwks, revokeToken as revokeOAuthToken, rotateSigningKey, userClaims } from "./oidc.ts";
+import { consentFor, hasConsentFor, listConsents, recordConsent, revokeConsent } from "./consent.ts";
 import { buildMetadata as buildSamlMetadata, buildResponse as buildSamlResponse, createServiceProvider, deleteServiceProvider, findServiceProvider, listServiceProviders, parseAuthnRequest, samlConfig } from "./saml.ts";
 import { authenticateScim, createGroup, createScimToken, createUser, deleteGroup, deleteUser, getGroup, getUser, listGroups, listScimTokens, listUsers, patchGroup, patchUser, replaceUser, revokeScimToken, ScimError, serviceProviderConfig } from "./scim.ts";
 import { beginAuthentication, beginRegistration, finishAuthentication, finishRegistration, PasskeyError, verifyAssertion } from "./passkey.ts";
@@ -542,6 +543,30 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     };
   }
   const db = openDb();
+
+  // Container liveness and readiness probes. Readiness is deliberately
+  // fail-closed: the instance should not receive identity traffic until the
+  // database, issuer configuration and signing key are all usable.
+  if (key === "GET health/live") {
+    return { response: json({ status: "ok" }), status: 200, owner: null };
+  }
+  if (key === "GET health/ready") {
+    const checks = { database: false, issuer: false, signing_key: false };
+    try {
+      db.prepare("SELECT 1").get();
+      checks.database = true;
+      issuerId(originOf(req));
+      checks.issuer = true;
+      ensureSigningKey(db);
+      checks.signing_key = true;
+    } catch { /* reported through the checks below */ }
+    const ready = Object.values(checks).every(Boolean);
+    return {
+      response: json({ status: ready ? "ready" : "not_ready", checks, at: new Date().toISOString() }, ready ? 200 : 503),
+      status: ready ? 200 : 503,
+      owner: null,
+    };
+  }
 
   if (key === "POST auth/login") {
     const input = await body(req, 4096);
@@ -1258,6 +1283,9 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       codeChallengeMethod: "S256",
       nonce: nonce || null,
     });
+    // The approval is recorded so a later consent screen can show what the
+    // account already granted and the audit trail can answer why.
+    recordConsent(db, session.user.id, clientId, scope);
     const target = new URL(redirectUri);
     target.searchParams.set("code", code);
     if (state) target.searchParams.set("state", state);
@@ -1308,6 +1336,72 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     // RFC 7009: an unknown token also answers 200, so the endpoint cannot be
     // used to test whether a token exists.
     return { response: json({}), status: 200, owner: null };
+  }
+
+  if (method === "POST" && parts[0] === "oauth" && parts[1] === "introspect") {
+    const input = await parameters(req, 8 * 1024);
+    const basic = clientCredentials(req);
+    try {
+      requireClient(db, basic?.id || str(input.client_id), basic?.secret ?? (str(input.client_secret) || null));
+    } catch (error) {
+      if (error instanceof OAuthError) {
+        return {
+          response: json({ error: error.code, error_description: error.message }, error.status),
+          status: error.status,
+          owner: null,
+        };
+      }
+      throw error;
+    }
+    const raw = str(input.token);
+    if (!raw) return { response: json({ active: false }), status: 200, owner: null };
+    const hash = tokenHash(raw);
+    const now = Date.now();
+    const access = db.prepare(
+      `SELECT a.owner_id AS userId, a.scope, a.client_id AS clientId, a.created_at AS issuedAt, a.expires_at AS expiresAt,
+              u.email, u.name, u.active
+       FROM access_tokens a JOIN users u ON u.id = a.owner_id WHERE a.token_hash = ?`,
+    ).get(hash) as { userId: string; scope: string; clientId: string | null; issuedAt: number; expiresAt: number; email: string; name: string; active: number } | undefined;
+    if (access && access.expiresAt > now && access.active === 1) {
+      return {
+        response: json({
+          active: true,
+          scope: access.scope,
+          client_id: access.clientId,
+          token_type: "Bearer",
+          exp: Math.floor(access.expiresAt / 1000),
+          iat: Math.floor(access.issuedAt / 1000),
+          sub: access.userId,
+          username: access.email,
+          name: access.name,
+        }),
+        status: 200,
+        owner: access.userId,
+      };
+    }
+    const refresh = db.prepare(
+      `SELECT r.user_id AS userId, r.scope, r.client_id AS clientId, r.created_at AS issuedAt, r.expires_at AS expiresAt,
+              r.used_at AS usedAt, r.revoked, u.email, u.name, u.active
+       FROM refresh_tokens r JOIN users u ON u.id = r.user_id WHERE r.token_hash = ?`,
+    ).get(hash) as { userId: string; scope: string; clientId: string | null; issuedAt: number; expiresAt: number; usedAt: number | null; revoked: number; email: string; name: string; active: number } | undefined;
+    if (refresh && !refresh.usedAt && refresh.revoked === 0 && refresh.expiresAt > now && refresh.active === 1) {
+      return {
+        response: json({
+          active: true,
+          scope: refresh.scope,
+          client_id: refresh.clientId,
+          token_type: "refresh_token",
+          exp: Math.floor(refresh.expiresAt / 1000),
+          iat: Math.floor(refresh.issuedAt / 1000),
+          sub: refresh.userId,
+          username: refresh.email,
+        }),
+        status: 200,
+        owner: refresh.userId,
+      };
+    }
+    // RFC 7662: an unknown, expired or revoked token is simply inactive.
+    return { response: json({ active: false }), status: 200, owner: null };
   }
 
   if ((method === "GET" || method === "POST") && parts[0] === "oauth" && parts[1] === "logout") {
@@ -1571,6 +1665,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   }
   if (method !== "GET" && (parts[0] === "tokens" || parts[0] === "sessions" || parts[0] === "webhooks" || parts[0] === "devices"
     || (parts[0] === "auth" && parts[1] === "sessions") || parts[0] === "admin"
+    || (parts[0] === "oauth" && parts[1] === "clients")
     || key === "POST device/approve" || (parts[0] === "device" && parts[1] === "pairing")
     || key === "POST protection" || key === "DELETE protection")) {
     requireRecentLogin(auth);
@@ -1621,10 +1716,83 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     log(owner, "info", "auth", "revoked a client session");
     return { response: json({ ok: true }), status: 200, owner };
   }
+  if (key === "GET auth/consents") {
+    return {
+      response: json({
+        consents: listConsents(db, owner),
+        clients: listClients(db).map(publicClient),
+      }),
+      status: 200,
+      owner,
+    };
+  }
+  if (method === "DELETE" && parts[0] === "auth" && parts[1] === "consents" && parts[2]) {
+    const removed = revokeConsent(db, owner, parts[2]);
+    if (!removed) throw new RequestError(404, "Consent not found");
+    return { response: json({ ok: true }), status: 200, owner };
+  }
   const blocked = inspectRequest(db, owner, req, parts.join("/"));
   if (blocked) {
     notify(db, owner, "firewall.denied", "Request blocked", blocked.error);
     return { response: json({ error: blocked.error }, blocked.status), status: blocked.status, owner };
+  }
+
+  // OAuth client management (the discovery document names /oauth/clients).
+  // Registering a client is account-wide trust; only the owner may do it.
+  if (parts[0] === "oauth" && parts[1] === "clients") {
+    if (user.role !== "owner") throw new RequestError(403, "Only the account owner may manage OAuth clients.");
+    const clientId = parts[2] ?? "";
+    try {
+      if (method === "GET" && !clientId) {
+        return { response: json({ clients: listClients(db).map(publicClient) }), status: 200, owner };
+      }
+      if (method === "POST" && !clientId) {
+        const input = await body(req, 16 * 1024);
+        const created = createClient(db, {
+          clientId: str(input.client_id) || null,
+          name: str(input.name),
+          redirectUris: stringArray(input.redirect_uris),
+          postLogoutRedirectUris: stringArray(input.post_logout_redirect_uris),
+          scopes: Array.isArray(input.scopes) ? stringArray(input.scopes) : undefined,
+          grantTypes: Array.isArray(input.grant_types) ? stringArray(input.grant_types) : undefined,
+          public: input.public !== false,
+          backchannelLogoutUri: str(input.backchannel_logout_uri) || null,
+        });
+        log(owner, "info", "auth", `registered OAuth client ${created.client.id}`);
+        return {
+          response: json({ client: publicClient(created.client), client_secret: created.secret }, 201),
+          status: 201,
+          owner,
+        };
+      }
+      if (method === "GET" && clientId) {
+        const client = findClient(db, clientId);
+        if (!client) throw new RequestError(404, "Client not found");
+        return { response: json({ client: publicClient(client) }), status: 200, owner };
+      }
+      if (method === "PATCH" && clientId) {
+        const input = await body(req, 16 * 1024);
+        const updated = updateClient(db, clientId, {
+          name: str(input.name) || undefined,
+          redirectUris: Array.isArray(input.redirect_uris) ? stringArray(input.redirect_uris) : undefined,
+          postLogoutRedirectUris: Array.isArray(input.post_logout_redirect_uris) ? stringArray(input.post_logout_redirect_uris) : undefined,
+          scopes: Array.isArray(input.scopes) ? stringArray(input.scopes) : undefined,
+          backchannelLogoutUri:
+            input.backchannel_logout_uri === undefined ? undefined : str(input.backchannel_logout_uri) || null,
+        });
+        log(owner, "info", "auth", `updated OAuth client ${clientId}`);
+        return { response: json({ client: publicClient(updated) }), status: 200, owner };
+      }
+      if (method === "DELETE" && clientId) {
+        if (!deleteClient(db, clientId)) throw new RequestError(404, "Client not found");
+        log(owner, "warn", "auth", `deleted OAuth client ${clientId}`);
+        return { response: json({ ok: true }), status: 200, owner };
+      }
+    } catch (error) {
+      if (error instanceof OAuthError) throw new RequestError(error.status, error.message);
+      throw error;
+    }
+    throw new RequestError(405, "That method is not supported for OAuth clients.");
   }
 
   // ---- SSO administration (owner only) ------------------------------------
@@ -1634,6 +1802,21 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     if (user.role !== "owner") throw new RequestError(403, "Only the account owner may manage SSO.");
     const resource = parts[1] ?? "";
     const id = parts[2] ?? "";
+    if (resource === "signing-keys") {
+      if (method === "GET" && !id) {
+        const keys = db.prepare("SELECT kid, alg, active, created_at AS createdAt FROM signing_keys WHERE alg = 'RS256' ORDER BY created_at DESC").all();
+        return { response: json({ keys }), status: 200, owner };
+      }
+      if (method === "POST" && id === "rotate") {
+        try {
+          const rotated = rotateSigningKey(db);
+          log(owner, "warn", "auth", `rotated the OIDC signing key to ${rotated.kid}`);
+          return { response: json({ ok: true, ...rotated }), status: 200, owner };
+        } catch (error) {
+          throw new RequestError(409, error instanceof Error ? error.message : "The signing key could not be rotated.");
+        }
+      }
+    }
     if (resource === "sso" && method === "GET") {
       return {
         response: json({

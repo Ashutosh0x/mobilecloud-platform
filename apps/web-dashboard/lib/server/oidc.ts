@@ -30,6 +30,32 @@ export type SigningKey = {
   jwk: Record<string, unknown>;
 };
 
+/**
+ * The issuer identifier.
+ *
+ * A dedicated identity domain (`https://auth.furlpay.com`) is configured with
+ * `MOBILECLOUD_ISSUER`; otherwise the console origin is the issuer. The value
+ * must be an origin with no path, credentials, query or fragment, because
+ * discovery endpoints are derived from it.
+ */
+export function issuer(origin: string): string {
+  const configured = process.env.MOBILECLOUD_ISSUER?.trim();
+  const value = configured || origin;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("MOBILECLOUD_ISSUER is not a valid URL");
+  }
+  if (url.username || url.password || url.search || url.hash) throw new Error("MOBILECLOUD_ISSUER cannot contain credentials, a query or a fragment");
+  if (url.pathname !== "/" && url.pathname !== "") throw new Error("MOBILECLOUD_ISSUER must be an origin without a path");
+  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new Error("MOBILECLOUD_ISSUER must use HTTPS");
+  }
+  return url.origin;
+}
+
 export function b64url(value: Buffer | string): string {
   return Buffer.from(value).toString("base64url");
 }
@@ -78,22 +104,47 @@ function createGeneratedKey(): string {
 /** Every currently published verification key (rotation keeps the old one for a while). */
 export function jwks(db: DatabaseSync): { keys: Record<string, unknown>[] } {
   ensureSigningKey(db);
-  const rows = db.prepare("SELECT public_jwk FROM signing_keys WHERE alg = 'RS256' AND active = 1").all() as {
+  const rows = db.prepare("SELECT public_jwk FROM signing_keys WHERE alg = 'RS256' AND active IN (1, 2)").all() as {
     public_jwk: string;
   }[];
   return { keys: rows.map((row) => JSON.parse(row.public_jwk) as Record<string, unknown>) };
 }
 
+/**
+ * Rotates the RS256 key.
+ *
+ * The new key becomes the only signing key; the old one stays published with
+ * `active = 2` so tokens issued before the rotation still verify. A later
+ * cleanup (or the next rotation) can retire it. Rotating an externally managed
+ * key is refused: the KMS/provider owns that operation.
+ */
+export function rotateSigningKey(db: DatabaseSync): { kid: string; retired: number } {
+  if (process.env.MOBILECLOUD_OIDC_PRIVATE_KEY?.trim()) {
+    throw new Error("The OIDC key is externally managed; rotate it in the key provider, not in the database");
+  }
+  ensureSigningKey(db);
+  const retired = Number(db.prepare("UPDATE signing_keys SET active = 2 WHERE alg = 'RS256' AND active = 1").run().changes);
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const kid = randomBytes(8).toString("hex");
+  db.prepare(
+    "INSERT INTO signing_keys (id, kid, alg, private_pem, public_jwk, certificate_pem, created_at, active) VALUES (?, ?, 'RS256', ?, ?, NULL, ?, 1)",
+  ).run(newId(), kid, privatePem, JSON.stringify(publicJwk(privatePem, kid)), Date.now());
+  return { kid, retired };
+}
+
 /** The OIDC discovery document for this issuer. */
 export function discovery(origin: string) {
+  const base = issuer(origin);
   return {
-    issuer: origin,
-    authorization_endpoint: `${origin}/oauth/authorize`,
-    token_endpoint: `${origin}/oauth/token`,
-    userinfo_endpoint: `${origin}/oauth/userinfo`,
-    jwks_uri: `${origin}/.well-known/jwks.json`,
-    revocation_endpoint: `${origin}/oauth/revoke`,
-    end_session_endpoint: `${origin}/oauth/logout`,
+    issuer: base,
+    authorization_endpoint: `${base}/oauth/authorize`,
+    token_endpoint: `${base}/oauth/token`,
+    userinfo_endpoint: `${base}/oauth/userinfo`,
+    jwks_uri: `${base}/.well-known/jwks.json`,
+    revocation_endpoint: `${base}/oauth/revoke`,
+    introspection_endpoint: `${base}/oauth/introspect`,
+    end_session_endpoint: `${base}/oauth/logout`,
     scopes_supported: ["openid", "profile", "email", "offline_access"],
     response_types_supported: ["code"],
     response_modes_supported: ["query"],
@@ -158,7 +209,7 @@ export type IdTokenInput = {
 export function issueIdToken(db: DatabaseSync, input: IdTokenInput): string {
   const now = Math.floor(Date.now() / 1000);
   const payload: Record<string, unknown> = {
-    iss: input.origin,
+    iss: issuer(input.origin),
     aud: input.client.id,
     azp: input.client.id,
     iat: now,
@@ -184,7 +235,7 @@ export function issueLogoutToken(
 ): string {
   const now = Math.floor(Date.now() / 1000);
   const payload: Record<string, unknown> = {
-    iss: input.origin,
+    iss: issuer(input.origin),
     aud: input.client.id,
     iat: now,
     exp: now + Math.floor(LOGOUT_TOKEN_TTL_MS / 1000),

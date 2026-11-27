@@ -5,7 +5,7 @@
 ### **The Autonomous Smartphone Edge Cloud & Institutional Proof-of-Reserve Protocol**
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-344%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-358%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 [![Rust](https://img.shields.io/badge/Rust-1.100-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![Android](https://img.shields.io/badge/Android-API%2030--35-3ddc84?style=for-the-badge&logo=android&logoColor=white)](android-app)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7f52ff?style=for-the-badge&logo=kotlin&logoColor=white)](android-app)
@@ -274,6 +274,7 @@ A passkey is the primary factor on every surface; the password remains only as t
 * **Audit trail and login risk**: every credential event is appended to `auth_events`, and a weighted engine scores new addresses and countries, impossible travel, brute force, unusual hours, and password use — then allows, notifies, requires a second factor, or blocks.
 * **CLI**: `mobilecloud login|logout|whoami|devices|sessions|revoke-device|revoke-session`, with automatic token refresh and credentials written atomically to a `0600` file. See [docs/AUTH.md](docs/AUTH.md).
 * **Custom SSO provider**: the same identity is exposed as a standards-based IdP — OIDC discovery with PKCE and signed ID tokens, a SAML 2.0 SP-initiated IdP, SCIM 2.0 user and group provisioning, RFC 7009 revocation, and back-channel single logout, with owner-only client administration. See [docs/SSO.md](docs/SSO.md).
+* **FurlPay federation**: FurlPay is the first external OIDC relying party. The deployable adapter in `integrations/furlpay/` verifies discovery, JWKS, issuer/audience/nonce/signature, requires explicit account linking (never email merging), and creates FurlPay's own session. Every financial action still requires a FurlPay device-bound passkey step-up; a MobileCloud SSO session cannot authorize a payment, transfer, withdrawal, wallet signature or agent spend. See [docs/FURLPAY-INTEGRATION.md](docs/FURLPAY-INTEGRATION.md).
 
 ---
 
@@ -472,11 +473,13 @@ k6 run -e TARGET=https://your.edge.host benchmarks/k6-load-test.js
 | **`por-xdr-toolkit`** | 4 tests | Protocol 30 XDR encoding/decoding, RFC 4506 `Option<ScVec>` presence-flag alignment. |
 | **`apps/web-dashboard`** | 92 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. Authentication: a device grant issues a scoped CLI token once after approval and is refused before it; refresh tokens rotate and a replayed token revokes the family; a `cli:full` bearer can revoke devices and sessions but cannot mutate the account; QR login reaches `APPROVED` only through the phone's signature over the browser's challenge and the challenge is single use; WebAuthn options are bound to the console's RP id and require user verification; the risk engine blocks impossible travel and scores a new country and address as `medium`. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Platform services: a function runs inside a `node:vm` context with no `require`/`process`/`fetch`/timers and is rejected when over the source or output byte cap or the 250 ms timeout; a workflow threads each step's output into the next and stops at the first failure; a webhook delivery is queued once per subscriber in the event's own transaction, signed HMAC-SHA256, backoff-capped at 5 attempts, and refused against loopback/private targets; usage counters append per meter; a PoR attestation is validated and stored read-only, and a missing attestation reports `unverified`. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
 | **SSO provider** (in `apps/web-dashboard`) | 40 tests | OIDC discovery and JWKS; a full PKCE code exchange whose RS256 ID token is verified against the published key; confidential-client authentication (Basic and secret-post); scope-filtered claims; refresh rotation and reuse detection; RFC 7009 revocation; exact redirect and post-logout redirect matching. SAML: metadata, deflated and plain AuthnRequests, signed-request verification against the SP certificate, signature-wrapping rejection, DOCTYPE refusal, and a signed assertion in an auto-submit POST form. SCIM: hashed token auth, user and group CRUD, supported filters, PATCH/PUT deprovisioning that removes sessions and tokens, and a fail-closed `invalidFilter` error. |
+| **FurlPay integration** | 9 tests | First federated login creates no account silently; existing account linking requires explicit approval; matching email never merges; state/nonce enforced; issuer/audience/signature checked against real JWKS; code replay and expiry refused; IdP logout does not end FurlPay's session; SSO cannot authorize payment, withdrawal, wallet signing or agent spending; introspection, client management and signing-key overlap rotation. |
+| **Identity configuration** | 5 tests | Production requires an HTTPS origin/issuer and a strong operator password; known defaults are rejected; an unimplemented KMS provider blocks startup; enabling FurlPay requires a client id, HTTPS callback and issuer. |
 | **`android-app`** | `assembleDebug` + `lintDebug` | No JVM unit-test suite ships; the Compose console, JNI `forkpty` terminal, two-row `VirtualKeyBar`, and the foreground `TerminalSessionService` are verified by a passing debug build and lint, not by an automated suite. |
 | **`mobilecloud-cli`** | 8 tests | PKCE S256 against the RFC 7636 test vector, query decoding, UTC timestamp and relative-time formatting, table truncation, server-URL validation (HTTPS only except loopback, no credentials/path/query), and a credentials-file round trip with the profile lifecycle. |
 | **`web-cloudshell`** | `tsc --noEmit` + `vite build` | Type-checked and bundled; the WebGL Xterm.js client, files panel, and preview picker are verified by a passing build, not by an automated suite. |
 
-**344 tests** in total (Rust default members `183` + `por-verifier` `25` + dashboard `132` + `por-xdr-toolkit` `4`).
+**358 tests** in total (Rust default members `183` + `por-verifier` `25` + dashboard `146` + `por-xdr-toolkit` `4`).
 
 ```bash
 # Rust workspace (default members)
@@ -511,7 +514,7 @@ cd mobilecloud-platform
 
 cargo test                      # 183 tests in the default members
 cargo test -p por-verifier      # 25 contract tests
-cd apps/web-dashboard && npm test && cd ../..   # 132 dashboard tests
+cd apps/web-dashboard && npm test && cd ../..   # 146 dashboard tests
 ```
 
 ### 3. Run the web console
@@ -608,6 +611,14 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 | [CLOUDSHELL.md](docs/CLOUDSHELL.md) | The tri-modal terminal: credential model, web preview, file transfer, session durability, reverse-proxy configuration |
 | [AUTH.md](docs/AUTH.md) | Unified authentication: passkey ceremonies, Login with MobileCloud, CLI device and PKCE grants, session scopes, refresh rotation, audit and login risk |
 | [SSO.md](docs/SSO.md) | Custom SSO provider: OIDC discovery and PKCE, signed ID tokens and JWKS, SAML 2.0 IdP, SCIM 2.0 provisioning, single logout, client administration |
+| [IDENTITY-ARCHITECTURE.md](docs/IDENTITY-ARCHITECTURE.md) | Identity-provider boundary, components, client roles and current-vs-planned status |
+| [OIDC-PROVIDER.md](docs/OIDC-PROVIDER.md) | Discovery, authorization/token/userinfo/introspection/revocation/logout, clients and consent |
+| [FURLPAY-INTEGRATION.md](docs/FURLPAY-INTEGRATION.md) | FurlPay as the first relying party: registration, login sequence, logout, financial boundary and what FurlPay must implement |
+| [ACCOUNT-LINKING.md](docs/ACCOUNT-LINKING.md) | `(issuer, subject)` identity keys, explicit link confirmation, no email merging, unlinking and recovery |
+| [SESSION-AND-LOGOUT.md](docs/SESSION-AND-LOGOUT.md) | The four logout scopes, session revocation, refresh rotation and back-channel logout |
+| [KEY-MANAGEMENT.md](docs/KEY-MANAGEMENT.md) | RS256/SAML keys, rotation with JWKS overlap, production KMS requirement and emergency rotation |
+| [IDENTITY-SECURITY.md](docs/IDENTITY-SECURITY.md) | Threat controls, browser/transport hardening, logging rules and residual risks |
+| [IDENTITY-OPERATIONS.md](docs/IDENTITY-OPERATIONS.md) | Environment, DNS/TLS for `auth.furlpay.com`, health probes, backup/restore, monitoring, incident response and readiness |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Dual-cadence assurance model, component dataflow, platform real-time plane |
 | [REALTIME-SYNC.md](docs/REALTIME-SYNC.md) | Unified Web ⇄ Android real-time sync: event envelope, transactional outbox, WebSocket gateway protocol, cursor recovery, cross-device auth |
 | [SECURITY-MODEL.md](docs/SECURITY-MODEL.md) | Quorum design, digest scheme, threat matrix |
@@ -633,6 +644,6 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 **MobileCloud & FurlPay** — one account, one data model, one durable event log.
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-344%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-358%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 
 </div>

@@ -191,6 +191,48 @@ export function deleteClient(db: DatabaseSync, clientId: string): boolean {
   return Number(db.prepare("DELETE FROM oauth_clients WHERE client_id = ?").run(clientId).changes) > 0;
 }
 
+/** Updates the mutable client metadata. Secrets and id are immutable. */
+export function updateClient(
+  db: DatabaseSync,
+  clientId: string,
+  input: {
+    name?: string;
+    redirectUris?: string[];
+    postLogoutRedirectUris?: string[];
+    scopes?: string[];
+    backchannelLogoutUri?: string | null;
+  },
+): OAuthClient {
+  const existing = findClient(db, clientId);
+  if (!existing) throw new OAuthError(404, "invalid_client", "That client is not registered.");
+  const name = (input.name ?? existing.name).trim();
+  if (!name || name.length > 80) throw new OAuthError(400, "invalid_client_metadata", "A client name of 1-80 characters is required.");
+  const redirects = input.redirectUris ?? existing.redirectUris;
+  if (!redirects.length || redirects.length > 16) throw new OAuthError(400, "invalid_redirect_uri", "Between 1 and 16 redirect URIs are required.");
+  for (const uri of redirects) {
+    if (!isSafeRedirect(uri)) throw new OAuthError(400, "invalid_redirect_uri", `${uri} is not an HTTPS redirect URI (loopback HTTP is allowed for development).`);
+  }
+  const postLogout = input.postLogoutRedirectUris ?? existing.postLogoutRedirectUris;
+  for (const uri of postLogout) {
+    if (!isSafeRedirect(uri)) throw new OAuthError(400, "invalid_redirect_uri", `${uri} is not a valid post-logout redirect URI.`);
+  }
+  const scopes = input.scopes ?? existing.scopes;
+  if (!scopes.length || scopes.some((scope) => !SCOPE_TOKEN.test(scope))) {
+    throw new OAuthError(400, "invalid_scope", "A scope must be a space-free token such as openid or profile.");
+  }
+  const backchannel = input.backchannelLogoutUri === undefined ? existing.backchannelLogoutUri : input.backchannelLogoutUri;
+  if (backchannel && !/^https:\/\//.test(backchannel)) {
+    throw new OAuthError(400, "invalid_client_metadata", "A back-channel logout URI must use HTTPS.");
+  }
+  db.prepare(
+    `UPDATE oauth_clients SET name = ?, redirect_uris = ?, post_logout_redirect_uris = ?, scopes = ?, backchannel_logout_uri = ?
+     WHERE client_id = ?`,
+  ).run(name, JSON.stringify(redirects), JSON.stringify(postLogout), scopes.join(" "), backchannel, clientId);
+  const updated = findClient(db, clientId);
+  if (!updated) throw new OAuthError(500, "server_error", "The client could not be read back.");
+  return updated;
+}
+
 /**
  * Authenticates a client at the token or revocation endpoint.
  *
@@ -315,6 +357,7 @@ export type TokenPair = {
   expiresIn: number;
   scope: string;
   tokenType: "Bearer";
+  clientId: string | null;
 };
 
 /**
@@ -326,7 +369,7 @@ export type TokenPair = {
  */
 export function issueTokenPair(
   db: DatabaseSync,
-  input: { userId: string; scope: string; clientType: "cli" | "api"; sessionId?: string | null; name?: string; accessTtlMs?: number },
+  input: { userId: string; scope: string; clientType: "cli" | "api"; sessionId?: string | null; name?: string; accessTtlMs?: number; clientId?: string | null },
 ): TokenPair {
   return tx(db, () => insertTokenPair(db, input));
 }
@@ -334,7 +377,7 @@ export function issueTokenPair(
 /** The writes behind {@link issueTokenPair}, without opening a transaction. */
 function insertTokenPair(
   db: DatabaseSync,
-  input: { userId: string; scope: string; clientType: "cli" | "api"; sessionId?: string | null; name?: string; accessTtlMs?: number },
+  input: { userId: string; scope: string; clientType: "cli" | "api"; sessionId?: string | null; name?: string; accessTtlMs?: number; clientId?: string | null },
 ): TokenPair {
   const accessToken = `mc_${randomBytes(24).toString("hex")}`;
   const refreshToken = `mcr_${randomBytes(32).toString("hex")}`;
@@ -345,7 +388,7 @@ function insertTokenPair(
   const tokenId = newId();
   const refreshId = newId();
   db.prepare(
-    "INSERT INTO access_tokens (id, owner_id, name, token_hash, prefix, scope, client_type, session_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO access_tokens (id, owner_id, name, token_hash, prefix, scope, client_type, session_id, client_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   ).run(
     tokenId,
     input.userId,
@@ -355,11 +398,12 @@ function insertTokenPair(
     input.scope,
     input.clientType,
     input.sessionId ?? null,
+    input.clientId ?? null,
     now,
     now + ttl,
   );
   db.prepare(
-    "INSERT INTO refresh_tokens (id, user_id, token_hash, session_id, access_token_id, client_type, scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO refresh_tokens (id, user_id, token_hash, session_id, access_token_id, client_type, client_id, scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   ).run(
     refreshId,
     input.userId,
@@ -367,11 +411,19 @@ function insertTokenPair(
     input.sessionId ?? null,
     tokenId,
     input.clientType,
+    input.clientId ?? null,
     input.scope,
     now,
     now + REFRESH_TOKEN_TTL_MS,
   );
-  return { accessToken, refreshToken, expiresIn: Math.floor(ttl / 1000), scope: input.scope, tokenType: "Bearer" };
+  return {
+    accessToken,
+    refreshToken,
+    expiresIn: Math.floor(ttl / 1000),
+    scope: input.scope,
+    tokenType: "Bearer",
+    clientId: input.clientId ?? null,
+  };
 }
 
 /**
@@ -404,7 +456,7 @@ export function redeemDeviceCode(db: DatabaseSync, input: { deviceCode: string; 
       throw new OAuthError(400, "invalid_grant", "That device code is in an unexpected state.");
     }
     db.prepare("UPDATE oauth_device_codes SET status = 'consumed' WHERE id = ?").run(row.id);
-    return insertTokenPair(db, { userId: row.approved_by, scope: row.scope, clientType: "cli", name: client.name });
+    return insertTokenPair(db, { userId: row.approved_by, scope: row.scope, clientType: "cli", name: client.name, clientId: client.id });
   });
 }
 
@@ -491,6 +543,7 @@ export function redeemAuthorizationCode(
       scope: row.scope,
       clientType,
       name: client.name,
+      clientId: client.id,
       accessTtlMs: input.accessTtlMs,
     });
     return { ...pair, userId: row.user_id, clientId: row.client_id, nonce: row.nonce, authTime: row.created_at };
@@ -508,13 +561,14 @@ export function redeemAuthorizationCode(
 export function refreshTokens(db: DatabaseSync, rawRefreshToken: string): TokenPair {
   const hash = tokenHash(rawRefreshToken);
   const row = db.prepare(
-    "SELECT id, user_id, session_id, access_token_id, client_type, scope, created_at, expires_at, used_at, revoked FROM refresh_tokens WHERE token_hash = ?",
+    "SELECT id, user_id, session_id, access_token_id, client_type, client_id, scope, created_at, expires_at, used_at, revoked FROM refresh_tokens WHERE token_hash = ?",
   ).get(hash) as {
     id: string;
     user_id: string;
     session_id: string | null;
     access_token_id: string | null;
     client_type: string;
+    client_id: string | null;
     scope: string;
     created_at: number;
     expires_at: number;
@@ -529,7 +583,10 @@ export function refreshTokens(db: DatabaseSync, rawRefreshToken: string): TokenP
       if (row.session_id) {
         db.prepare("UPDATE refresh_tokens SET revoked = 1 WHERE session_id = ?").run(row.session_id);
       } else {
-        db.prepare("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ? AND client_type = ?").run(row.user_id, row.client_type);
+        // Scope family revocation to the same client, not every token the
+        // account ever issued to this class of client.
+        db.prepare("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ? AND client_type = ? AND COALESCE(client_id, '') = ?")
+          .run(row.user_id, row.client_type, row.client_id ?? "");
       }
       db.prepare("UPDATE access_tokens SET expires_at = ? WHERE id = ?").run(Date.now(), row.access_token_id ?? "");
     });
@@ -544,6 +601,7 @@ export function refreshTokens(db: DatabaseSync, rawRefreshToken: string): TokenP
       clientType: row.client_type as "cli" | "api",
       sessionId: row.session_id,
       name: "cli",
+      clientId: row.client_id,
     });
     db.prepare("UPDATE refresh_tokens SET used_at = ?, replaced_by = ? WHERE id = ?").run(Date.now(), pair.refreshToken, row.id);
     // The access token this refresh belonged to is retired with it.

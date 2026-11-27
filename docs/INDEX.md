@@ -53,6 +53,14 @@ on testnet on 2026-11-21 — including live rejections of six attack classes.
 | [CLOUDSHELL.md](CLOUDSHELL.md) | The tri-modal terminal: Android app, browser CloudShell, SSH; credential model, web preview, file transfer, session durability |
 | [AUTH.md](AUTH.md) | Unified authentication: passkeys, Login with MobileCloud, CLI device and PKCE grants, scoped sessions, refresh rotation, audit and login risk |
 | [SSO.md](SSO.md) | Custom SSO provider: OIDC discovery and PKCE, ID tokens and JWKS, SAML 2.0 IdP, SCIM 2.0 provisioning, single logout, client administration |
+| [IDENTITY-ARCHITECTURE.md](IDENTITY-ARCHITECTURE.md) | Identity-provider boundary, components, client roles and planned work |
+| [OIDC-PROVIDER.md](OIDC-PROVIDER.md) | OIDC endpoints, flows, claims, clients and consent |
+| [FURLPAY-INTEGRATION.md](FURLPAY-INTEGRATION.md) | FurlPay relying-party integration, logout and financial boundary |
+| [ACCOUNT-LINKING.md](ACCOUNT-LINKING.md) | Explicit account linking without email merging |
+| [SESSION-AND-LOGOUT.md](SESSION-AND-LOGOUT.md) | Session scopes, revocation and logout semantics |
+| [KEY-MANAGEMENT.md](KEY-MANAGEMENT.md) | Signing keys, rotation overlap and KMS blocker |
+| [IDENTITY-SECURITY.md](IDENTITY-SECURITY.md) | Identity threat controls and residual risks |
+| [IDENTITY-OPERATIONS.md](IDENTITY-OPERATIONS.md) | Deployment, health, backup, monitoring and incident runbooks |
 | [ROADMAP.md](ROADMAP.md) | Phase 1–6 plan with honest status tags |
 | [AUDIT-EVIDENCE.md](AUDIT-EVIDENCE.md) | Integrity manifests, verification scripts, commit anchors |
 | [FEATURE-REPORT.md](FEATURE-REPORT.md) | Verified feature-system inventory + cross-client execution audit (operational vs limited vs record-only vs mock vs absent) |

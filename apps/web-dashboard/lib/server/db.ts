@@ -2,6 +2,7 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypt
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { assertRuntimeConfig } from "./config.ts";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -474,6 +475,34 @@ CREATE TABLE IF NOT EXISTS scim_group_members (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   PRIMARY KEY (group_id, user_id)
 );
+-- ============================================================================
+-- IDENTITY EXTENSIONS (schema v7): consent and federated identity links
+-- ============================================================================
+-- What an account approved for a client, so consent can be shown once and
+-- audited later. Scope changes require a new consent.
+CREATE TABLE IF NOT EXISTS identity_consents (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  client_id TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(user_id, client_id)
+);
+CREATE INDEX IF NOT EXISTS idx_identity_consents_user ON identity_consents(user_id);
+-- A federated identity is unique by (provider, issuer, subject). Email is
+-- stored for display and recovery only; it is never the linking key.
+CREATE TABLE IF NOT EXISTS external_identity_links (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  issuer TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  email TEXT,
+  created_at INTEGER NOT NULL,
+  UNIQUE(provider, issuer, subject)
+);
+CREATE INDEX IF NOT EXISTS idx_external_links_user ON external_identity_links(user_id);
 -- "Login with MobileCloud": the browser shows a QR code and the phone approves
 -- it. poll_secret_hash proves the request came from the browser that started
 -- the flow, so only that browser can claim the resulting session.
@@ -526,6 +555,7 @@ export function resetDb() {
 
 export function openDb(file?: string): DatabaseSync {
   if (!file && singleton) return singleton;
+  if (!file) assertRuntimeConfig();
   const target = file ?? process.env.MOBILECLOUD_DB ?? join(dataRoot(), "mobilecloud.db");
   mkdirSync(dirname(target), { recursive: true });
   const db = new DatabaseSync(target);
@@ -534,6 +564,7 @@ export function openDb(file?: string): DatabaseSync {
     db.exec("BEGIN IMMEDIATE");
     db.exec(SCHEMA);
     migrate(db);
+    ensureConfiguredClients(db);
     if (!file) ensureOperator(db);
     db.exec("COMMIT");
     if (!file) singleton = db;
@@ -623,6 +654,17 @@ function migrate(db: DatabaseSync) {
     );
     db.exec("INSERT INTO control_plane_migrations (version) VALUES (6)");
   }
+  // v7 records which client an access/refresh token was issued to (needed for
+  // introspection and audience checks) and adds consent and federated links.
+  if (!db.prepare("SELECT 1 FROM control_plane_migrations WHERE version = 7").get()) {
+    addColumns(db, "access_tokens", { client_id: "TEXT" });
+    addColumns(db, "refresh_tokens", { client_id: "TEXT" });
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_access_tokens_client ON access_tokens(client_id);
+      CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON refresh_tokens(client_id);
+      INSERT INTO control_plane_migrations (version) VALUES (7);
+    `);
+  }
 }
 
 /** Adds a column only when the table does not already have it. */
@@ -669,9 +711,73 @@ function migrateCredentialBindings(db: DatabaseSync) {
   db.exec("INSERT INTO control_plane_migrations (version) VALUES (1)");
 }
 
+/**
+ * Registers the first external relying party from configuration.
+ *
+ * FurlPay is an OIDC client, not a special code path: the environment only
+ * supplies its id, exact redirect URI, scopes and logout endpoints. When the
+ * switch is off nothing is written. Invalid configuration fails startup rather
+ * than silently running without the integration.
+ */
+function ensureConfiguredClients(db: DatabaseSync) {
+  if (!/^(1|true|yes|on)$/i.test((process.env.FURLPAY_OIDC_ENABLED ?? "").trim())) return;
+  const redirect = (process.env.FURLPAY_OIDC_REDIRECT_URI ?? "").trim();
+  if (!redirect || !isConfiguredRedirect(redirect)) {
+    throw new Error("FURLPAY_OIDC_REDIRECT_URI must be an HTTPS URL (loopback HTTP is allowed in development)");
+  }
+  const clientId = (process.env.FURLPAY_OIDC_CLIENT_ID ?? "furlpay").trim() || "furlpay";
+  if (!/^[A-Za-z0-9._-]{3,64}$/.test(clientId)) throw new Error("FURLPAY_OIDC_CLIENT_ID is not a valid client id");
+  const secret = (process.env.FURLPAY_OIDC_CLIENT_SECRET ?? "").trim() || null;
+  const scopes = (process.env.FURLPAY_OIDC_SCOPES ?? "openid profile email").trim();
+  for (const scope of scopes.split(/\s+/)) {
+    if (!/^[A-Za-z0-9:._-]{1,64}$/.test(scope)) throw new Error(`FURLPAY_OIDC_SCOPES contains an invalid scope: ${scope}`);
+  }
+  const postLogout = (process.env.FURLPAY_OIDC_POST_LOGOUT_REDIRECT_URI ?? "").trim();
+  if (postLogout && !isConfiguredRedirect(postLogout)) {
+    throw new Error("FURLPAY_OIDC_POST_LOGOUT_REDIRECT_URI must be an HTTPS URL");
+  }
+  const backchannel = (process.env.FURLPAY_OIDC_BACKCHANNEL_LOGOUT_URI ?? "").trim();
+  if (backchannel && !/^https:\/\//.test(backchannel)) {
+    throw new Error("FURLPAY_OIDC_BACKCHANNEL_LOGOUT_URI must be an HTTPS URL");
+  }
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO oauth_clients (client_id, name, secret_hash, redirect_uris, post_logout_redirect_uris,
+       scopes, grant_types, public, backchannel_logout_uri, created_at)
+     VALUES (?, 'FurlPay', ?, ?, ?, ?, 'authorization_code refresh_token', ?, ?, ?)
+     ON CONFLICT(client_id) DO UPDATE SET
+       name = excluded.name,
+       secret_hash = excluded.secret_hash,
+       redirect_uris = excluded.redirect_uris,
+       post_logout_redirect_uris = excluded.post_logout_redirect_uris,
+       scopes = excluded.scopes,
+       public = excluded.public,
+       backchannel_logout_uri = excluded.backchannel_logout_uri`,
+  ).run(
+    clientId,
+    secret ? tokenHash(secret) : null,
+    JSON.stringify([redirect]),
+    JSON.stringify(postLogout ? [postLogout] : []),
+    scopes,
+    secret ? 0 : 1,
+    backchannel || null,
+    now,
+  );
+}
+
+function isConfiguredRedirect(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.username || url.password || url.hash) return false;
+    if (url.protocol === "https:") return true;
+    return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 /** Local operator provisioning only. No remotely callable setup and no password logs. */
-function ensureOperator(db: DatabaseSync) {
-  const password = process.env.MOBILECLOUD_BOOTSTRAP_PASSWORD?.trim();
+function ensureOperator(db: DatabaseSync) {  const password = process.env.MOBILECLOUD_BOOTSTRAP_PASSWORD?.trim();
   if (!password) return;
   const email = (process.env.MOBILECLOUD_BOOTSTRAP_EMAIL?.trim() || "owner@mobilecloud.local").toLowerCase();
   if (!/^[^\s@]+@[^\s@]+$/.test(email) || email.length > 254 || password.length < 12 || password.length > 256 || isRetiredPassword(password)) {
