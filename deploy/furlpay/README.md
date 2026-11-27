@@ -15,5 +15,7 @@ node ../../scripts/furlpay-preflight.mjs https://auth.furlpay.com
 - Data lives in the `identity-data` volume. Back it up.
 - For a certificate-based tunnel, use `cloudflared/config.yml` instead of the
   token command.
+- The full runbook — tunnel setup, the repository secrets, the CI workflow and
+  the verification steps — is in [docs/DEPLOYMENT.md](../../docs/DEPLOYMENT.md).
 
 The full domain, DNS, TLS, security and cost notes are in the deployment guide.

@@ -1,0 +1,135 @@
+name: Deploy identity console
+
+# Publishes the MobileCloud identity console (auth.furlpay.com) from this
+# repository.
+#
+# The console is a private service: it publishes no ports and is reached only
+# through a Cloudflare Tunnel, so the tunnel token is the whole credential.
+#
+# Required repository configuration:
+#   secret  CLOUDFLARE_TUNNEL_TOKEN  tunnel token from the Cloudflare dashboard
+#   secret  MOBILECLOUD_BOOTSTRAP_PASSWORD   first-boot operator password
+#   variable PUBLIC_ORIGIN                   https://auth.furlpay.com
+#
+# A self-hosted runner labelled `mobilecloud` performs the deployment, so the
+# console keeps running between runs. The GitHub-hosted job only builds and
+# publishes the image.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_only:
+        description: Build and publish the image without deploying
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - "apps/web-dashboard/**"
+      - "deploy/furlpay/**"
+      - ".github/workflows/deploy.yml"
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}/identity-console
+
+jobs:
+  build:
+    name: Build and publish the console image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the package registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the console image
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/web-dashboard
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy behind the tunnel
+    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish_only }}
+    runs-on: [self-hosted, mobilecloud]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse to deploy without a tunnel token
+        env:
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+        run: |
+          if [ -z "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
+            echo "::error::CLOUDFLARE_TUNNEL_TOKEN is not configured on this repository."
+            exit 1
+          fi
+
+      - name: Write the deployment environment
+        env:
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+          MOBILECLOUD_BOOTSTRAP_PASSWORD: ${{ secrets.MOBILECLOUD_BOOTSTRAP_PASSWORD }}
+          PUBLIC_ORIGIN: ${{ vars.PUBLIC_ORIGIN }}
+        run: |
+          umask 077
+          mkdir -p deploy/furlpay
+          {
+            printf 'MOBILECLOUD_PUBLIC_ORIGIN=%s\n' "${PUBLIC_ORIGIN:-https://auth.furlpay.com}"
+            printf 'MOBILECLOUD_ISSUER=%s\n' "${PUBLIC_ORIGIN:-https://auth.furlpay.com}"
+            printf 'MOBILECLOUD_BOOTSTRAP_EMAIL=%s\n' "${MOBILECLOUD_BOOTSTRAP_EMAIL:-owner@furlpay.com}"
+            printf 'MOBILECLOUD_BOOTSTRAP_PASSWORD=%s\n' "${MOBILECLOUD_BOOTSTRAP_PASSWORD}"
+            printf 'CLOUDFLARE_TUNNEL_TOKEN=%s\n' "${CLOUDFLARE_TUNNEL_TOKEN}"
+          } > deploy/furlpay/.env
+          echo "wrote deploy/furlpay/.env"
+
+      - name: Start the console and the tunnel
+        working-directory: deploy/furlpay
+        run: docker compose up -d --build --remove-orphans
+
+      - name: Wait for the console to report ready
+        working-directory: deploy/furlpay
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if docker compose exec -T identity node -e \
+              "fetch('http://127.0.0.1:3210/api/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
+              echo "console is ready"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::the console did not become ready"
+          docker compose logs --tail 50 identity
+          exit 1
+
+      - name: Verify the public origin answers
+        env:
+          PUBLIC_ORIGIN: ${{ vars.PUBLIC_ORIGIN }}
+        run: |
+          set -euo pipefail
+          origin="${PUBLIC_ORIGIN:-https://auth.furlpay.com}"
+          for attempt in $(seq 1 24); do
+            if curl --fail --silent --show-error --max-time 15 "$origin/api/health/ready" > /dev/null; then
+              echo "$origin is serving"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::$origin did not answer"
+          exit 1

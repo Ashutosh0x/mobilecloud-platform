@@ -4,16 +4,19 @@ import { Pwa } from "@/components/Pwa";
 import { StoreProvider } from "@/lib/store";
 import "./globals.css";
 
+// The fonts live inside this package so the console builds from its own
+// directory alone: the Docker image, CI and a checkout all resolve them the
+// same way, with no dependency on the Android tree.
 const sans = localFont({
   variable: "--font-sans",
   src: [
-    { path: "../../../android-app/app/src/main/res/font/geist_400.ttf", weight: "400" },
-    { path: "../../../android-app/app/src/main/res/font/geist_500.ttf", weight: "500" },
-    { path: "../../../android-app/app/src/main/res/font/geist_600.ttf", weight: "600" },
-    { path: "../../../android-app/app/src/main/res/font/geist_700.ttf", weight: "700" },
+    { path: "../fonts/geist_400.ttf", weight: "400" },
+    { path: "../fonts/geist_500.ttf", weight: "500" },
+    { path: "../fonts/geist_600.ttf", weight: "600" },
+    { path: "../fonts/geist_700.ttf", weight: "700" },
   ],
 });
-const mono = localFont({ variable: "--font-mono", src: "../../../android-app/app/src/main/res/font/geist_mono_400.ttf" });
+const mono = localFont({ variable: "--font-mono", src: "../fonts/geist_mono_400.ttf" });
 
 export const metadata: Metadata = {
   title: { default: "FurlPay · MobileCloud", template: "%s · FurlPay" },
