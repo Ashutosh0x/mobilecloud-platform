@@ -25,7 +25,7 @@
 
 The web console and the Android app are two synchronized clients of one backend: one account, one data model, one durable event log, live both ways.
 
-[Architecture](#system-architecture) • [Terminal](#3-tri-modal-terminal--cloudshell-gateway) • [Real-Time Sync](#unified-real-time-web--android-synchronization) • [Features](#detailed-platform-features) • [Tech Stack](#technology-stack) • [Test Matrix](#automated-test-matrix) • [Quick Start](#quick-start) • [Audit Baseline](#cryptographic-audit--integrity)
+[Architecture](#system-architecture) • [Terminal](#3-tri-modal-terminal--cloudshell-gateway) • [Real-Time Sync](#unified-real-time-web--android-synchronization) • [Features](#detailed-platform-features) • [Tech Stack](#technology-stack) • [Benchmarks](#performance--benchmark-matrix) • [Test Matrix](#automated-test-matrix) • [Quick Start](#quick-start) • [Audit Baseline](#cryptographic-audit--integrity)
 
 </div>
 
@@ -155,6 +155,25 @@ MobileCloud combines two decoupled, high-performance engines within one monorepo
 * **Two-row Termux-style key bar**: sticky Ctrl/Alt/Shift, navigation keys, and shell punctuation, with an IME capture field so soft keyboards and hardware keys produce the same byte sequences.
 * **Touch-to-mouse translation**: taps and drags become SGR mouse sequences, so `tmux` split panes are navigable by touch.
 * **Doze-resistant sessions**: a `specialUse` foreground service with a bounded partial wake lock keeps a long build alive while the app is backgrounded.
+
+#### Terminal capability matrix
+
+| Capability | Native App (JNI PTY) | Browser CloudShell | Headless SSH |
+| :--- | :--- | :--- | :--- |
+| Transport | `forkpty` over a non-blocking master fd | Axum WebSocket `/terminal/ws`, binary frames | `russh` on `:2222` |
+| Authentication | Biometric app-lock gate + Android keystore | One-use 256-bit ticket (`POST /terminal/ticket`) + `Origin` allowlist | Ed25519 public key only |
+| Persistent session | Attaches to the shared `tmux` session; leaving the screen detaches | Attaches to the shared `tmux` session | Attaches to the shared `tmux` session |
+| Rendering | Event-driven Compose canvas (invalidates on bytes; no idle ticker) | Xterm.js v5 with WebGL + `FitAddon` | Rendered by the SSH client |
+| Alternate screen (`smcup`/`rmcup`) | Yes (`?1049`) | Yes (Xterm.js) | Client-dependent |
+| Scrollback | 10,000-line ring buffer | Xterm.js scrollback | Client-dependent |
+| Color | 24-bit TrueColor + 256-colour palette | 24-bit TrueColor | Client-dependent |
+| Clipboard / title | OSC 52 + OSC title | OSC 52 | Client-dependent |
+| Resize | `ioctl(TIOCSWINSZ)` | `FitAddon` → resize control frame | PTY resize |
+| Touch / mouse | Touch-to-mouse SGR translation for `tmux` panes | Native browser mouse | Client-dependent |
+| Key ergonomics | Two-row sticky-modifier `VirtualKeyBar`; swipe-up popup keys (`/` → `\`, `\|` → `&`) | Hardware keyboard | Client keyboard |
+| Reconnect | Foreground service + bounded partial wake lock keep it alive | Exponential backoff + jitter; survives a reload | SSH client retry |
+| File transfer | In-shell tools | Files panel: browse, upload, download, delete (path-confined) | `scp` / `sftp` |
+| Web preview | — | Preview picker: scan ports, open `/preview/<port>/` | — |
 
 ### 4. GitHub-App-Derived Android Hardening
 * **Biometric App Lock Gate**: `BiometricPrompt` on a `FragmentActivity` protects the console from unauthorized physical access.
@@ -380,6 +399,22 @@ graph TD
 
 ---
 
+## Performance & Benchmark Matrix
+
+| Benchmark | Harness | Configuration | Pass criteria |
+| :--- | :--- | :--- | :--- |
+| Ingress load through the tunnel into the phone's reverse proxy | [`benchmarks/k6-load-test.js`](benchmarks/k6-load-test.js) (k6) | Ramp `200 → 1,200 → 2,500` RPS over 11 min, then ramp down | `p95 < 35 ms`, error rate `< 0.1%` |
+| Live request latency | Dashboard **Observability** view | Percentiles computed from real inbound request samples | Reported as `p50` / `p95` / `p99` (shows *No samples* until traffic arrives) |
+
+```bash
+k6 run benchmarks/k6-load-test.js                       # default target
+k6 run -e TARGET=https://your.edge.host benchmarks/k6-load-test.js
+```
+
+> The load harness ships with **declared thresholds, not recorded results** — run it against a live tunnel + edge deployment and record the numbers. The kernel's overflow-free guarantee is a proof over 10,000 generated edge cases (`por-kernel`), not a throughput measurement.
+
+---
+
 ## Automated Test Matrix
 
 | Subsystem | Test Suite | Invariant Enforced |
@@ -392,8 +427,10 @@ graph TD
 | **`mobilecloud-shield`** | 11 tests | Post-percent-decode WAF matching (SQL injection, path traversal, XSS) with a clean-request allow, sliding-window rate-limit admission, CrowdSec-JSON blocklist load/add/check/expiry-prune, and client-IP extraction from `X-Forwarded-For` / `X-Real-IP` with loopback fallback. |
 | **`por-xdr-toolkit`** | 4 tests | Protocol 30 XDR encoding/decoding, RFC 4506 `Option<ScVec>` presence-flag alignment. |
 | **`apps/web-dashboard`** | 58 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Platform services: a function runs inside a `node:vm` context with no `require`/`process`/`fetch`/timers and is rejected when over the source or output byte cap or the 250 ms timeout; a workflow threads each step's output into the next and stops at the first failure; a webhook delivery is queued once per subscriber in the event's own transaction, signed HMAC-SHA256, backoff-capped at 5 attempts, and refused against loopback/private targets; usage counters append per meter; a PoR attestation is validated and stored read-only, and a missing attestation reports `unverified`. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
+| **`android-app`** | `assembleDebug` + `lintDebug` | No JVM unit-test suite ships; the Compose console, JNI `forkpty` terminal, two-row `VirtualKeyBar`, and the foreground `TerminalSessionService` are verified by a passing debug build and lint, not by an automated suite. |
+| **`web-cloudshell`** | `tsc --noEmit` + `vite build` | Type-checked and bundled; the WebGL Xterm.js client, files panel, and preview picker are verified by a passing build, not by an automated suite. |
 
-**216 tests** in total.
+**216 tests** in total (Rust default members `129` + `por-verifier` `25` + dashboard `58` + `por-xdr-toolkit` `4`).
 
 ```bash
 # Rust workspace (default members)
