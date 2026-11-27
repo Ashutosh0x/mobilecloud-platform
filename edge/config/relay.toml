@@ -1,0 +1,46 @@
+# MobileCloud Tunnel Relay Configuration
+# ───────────────────────────────────────
+
+[relay]
+# Address for tunnel client WebSocket connections
+tunnel_addr = "0.0.0.0:8443"
+
+# Address for public HTTP requests
+public_addr = "0.0.0.0:8080"
+
+# Base domain for service routing
+# Requests to <service>.furlpay.com route to service <service>
+domain = "furlpay.com"
+
+# Authorized Ed25519 public keys (hex-encoded, 64 hex chars = 32 bytes)
+# Generate with: ./scripts/generate-keys.sh
+authorized_keys = [
+    # "REPLACE_WITH_HEX_ENCODED_ED25519_PUBLIC_KEY"
+]
+
+[tls]
+# TLS certificate and key paths (terminate TLS at a reverse proxy like
+# Caddy or nginx in front, or use these paths for direct TLS termination)
+cert_path = "/etc/mobilecloud/certs/fullchain.pem"
+key_path  = "/etc/mobilecloud/certs/privkey.pem"
+
+[limits]
+# Maximum concurrent tunnel client connections
+max_clients = 64
+
+# Maximum yamux streams per client
+max_streams_per_client = 256
+
+# Maximum request body size (bytes)
+max_body_size = 10_485_760  # 10 MiB
+
+# Rate limiting: requests per window per IP
+rate_limit_requests = 100
+rate_limit_window_secs = 60
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+
+# Log format: "json" or "pretty"
+format = "pretty"

@@ -5,7 +5,7 @@
 ### **The Autonomous Smartphone Edge Cloud & Institutional Proof-of-Reserve Protocol**
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-167%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-185%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 [![Rust](https://img.shields.io/badge/Rust-1.100-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![Android](https://img.shields.io/badge/Android-API%2030--35-3ddc84?style=for-the-badge&logo=android&logoColor=white)](android-app)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7f52ff?style=for-the-badge&logo=kotlin&logoColor=white)](android-app)
@@ -16,6 +16,8 @@
 [![SQLite](https://img.shields.io/badge/SQLite-WAL%20Outbox-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](docs/REALTIME-SYNC.md)
 [![Stellar](https://img.shields.io/badge/Stellar-Protocol%2030-08b5e5?style=for-the-badge&logo=stellar&logoColor=white)](contracts/por-verifier)
 [![Ed25519](https://img.shields.io/badge/Ed25519-232F3E?style=for-the-badge&logo=gnubash&logoColor=white)](core-engine)
+[![Edge Tunnel](https://img.shields.io/badge/Edge_Tunnel-yamux_%2B_WSS-6E40C9?style=for-the-badge&logo=websocket&logoColor=white)](edge/mobilecloud-tunnel)
+[![Edge Shield](https://img.shields.io/badge/Edge_Shield-WAF_%2B_Rate_Limit-0A3069?style=for-the-badge&logo=shield&logoColor=white)](edge/mobilecloud-shield)
 
 <br/>
 
@@ -199,6 +201,13 @@ MobileCloud combines two decoupled, high-performance engines within one monorepo
 
 > Full protocol, schema, and guarantees: [`docs/REALTIME-SYNC.md`](docs/REALTIME-SYNC.md).
 
+### 11. Edge Tunnel & Shield Fabric (`edge/`)
+* **Secure Reverse Tunnel (`mobilecloud-tunnel`)**: two binaries — `mc-tunnel-client` (runs beside the phone/edge service) and `mc-tunnel-relay` (runs on a public host) — connect over an authenticated WebSocket (`wss://`) and carry inbound traffic to loopback services. The relay never needs `adb reverse` or inbound NAT to the device.
+* **Ed25519 Handshake**: the client signs `client_id:timestamp` with its Ed25519 key; the relay verifies the signature against an authorized-key allowlist and rejects a timestamp outside a ±300 s freshness window.
+* **yamux Stream Multiplexing**: many concurrent TCP-like streams share a single WebSocket connection via yamux 0.10; the relay routes a public HTTP request to the matching service by `Host` subdomain and opens a dedicated yamux substream for it.
+* **Resilient Client Loop**: exponential backoff with jitter on reconnect plus application-level `Heartbeat` / `HeartbeatAck` liveness on top of the tunnel.
+* **Edge Shield (`mobilecloud-shield`)**: a composable Tower `Layer` / `Service` chain for edge services — CrowdSec-compatible IP blocklist, sliding-window rate limiter, and a regex WAF (path traversal, SQL injection, XSS, command injection) that percent-decodes the URI before matching so encoded payloads cannot slip through.
+
 ---
 
 ## System Architecture
@@ -321,6 +330,8 @@ graph TD
         KERNEL["por-kernel (lib)<br/>• Checked U256 Fixed-Point<br/>• RFC 8785 Canonical JSON<br/>• Alpaca JWS / ISO 20022 / Dinari TA<br/>• T+1 Transit Accounting"]
         CONTRACT["contracts/por-verifier (wasm)<br/>• Stellar Soroban Protocol 30<br/>• M-of-N Ed25519 Quorum<br/>• O(N) Ascending-Signer Check<br/>• 5-Tier Solvency State Machine"]
         TRADING["trading-engine (bin/lib)<br/>• Solana Cross-DEX Arbitrage<br/>• 4 Non-Negotiable Risk Invariants<br/>• Soroban Circuit Breaker Client"]
+        TUNNEL["edge/mobilecloud-tunnel (bins)<br/>• mc-tunnel-client<br/>• mc-tunnel-relay<br/>• Ed25519 handshake · yamux mux · WSS"]
+        SHIELD["edge/mobilecloud-shield (lib)<br/>• IP Blocklist (CrowdSec JSON)<br/>• Sliding-Window Rate Limiter<br/>• Regex WAF (traversal/SQLi/XSS/CMDi)"]
 
         subgraph Tools["Workspace Tools"]
             ATTESTOR["tools/por-attestor<br/>Pre-sorted 5-Key Ed25519 Signer"]
@@ -362,10 +373,12 @@ graph TD
 | **`por-verifier`** | 25 tests | Monotonic sequence replay defense, TTL freshness expiration, O(N) ascending-key validation, duplicate signer rejection, 5-tier solvency state transitions. |
 | **`core-engine`** | 35 tests | Build Output v3 routing, agentic deployment ingress, cache tag revalidation, atomic promotion and rollback, PTY session allocation, terminal ticket single-use, origin allowlisting, preview session port binding, file-transfer path confinement. |
 | **`trading-engine`** | 17 tests | Arbitrage profitability checks, integer-exact fee calculations, 4 risk invariants (atomic reverts, 2.5% max exposure, 15 bps slippage, 20% T+1 buffer). |
+| **`mobilecloud-tunnel`** | 7 tests | Ed25519 handshake sign → verify round-trip, `Host`-to-service-name routing (subdomain, nested subdomain, bare domain, unknown domain), and raw HTTP response parsing (with and without a body). |
+| **`mobilecloud-shield`** | 11 tests | Post-percent-decode WAF matching (SQL injection, path traversal, XSS) with a clean-request allow, sliding-window rate-limit admission, CrowdSec-JSON blocklist load/add/check/expiry-prune, and client-IP extraction from `X-Forwarded-For` / `X-Real-IP` with loopback fallback. |
 | **`por-xdr-toolkit`** | 4 tests | Protocol 30 XDR encoding/decoding, RFC 4506 `Option<ScVec>` presence-flag alignment. |
 | **`apps/web-dashboard`** | 28 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
 
-**167 tests** in total.
+**185 tests** in total.
 
 ```bash
 # Rust workspace (default members)
@@ -395,7 +408,7 @@ cd apps/web-dashboard && npm test
 git clone https://github.com/Ashutosh0x/mobilecloud-platform.git
 cd mobilecloud-platform
 
-cargo test                      # 110 tests in the default members
+cargo test                      # 128 tests in the default members
 cargo test -p por-verifier      # 25 contract tests
 cd apps/web-dashboard && npm test && cd ../..   # 28 dashboard tests
 ```
@@ -488,6 +501,6 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 **MobileCloud & FurlPay** — one account, one data model, one durable event log.
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-167%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-185%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 
 </div>

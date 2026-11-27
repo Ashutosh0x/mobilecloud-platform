@@ -1,0 +1,22 @@
+[package]
+name = "mobilecloud-shield"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rate limiting, WAF, and IP blocklist middleware for MobileCloud edge services"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dashmap = "6"
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "set-header"] }
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1"
+regex = "1"
+thiserror = "2"
+pin-project-lite = "0.2"

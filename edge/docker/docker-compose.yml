@@ -1,0 +1,100 @@
+# ─────────────────────────────────────────────────────────────
+#  MobileCloud Edge Stack — Docker Compose
+# ─────────────────────────────────────────────────────────────
+#  Services:
+#    - mc-relay:     MobileCloud tunnel relay
+#    - crowdsec:     CrowdSec community threat intelligence
+#    - openobserve:  Observability (logs, metrics, traces)
+#    - caddy:        TLS termination + reverse proxy
+# ─────────────────────────────────────────────────────────────
+
+services:
+  # ── MobileCloud Tunnel Relay ──────────────────────────────
+  mc-relay:
+    build:
+      context: ../..
+      dockerfile: edge/docker/Dockerfile.relay
+    container_name: mc-relay
+    restart: always
+    environment:
+      - RUST_LOG=info
+      - MC_DOMAIN=${MC_DOMAIN:-furlpay.com}
+    command:
+      - "--listen-tunnel"
+      - "0.0.0.0:8443"
+      - "--listen-public"
+      - "0.0.0.0:8080"
+      - "--domain"
+      - "${MC_DOMAIN:-furlpay.com}"
+      - "--authorized-key"
+      - "${MC_AUTHORIZED_KEY}"
+    ports:
+      - "8443:8443"   # Tunnel (behind Caddy in production)
+      - "8080:8080"   # Public HTTP (behind Caddy in production)
+    volumes:
+      - relay-data:/var/lib/mobilecloud
+    networks:
+      - mc-edge
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+  # ── CrowdSec — Community Threat Intelligence ──────────────
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: mc-crowdsec
+    restart: always
+    environment:
+      - COLLECTIONS=crowdsecurity/http-cve crowdsecurity/base-http-scenarios
+    volumes:
+      - crowdsec-config:/etc/crowdsec
+      - crowdsec-data:/var/lib/crowdsec/data
+      - /var/log:/var/log/host:ro
+    networks:
+      - mc-edge
+
+  # ── OpenObserve — Logs, Metrics, Traces ───────────────────
+  openobserve:
+    image: public.ecr.aws/zinclabs/openobserve:latest
+    container_name: mc-openobserve
+    restart: always
+    environment:
+      - ZO_ROOT_USER_EMAIL=${OBS_EMAIL:-admin@furlpay.com}
+      - ZO_ROOT_USER_PASSWORD=${OBS_PASSWORD:-changeme}
+      - ZO_DATA_DIR=/data
+    ports:
+      - "5080:5080"   # OpenObserve UI
+    volumes:
+      - openobserve-data:/data
+    networks:
+      - mc-edge
+
+  # ── Caddy — TLS Termination + Reverse Proxy ──────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: mc-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - mc-edge
+    depends_on:
+      - mc-relay
+
+volumes:
+  relay-data:
+  crowdsec-config:
+  crowdsec-data:
+  openobserve-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  mc-edge:
+    driver: bridge

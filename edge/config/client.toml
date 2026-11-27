@@ -1,0 +1,42 @@
+# MobileCloud Tunnel Client Configuration
+# ────────────────────────────────────────
+
+[client]
+# WebSocket URL of the relay server
+relay_url = "wss://relay.furlpay.com:8443"
+
+# Unique identifier for this client device
+client_id = "phone-01"
+
+# Ed25519 signing key (hex-encoded, 64 hex chars = 32 bytes)
+# Generate with: ./scripts/generate-keys.sh
+signing_key = "REPLACE_WITH_HEX_ENCODED_ED25519_SECRET_KEY"
+
+[services]
+# Map of service name → local TCP port
+# These are the services running on your phone/device
+console  = 3210
+api      = 3211
+ws       = 3212
+dashboard = 3000
+
+[reconnect]
+# Initial reconnect delay in seconds
+initial_delay_secs = 1
+
+# Maximum reconnect delay in seconds
+max_delay_secs = 60
+
+[heartbeat]
+# How often to send heartbeats (seconds)
+interval_secs = 30
+
+# How long to wait for a heartbeat ack before disconnecting (seconds)
+timeout_secs = 90
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+
+# Log format: "json" or "pretty"
+format = "pretty"

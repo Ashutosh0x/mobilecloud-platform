@@ -1,0 +1,86 @@
+# ─────────────────────────────────────────────────────────────
+#  MobileCloud Relay — Multi-stage Docker Build
+# ─────────────────────────────────────────────────────────────
+#  Stage 1: Build the Rust binaries
+#  Stage 2: Minimal runtime image
+#
+#  Build:
+#    docker build -t mobilecloud-relay -f edge/docker/Dockerfile.relay .
+#
+#  Run:
+#    docker run -d --name mc-relay \
+#      -e MC_DOMAIN=furlpay.com \
+#      -e MC_TUNNEL_ADDR=0.0.0.0:8443 \
+#      -e MC_PUBLIC_ADDR=0.0.0.0:8080 \
+#      -e AUTHORIZED_KEYS=<hex-pubkey> \
+#      -p 8443:8443 -p 8080:8080 \
+#      mobilecloud-relay
+# ─────────────────────────────────────────────────────────────
+
+# ── Stage 1: Builder ────────────────────────────────────────
+FROM rust:1.82-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
+COPY core-engine/Cargo.toml core-engine/Cargo.toml
+COPY por-kernel/Cargo.toml por-kernel/Cargo.toml
+COPY trading-engine/Cargo.toml trading-engine/Cargo.toml
+COPY contracts/por-verifier/Cargo.toml contracts/por-verifier/Cargo.toml
+COPY tools/por-attestor/Cargo.toml tools/por-attestor/Cargo.toml
+COPY tools/por-submitter/Cargo.toml tools/por-submitter/Cargo.toml
+COPY edge/mobilecloud-shield/Cargo.toml edge/mobilecloud-shield/Cargo.toml
+COPY edge/mobilecloud-tunnel/Cargo.toml edge/mobilecloud-tunnel/Cargo.toml
+
+# Create dummy source files for dependency caching
+RUN mkdir -p core-engine/src por-kernel/src trading-engine/src \
+    contracts/por-verifier/src tools/por-attestor/src tools/por-submitter/src \
+    edge/mobilecloud-shield/src edge/mobilecloud-tunnel/src \
+    edge/mobilecloud-tunnel/src/bin \
+    && echo "fn main() {}" > core-engine/src/main.rs \
+    && echo "fn main() {}" > por-kernel/src/main.rs \
+    && echo "fn main() {}" > trading-engine/src/main.rs \
+    && echo "" > contracts/por-verifier/src/lib.rs \
+    && echo "fn main() {}" > tools/por-attestor/src/main.rs \
+    && echo "fn main() {}" > tools/por-submitter/src/main.rs \
+    && echo "" > edge/mobilecloud-shield/src/lib.rs \
+    && echo "" > edge/mobilecloud-tunnel/src/lib.rs \
+    && echo "fn main() {}" > edge/mobilecloud-tunnel/src/bin/client.rs \
+    && echo "fn main() {}" > edge/mobilecloud-tunnel/src/bin/relay.rs
+
+# Cache dependencies
+RUN cargo build --release -p mobilecloud-tunnel 2>/dev/null || true
+
+# Copy real source code
+COPY edge/ edge/
+
+# Build the actual binaries
+RUN cargo build --release -p mobilecloud-tunnel \
+    && strip target/release/mc-tunnel-relay \
+    && strip target/release/mc-tunnel-client
+
+# ── Stage 2: Runtime ────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --shell /usr/sbin/nologin mobilecloud
+
+COPY --from=builder /build/target/release/mc-tunnel-relay /usr/local/bin/
+COPY --from=builder /build/target/release/mc-tunnel-client /usr/local/bin/
+COPY edge/config/relay.toml /etc/mobilecloud/relay.toml
+COPY edge/blocklist.json /etc/mobilecloud/blocklist.json
+
+USER mobilecloud
+
+ENV RUST_LOG=info
+EXPOSE 8080 8443
+
+ENTRYPOINT ["mc-tunnel-relay"]
+CMD ["--listen-tunnel", "0.0.0.0:8443", "--listen-public", "0.0.0.0:8080", "--domain", "furlpay.com"]

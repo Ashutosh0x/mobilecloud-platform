@@ -1,0 +1,38 @@
+[package]
+name = "mobilecloud-tunnel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Secure tunnel client and relay for MobileCloud edge services"
+
+[[bin]]
+name = "mc-tunnel-client"
+path = "src/bin/client.rs"
+
+[[bin]]
+name = "mc-tunnel-relay"
+path = "src/bin/relay.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+yamux = "0.10"
+futures-util = "0.3"
+futures-io = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = { workspace = true }
+hex = { workspace = true }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+http-body-util = "0.1"
+bytes = "1"
+dashmap = "6"

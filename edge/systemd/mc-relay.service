@@ -1,0 +1,32 @@
+[Unit]
+Description=MobileCloud Tunnel Relay
+After=network-online.target
+Wants=network-online.target
+Documentation=https://github.com/Ashutosh0x/mobilecloud-platform
+
+[Service]
+Type=simple
+User=mobilecloud
+Group=mobilecloud
+EnvironmentFile=/etc/mobilecloud/relay.env
+ExecStart=/usr/local/bin/mc-tunnel-relay \
+    --listen-tunnel ${MC_TUNNEL_ADDR} \
+    --listen-public ${MC_PUBLIC_ADDR} \
+    --domain ${MC_DOMAIN} \
+    --authorized-key ${AUTHORIZED_KEYS}
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths=/
+ReadWritePaths=/var/log/mobilecloud
+
+[Install]
+WantedBy=multi-user.target
