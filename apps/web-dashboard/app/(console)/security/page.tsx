@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { request, useCloud } from "@/lib/store";
 import { createPasskey, credentialToJson, getPasskey } from "@/lib/webauthn";
+import { Icon } from "@/components/Icons";
 
 /**
  * Passkey management and a real WebAuthn step-up check.
@@ -132,8 +133,9 @@ export default function SecurityPage() {
 
       <article className="panel">
         <div className="panel-head">
-          <h3>Your passkeys</h3>
+          <h3><Icon name="passkey" size={18} /> Your passkeys</h3>
           <button className="primary" type="button" disabled={busy} onClick={() => void addPasskey()}>
+            <span className="btn-icon"><Icon name="passkey" size={16} /></span>
             {busy ? "Waiting for biometrics…" : "Add a passkey"}
           </button>
         </div>
@@ -141,7 +143,7 @@ export default function SecurityPage() {
         {passkeys.map((passkey) => (
           <div className="list-row" key={passkey.id} style={{ gridTemplateColumns: "1fr auto" }}>
             <div>
-              <b>{passkey.deviceName ?? "Passkey"}</b>
+              <b><Icon name="passkey" size={14} /> {passkey.deviceName ?? "Passkey"}</b>
               <div className="sub">
                 {passkey.backedUp ? "Synced passkey" : "Device-bound passkey"} ·{" "}
                 {passkey.lastUsedAt ? `last used ${new Date(passkey.lastUsedAt).toLocaleString()}` : "never used"}
@@ -160,8 +162,9 @@ export default function SecurityPage() {
 
       <article className="panel" style={{ marginTop: 16 }}>
         <div className="panel-head">
-          <h3>Biometric step-up check</h3>
+          <h3><Icon name="shield" size={18} /> Biometric step-up check</h3>
           <button className="ghost" type="button" disabled={busy || passkeys.length === 0} onClick={() => void runStepUp()}>
+            <span className="btn-icon"><Icon name="passkey" size={16} /></span>
             Verify a $10 demo payment
           </button>
         </div>

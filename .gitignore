@@ -44,6 +44,9 @@ apps/web-dashboard/.next/
 apps/web-dashboard/data/
 *.tsbuildinfo
 
+# Local verification scratch (logs, throwaway databases, CLI profiles)
+.tmp/
+
 # OS noise
 .DS_Store
 Thumbs.db

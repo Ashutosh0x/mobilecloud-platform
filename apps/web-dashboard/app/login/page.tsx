@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { CSRF_HEADER, readCsrfCookie } from "@/lib/csrf";
 import { credentialToJson, getPasskey, supportsConditionalUi } from "@/lib/webauthn";
 import { useCloud } from "@/lib/store";
+import { Icon } from "@/components/Icons";
 
 /**
  * Sign in with the phone that already holds the account.
@@ -291,6 +292,7 @@ export default function LoginPage() {
               />
             </label>
             <button className="primary" type="button" disabled={pending || passkeyBusy} onClick={() => void passkeyLogin()}>
+              <span className="btn-icon"><Icon name="passkey" size={18} /></span>
               {passkeyBusy ? "Waiting for biometrics…" : "Sign in with a passkey"}
             </button>
             {passkeyNote && <p className="sub">{passkeyNote}</p>}

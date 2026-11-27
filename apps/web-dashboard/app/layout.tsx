@@ -40,8 +40,11 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body className={`${sans.variable} ${mono.variable}`}>
+    // `suppressHydrationWarning` on the root elements: browser extensions that
+    // inject attributes into <html> or <body> before React hydrates would
+    // otherwise trip a hydration mismatch on every page.
+    <html lang="en" suppressHydrationWarning>
+      <body className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
         <Pwa />
         <StoreProvider>{children}</StoreProvider>
       </body>

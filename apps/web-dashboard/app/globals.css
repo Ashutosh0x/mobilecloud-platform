@@ -235,6 +235,9 @@ dialog.modal::backdrop { background: rgba(0,0,0,0.72); }
 }
 .eye:hover { color: var(--text); }
 .field input, .auth-card input { width: 100%; }
+/* Inline passkey/security icons inside buttons and headings. */
+.btn-icon { display: inline-flex; vertical-align: -3px; margin-right: 8px; }
+.panel-head h3 { display: flex; align-items: center; gap: 8px; }
 /* Installable PWA: offline state and the install affordance. */
 .offline-banner {
   position: fixed; top: 0; left: 0; right: 0; z-index: 100;

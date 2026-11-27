@@ -21,7 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -200,7 +200,7 @@ fun LoginApprovalScreen(
             .padding(horizontal = 18.dp, vertical = 22.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.Lock, contentDescription = null, tint = Aurora.Cyan, modifier = Modifier.size(16.dp))
+            Icon(Icons.Filled.Fingerprint, contentDescription = null, tint = Aurora.Cyan, modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(8.dp))
             Text(
                 "MOBILECLOUD AUTH",
@@ -303,6 +303,7 @@ fun LoginApprovalScreen(
             onClick = { authenticateThenApprove() },
             loading = pending,
             enabled = !pending && !prompting && !expired && sameServer,
+            icon = Icons.Filled.Fingerprint,
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(8.dp))

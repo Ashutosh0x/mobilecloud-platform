@@ -39,6 +39,17 @@ export function Icon({ name, size = 16 }: { name: string; size?: number }) {
       return <svg {...p}><path d="M4 19h16M7 16l3-4 3 2 4-6" /></svg>;
     case "shield":
       return <svg {...p}><path d="M12 3 5 6v6c0 4.5 3 6.5 7 8 4-1.5 7-3.5 7-8V6z" /></svg>;
+    case "passkey":
+      // Fingerprint + key bow: used wherever a WebAuthn/passkey action appears.
+      return (
+        <svg {...p}>
+          <path d="M5.5 12a6.5 6.5 0 0 1 13 0v2" />
+          <path d="M8.5 13a3.5 3.5 0 0 1 7 0v3a5.5 5.5 0 0 1-1 3.2" />
+          <path d="M12 15.5V19" />
+          <circle cx="18.5" cy="16.5" r="1.5" />
+          <path d="M17.5 17.5 15 20" />
+        </svg>
+      );
     case "grid":
       return <svg {...p}><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></svg>;
     default:
