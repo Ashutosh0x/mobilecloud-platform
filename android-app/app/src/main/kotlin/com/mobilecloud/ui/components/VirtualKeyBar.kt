@@ -3,6 +3,7 @@ package com.mobilecloud.ui.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -37,8 +39,16 @@ import com.mobilecloud.ui.theme.Aurora
 sealed interface VirtualKeySpec {
     val label: String
 
-    /** Printable text; [value] lets a key show `^C` while sending 0x03. */
-    data class Text(override val label: String, val value: String = label) : VirtualKeySpec
+    /**
+     * Printable text; [value] lets a key show `^C` while sending 0x03.
+     * [alt] is the "popup" character emitted when the key is swiped upward,
+     * following Termux's extra-keys convention.
+     */
+    data class Text(
+        override val label: String,
+        val value: String = label,
+        val alt: String? = null,
+    ) : VirtualKeySpec
 
     /** A named key encoded by [com.mobilecloud.terminal.TerminalKeyEncoder]. */
     data class Named(override val label: String, val key: TerminalKey) : VirtualKeySpec
@@ -113,8 +123,20 @@ fun VirtualKeyBar(
                                 }
                             },
                         )
-                        is VirtualKeySpec.Text -> KeyCap(spec.label) { emitText(spec) }
-                        is VirtualKeySpec.Named -> KeyCap(spec.label) { emitNamed(spec) }
+                        is VirtualKeySpec.Text -> KeyCap(
+                            label = spec.label,
+                            onClick = { emitText(spec) },
+                            onAlt = spec.alt?.let { alt ->
+                                {
+                                    onKey(modifiers().applyToText(alt))
+                                    resetModifiers()
+                                }
+                            },
+                        )
+                        is VirtualKeySpec.Named -> KeyCap(
+                            label = spec.label,
+                            onClick = { emitNamed(spec) },
+                        )
                     }
                 }
             }
@@ -130,9 +152,9 @@ val StandardKeyRows: List<List<VirtualKeySpec>> = listOf(
         VirtualKeySpec.Modifier("SHIFT", TerminalModifier.SHIFT),
         VirtualKeySpec.Named("ESC", TerminalKey.ESC),
         VirtualKeySpec.Named("TAB", TerminalKey.TAB),
-        VirtualKeySpec.Text("/"),
+        VirtualKeySpec.Text("/", alt = "\\"),
         VirtualKeySpec.Text("-"),
-        VirtualKeySpec.Text("|"),
+        VirtualKeySpec.Text("|", alt = "&"),
         VirtualKeySpec.Text("~"),
         VirtualKeySpec.Text("`"),
         VirtualKeySpec.Text("$"),
@@ -161,6 +183,7 @@ private fun KeyCap(
     label: String,
     armed: Boolean = false,
     onClick: () -> Unit,
+    onAlt: (() -> Unit)? = null,
 ) {
     val shape = RoundedCornerShape(6.dp)
     Box(
@@ -173,6 +196,21 @@ private fun KeyCap(
                 color = if (armed) Aurora.Cyan else Aurora.Border,
                 shape = shape,
             )
+            // Swipe up emits the popup character. A vertical drag past touch
+            // slop wins over the tap detector, so a tap still emits the base
+            // key while an upward flick emits its alternate.
+            .pointerInput(onAlt) {
+                if (onAlt == null) return@pointerInput
+                var fired = false
+                detectVerticalDragGestures(
+                    onDragStart = { fired = false },
+                    onVerticalDrag = { change, dragAmount ->
+                        if (dragAmount < 0f) fired = true
+                        change.consume()
+                    },
+                    onDragEnd = { if (fired) onAlt() },
+                )
+            }
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp),
         contentAlignment = Alignment.Center,

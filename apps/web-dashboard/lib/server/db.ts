@@ -250,6 +250,62 @@ CREATE TABLE IF NOT EXISTS webhooks (
   events TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+-- Outbound webhook delivery queue. A row is enqueued inside the same
+-- transaction as the event it describes (see lib/server/webhook.ts), so a
+-- crash cannot lose an event and a redelivery cannot double-send because the
+-- (webhook_id, event_id) pair is unique.
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL,
+  webhook_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  response_status INTEGER,
+  last_error TEXT,
+  next_attempt_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(webhook_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_due ON webhook_deliveries (status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_owner ON webhook_deliveries (owner_id, created_at);
+-- Append-only usage counters. The metering engine writes one row per billable
+-- operation (function invocation, workflow run, webhook delivery, bytes
+-- written) inside the same transaction as the operation, and reports the sum
+-- per meter over the current period. Storage is a gauge read from the object
+-- and database tables, not a counter.
+CREATE TABLE IF NOT EXISTS usage_events (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL,
+  meter TEXT NOT NULL,
+  qty INTEGER NOT NULL,
+  resource_id TEXT,
+  at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_events_meter ON usage_events (owner_id, meter, at);
+-- Proof-of-reserve attestations. The reconciliation math lives in the Rust
+-- por-kernel crate (the single source of financial truth); the control plane
+-- only stores the output of that kernel and serves it read-only. Base-unit
+-- amounts are decimal strings because they are u128 values that exceed JS integers.
+CREATE TABLE IF NOT EXISTS por_attestations (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  reserve_ratio_bps INTEGER NOT NULL,
+  total_backing_base TEXT NOT NULL,
+  total_liabilities_base TEXT NOT NULL,
+  net_difference_base TEXT NOT NULL,
+  evidence_age_sec INTEGER NOT NULL,
+  ledger_sequence INTEGER,
+  digest TEXT,
+  quorum TEXT,
+  observed_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_por_attestations_owner ON por_attestations (owner_id, created_at);
 -- Durable event outbox. Every mutation appends one row inside the same
 -- transaction as the write it describes, so a dropped WebSocket frame can
 -- never lose a change: clients recover by reading this table through
@@ -320,6 +376,19 @@ function migrate(db: DatabaseSync) {
       CREATE INDEX IF NOT EXISTS idx_requests_time ON requests (at);
       INSERT INTO control_plane_migrations (version) VALUES (3);
     `);
+  }
+  // v4 gives functions a stored handler source, lets workflows persist their
+  // step list, so both can actually run instead of only being recorded.
+  if (!db.prepare("SELECT 1 FROM control_plane_migrations WHERE version = 4").get()) {
+    const addColumns = (table: string, columns: Record<string, string>) => {
+      const present = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name));
+      for (const [name, type] of Object.entries(columns)) {
+        if (!present.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+      }
+    };
+    addColumns("functions", { source: "TEXT" });
+    addColumns("workflows", { steps: "TEXT" });
+    db.exec("INSERT INTO control_plane_migrations (version) VALUES (4)");
   }
 }
 

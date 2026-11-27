@@ -15,7 +15,7 @@ type TrafficRank = { value: string; count: number };
 type Traffic = { window: "24h"; requests: number; denied: number; logged: number; rateLimited: number; buckets: { start: number; requests: number }[]; topPaths: TrafficRank[]; topAgents: TrafficRank[]; topJa4: TrafficRank[]; crawlerTokens: TrafficRank[]; notes: string[] };
 type VitalMetric = { metric: string; samples: number; p75: number | null };
 type BuildRow = { id: string; project: string; target: string; status: string; note: string; createdAt: number };
-type WorkflowRow = { id: string; name: string; createdAt: number; lastRun: { status: string; note: string; at: number } | null };
+type WorkflowRow = { id: string; name: string; createdAt: number; stepCount?: number; lastRun: { status: string; note: string; at: number } | null };
 type DriveRow = { id: string; name: string; bytes: number | null; createdAt: number };
 type Observability = { collectedAt: number; samples: number; statuses: { s2xx: number; s3xx: number; s4xx: number; s5xx: number }; p50: number | null; p95: number | null; p99: number | null; unavailable: string[] };
 type Settings = { recordPageViews: boolean };
@@ -23,6 +23,14 @@ type Notice = { id: string; type: string; title: string; message: string; read: 
 type SessionRow = { id: string; userAgent: string; createdAt: number | null; expiresAt: number; current: boolean };
 type TokenRow = { id: string; name: string; prefix: string; createdAt: number; expiresAt: number | null; lastUsed: number | null };
 type WebhookRow = { id: string; url: string; events: string; createdAt: number };
+type UsageMetric = { meter: string; unit: string; value: number; limit: number | null; over: boolean };
+type Usage = { periodStart: number; periodEnd: number; plan: string; metrics: UsageMetric[]; billable: boolean; note: string };
+type WebhookDelivery = { id: string; webhookId: string; eventType: string; status: string; attempts: number; responseStatus: number | null; lastError: string | null; nextAttemptAt: number; createdAt: number; updatedAt: number };
+type PorAttestation = { id: string; status: string; reserveRatioBps: number; totalBackingBase: string; totalLiabilitiesBase: string; netDifferenceBase: string; evidenceAgeSec: number; ledgerSequence: number | null; digest: string | null; quorum: string | null; observedAt: number; recordedAt: number };
+type PorState = { verified: boolean; status: string; reason: string; attestation: PorAttestation | null; checkedAt: number };
+
+/** Absence of a signed attestation is reported as unverified, never a made-up ratio. */
+const POR_UNVERIFIED: PorState = { verified: false, status: "unverified", reason: "No proof-of-reserve attestation has been recorded.", attestation: null, checkedAt: 0 };
 
 type Snapshot = {
   user: User;
@@ -38,6 +46,7 @@ type Snapshot = {
   metrics: Metrics;
   host: HostInfo;
   billing: Billing;
+  usage: Usage;
   firewall: { rules: FirewallRule[]; events: FirewallEvent[]; traffic?: Traffic };
   observability: Observability;
   vitals: { collectedAt: number; metrics: VitalMetric[]; res: number | null; note: string };
@@ -49,6 +58,8 @@ type Snapshot = {
   sessions: SessionRow[];
   tokens: TokenRow[];
   webhooks: WebhookRow[];
+  webhookDeliveries?: WebhookDelivery[];
+  por?: PorState;
   protection: { required: boolean; unlocked: boolean };
   identity: Capability[];
 };
@@ -73,6 +84,7 @@ export type CloudState = {
   host: HostInfo | null;
   analytics: Analytics | null;
   billing: Billing | null;
+  usage: Usage | null;
   firewall: { rules: FirewallRule[]; events: FirewallEvent[]; traffic?: Traffic };
   observability: Observability | null;
   vitals: { collectedAt: number; metrics: VitalMetric[]; res: number | null; note: string } | null;
@@ -84,6 +96,8 @@ export type CloudState = {
   sessions: SessionRow[];
   tokens: TokenRow[];
   webhooks: WebhookRow[];
+  webhookDeliveries: WebhookDelivery[];
+  por: PorState;
   protection: { required: boolean; unlocked: boolean };
   identity: Capability[];
   shell: string[];
@@ -124,6 +138,7 @@ const empty: CloudState = {
   host: null,
   analytics: null,
   billing: null,
+  usage: null,
   firewall: { rules: [], events: [] },
   observability: null,
   vitals: null,
@@ -135,6 +150,8 @@ const empty: CloudState = {
   sessions: [],
   tokens: [],
   webhooks: [],
+  webhookDeliveries: [],
+  por: POR_UNVERIFIED,
   protection: { required: false, unlocked: true },
   identity: [],
   shell: ["CloudShell reads this server. Type help."],
@@ -219,6 +236,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       metrics: snap.metrics,
       host: snap.host,
       billing: snap.billing,
+      usage: snap.usage,
       firewall: snap.firewall,
       observability: snap.observability,
       vitals: snap.vitals,
@@ -230,6 +248,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       sessions: snap.sessions ?? [],
       tokens: snap.tokens ?? [],
       webhooks: snap.webhooks ?? [],
+      webhookDeliveries: snap.webhookDeliveries ?? [],
+      por: snap.por ?? POR_UNVERIFIED,
       protection: snap.protection ?? { required: false, unlocked: true },
       identity: snap.identity ?? [],
       analytics,

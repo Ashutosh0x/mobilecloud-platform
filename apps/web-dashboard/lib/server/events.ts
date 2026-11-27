@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { newId } from "./db.ts";
+import { enqueueForEvent } from "./webhook.ts";
 
 /**
  * Durable event log / transactional outbox.
@@ -33,6 +34,9 @@ export const EVENT_TYPES = [
   "notification.created",
   "notification.read",
   "server.status_changed",
+  // Proof-of-reserve: a new reconciliation attestation (kernel output) was
+  // recorded for the account.
+  "por.attested",
   // QR device pairing + connected-device lifecycle. Every transition of a
   // pairing session (create → scan → approve → connect, or expire/revoke) is
   // appended to the outbox so both the browser and the Android device update
@@ -111,10 +115,15 @@ export function publish(
   resourceId: string | null,
   payload: Record<string, unknown> = {},
 ): number {
+  const eventId = newId();
   const result = db.prepare(
     `INSERT INTO events (id, owner_id, type, resource_id, schema_version, payload, at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(newId(), ownerId, type, resourceId, SCHEMA_VERSION, JSON.stringify(payload ?? {}), Date.now());
+  ).run(eventId, ownerId, type, resourceId, SCHEMA_VERSION, JSON.stringify(payload ?? {}), Date.now());
+  // Queue outbound webhooks in the same transaction as the event, so a queued
+  // delivery is never lost and a redelivery is de-duplicated by
+  // UNIQUE(webhook_id, event_id). The worker drains this queue.
+  enqueueForEvent(db, ownerId, String(type), eventId, { event: String(type), resourceId, ...(payload ?? {}) });
   return Number(result.lastInsertRowid);
 }
 

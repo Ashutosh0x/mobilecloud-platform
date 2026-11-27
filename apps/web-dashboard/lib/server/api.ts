@@ -9,7 +9,12 @@ import { dataRoot, isRetiredPassword, newId, openDb, tokenHash, verifyPassword }
 import { collectAnalytics, collectHost, collectMetrics } from "./metrics.ts";
 import { capabilities, collectObservability, inspectRequest, listBuilds, listDrives, listFirewallEvents, listRules, listWorkflows, observedJa4, summarizeVitals, trafficSummary } from "./platform.ts";
 import { approveDevice, clearProtection, createToken, gateCookie, identityProviders, listNotifications, listSessions, listTokens, listWebhooks, notify, pollDevice, protectionStatus, readGate, setProtection, startDevice, unlockProtection, userFromBearer } from "./identity.ts";
-import { changesSince, latestSeq, publish, snapshot, tx } from "./events.ts";
+import { EVENT_TYPES, changesSince, latestSeq, publish, snapshot, tx } from "./events.ts";
+import { collectUsage, record as recordUsage } from "./metering.ts";
+import { FunctionError, validateSource, runFunction } from "./runtime.ts";
+import { deliverableHost, listDeliveries } from "./webhook.ts";
+import { parseSteps, runWorkflow } from "./workflows.ts";
+import { insertAttestation, porState, validateAttestation } from "./por.ts";
 import { approveFromBrowser, approvePairing, closePairing, createPairing, expireStale, listDevices, markAwaitingApproval, publicPairing, readPairing, renameDevice, revokeDevice, scanPairing, scanProofMatches, secretMatches } from "./pairing.ts";
 import { encodePairingTicket, renderPairingQr } from "./qr.ts";
 
@@ -192,6 +197,28 @@ function safeSlug(input: string, label: string) {
   return name;
 }
 
+/** Event types a new webhook receives until the owner narrows them. */
+const DEFAULT_WEBHOOK_EVENTS = "deployment.*,build.*,notification.created,account.updated";
+
+/** Validates an event subscription (comma-separated string or array). `foo.*` is a family match. */
+function subscription(raw: unknown): string {
+  const tokens = (Array.isArray(raw) ? raw.map(str) : str(raw).split(",")).map((token) => token.trim()).filter(Boolean);
+  if (!tokens.length) return DEFAULT_WEBHOOK_EVENTS;
+  if (tokens.length > 16) throw new RequestError(400, "A webhook may subscribe to at most 16 event types");
+  for (const token of tokens) {
+    if (token === "*") continue;
+    if (token.endsWith(".*")) {
+      const prefix = token.slice(0, -1);
+      if (!(EVENT_TYPES as readonly string[]).some((type) => type.startsWith(prefix))) {
+        throw new RequestError(400, `${token} does not match any event family`);
+      }
+      continue;
+    }
+    if (!(EVENT_TYPES as readonly string[]).includes(token)) throw new RequestError(400, `${token} is not an event type`);
+  }
+  return tokens.join(",");
+}
+
 function requireJson(req: Request) {
   if (req.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
     throw new RequestError(415, "Content-Type must be application/json");
@@ -317,9 +344,10 @@ export async function handle(req: Request, parts: string[]): Promise<Response> {
     status = result.status;
     return new Response(result.response.body, { status: result.status, headers: result.response.headers });
   } catch (error) {
-    status = error instanceof RequestError ? error.status : 500;
+    const known = error instanceof RequestError || error instanceof FunctionError;
+    status = known ? (error as RequestError).status : 500;
     if (status === 500) console.warn("Unexpected control-plane request failure");
-    return json({ error: error instanceof RequestError ? error.message : "Request failed" }, status);
+    return json({ error: known ? (error as Error).message : "Request failed" }, status);
   } finally {
     if (owner && path !== "events" && path !== "health") {
       try { record(owner, `/${path}`.slice(0, 180), status, started, req); }
@@ -571,6 +599,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       metrics: collectMetrics(db, owner, operatorMetrics),
       host: collectHost(operatorMetrics),
       billing: billing(user),
+      usage: collectUsage(db, owner, user.plan),
       firewall: { rules: listRules(db, owner), events: listFirewallEvents(db, owner), traffic: trafficSummary(db, owner) },
       observability: collectObservability(db, owner),
       vitals: summarizeVitals(db, owner),
@@ -582,6 +611,8 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       sessions: listSessions(db, owner, auth.via === "cookie" ? auth.hash : null),
       tokens: listTokens(db, owner),
       webhooks: listWebhooks(db, owner),
+      webhookDeliveries: listDeliveries(db, owner, 25),
+      por: porState(db, owner),
       protection: protectionStatus(db, owner, readGate(req)),
       identity: identityProviders(),
     }));
@@ -590,6 +621,23 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
 
   if (key === "GET metrics") return { response: json(collectMetrics(db, owner, operatorMetrics)), status: 200, owner };
   if (key === "GET host") return { response: json(collectHost(operatorMetrics)), status: 200, owner };
+  if (key === "GET usage") return { response: json(collectUsage(db, owner, user.plan)), status: 200, owner };
+  if (key === "GET por") return { response: json(porState(db, owner)), status: 200, owner };
+  if (key === "POST por") {
+    // Ingestion for the (external) attestor: it publishes the por-kernel output
+    // verbatim. The control plane never computes a reserve ratio itself.
+    const validated = validateAttestation(await body(req));
+    if (!validated.ok) return { response: json({ error: validated.error }, 400), status: 400, owner };
+    const attestation = tx(db, () => {
+      const row = insertAttestation(db, owner, validated.value);
+      publish(db, owner, "por.attested", row.id, { status: row.status, reserveRatioBps: row.reserveRatioBps });
+      return row;
+    });
+    return { response: json({ ok: true, attestation }, 201), status: 201, owner };
+  }
+  if (key === "GET webhook-deliveries") {
+    return { response: json({ deliveries: listDeliveries(db, owner, 100) }), status: 200, owner };
+  }
   if (parts[0] === "analytics" && method === "GET") {
     const range = (new URL(req.url).searchParams.get("range") ?? "24h") as RangeKey;
     if (!["1h", "24h", "7d", "30d"].includes(range)) return { response: json({ error: "Unknown range" }, 400), status: 400, owner };
@@ -746,21 +794,41 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     const name = safeSlug(str(input.name), "Function name");
     const routePath = str(input.route);
     if (!routePath.startsWith("/")) return { response: json({ error: "Route must start with /" }, 400), status: 400, owner };
+    const source = validateSource(input.source);
     const id = newId();
     tx(db, () => {
       db.prepare(
-        "INSERT INTO functions (id, owner_id, name, route, invocations, created_at) VALUES (?, ?, ?, ?, 0, ?)",
-      ).run(id, owner, name, routePath, Date.now());
+        "INSERT INTO functions (id, owner_id, name, route, source, invocations, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+      ).run(id, owner, name, routePath, source, Date.now());
       publish(db, owner, "configuration.updated", id, { resource: "function", id, name, route: routePath });
     });
-    log(owner, "info", "functions", `registered ${name} with no handler source`);
-    return { response: json({ ok: true }), status: 201, owner };
+    log(owner, "info", "functions", `registered ${name} with ${Buffer.byteLength(source, "utf8")} bytes of handler source`);
+    return { response: json({ ok: true, hasSource: true }), status: 201, owner };
   }
   if (method === "POST" && parts[0] === "functions" && parts[2] === "invoke") {
-    const row = db.prepare("SELECT id, name FROM functions WHERE owner_id = ? AND id = ?").get(owner, parts[1]) as { id: string; name: string } | undefined;
+    const row = db.prepare("SELECT id, name, route, source FROM functions WHERE owner_id = ? AND id = ?")
+      .get(owner, parts[1]) as { id: string; name: string; route: string; source: string | null } | undefined;
     if (!row) return { response: json({ error: "Function not found" }, 404), status: 404, owner };
-    log(owner, "error", "functions", `${row.name} was not invoked: no handler source is stored`);
-    return { response: json({ error: "No handler source is stored for this function, so it was not executed." }, 409), status: 409, owner };
+    if (!row.source) {
+      log(owner, "error", "functions", `${row.name} was not invoked: no handler source is stored`);
+      return { response: json({ error: "No handler source is stored for this function, so it was not executed." }, 409), status: 409, owner };
+    }
+    const input = await body(req);
+    const url = new URL(req.url);
+    const result = runFunction(row.source, {
+      method: "POST",
+      path: row.route,
+      query: Object.fromEntries(url.searchParams),
+      headers: { "content-type": "application/json" },
+      body: input,
+    });
+    tx(db, () => {
+      db.prepare("UPDATE functions SET invocations = invocations + 1 WHERE owner_id = ? AND id = ?").run(owner, row.id);
+      recordUsage(db, owner, "function_invocations", 1, row.id);
+      publish(db, owner, "configuration.updated", row.id, { resource: "function_invocation", id: row.id, name: row.name, status: result.status, durationMs: result.durationMs });
+    });
+    log(owner, "info", "functions", `${row.name} returned ${result.status} in ${result.durationMs} ms`);
+    return { response: json(result, result.status), status: result.status, owner };
   }
 
   if (key === "POST storage") {
@@ -1024,15 +1092,17 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     } catch {
       throw new RequestError(400, "Enter an HTTPS webhook URL without credentials, query, or fragment");
     }
+    const events = subscription(input.events);
     const secret = randomBytes(16).toString("hex");
     const id = newId();
     tx(db, () => {
       db.prepare("INSERT INTO webhooks (id, owner_id, url, secret, events, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
-        id, owner, url, secret, "deployment.blocked,firewall.denied,auth.session,auth.device", Date.now(),
+        id, owner, url, secret, events, Date.now(),
       );
       publish(db, owner, "configuration.updated", id, { resource: "webhook", id, url });
     });
-    return { response: json({ secret, deliveryEnabled: false }, 201), status: 201, owner };
+    log(owner, "info", "webhooks", `registered ${new URL(url).host} for ${events}`);
+    return { response: json({ secret, deliveryEnabled: true, events, deliverable: deliverableHost(url) }, 201), status: 201, owner };
   }
 
   if (method === "DELETE" && parts[0] === "webhooks" && parts[1]) {
@@ -1147,27 +1217,33 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   }
 
   if (key === "POST workflows") {
-    const name = safeSlug(str((await body(req)).name), "Workflow name");
+    const input = await body(req);
+    const name = safeSlug(str(input.name), "Workflow name");
+    const steps = parseSteps(input.steps);
     const id = newId();
     tx(db, () => {
-      db.prepare("INSERT INTO workflows (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)").run(id, owner, name, Date.now());
-      publish(db, owner, "configuration.updated", id, { resource: "workflow", id, name });
+      db.prepare("INSERT INTO workflows (id, owner_id, name, steps, created_at) VALUES (?, ?, ?, ?, ?)")
+        .run(id, owner, name, JSON.stringify(steps), Date.now());
+      publish(db, owner, "configuration.updated", id, { resource: "workflow", id, name, steps: steps.length });
     });
-    return { response: json({ ok: true }), status: 201, owner };
+    log(owner, "info", "workflows", `saved ${name} with ${steps.length} step${steps.length === 1 ? "" : "s"}`);
+    return { response: json({ ok: true, steps: steps.length }), status: 201, owner };
   }
   if (method === "POST" && parts[0] === "workflows" && parts[2] === "run") {
-    const row = db.prepare("SELECT id, name FROM workflows WHERE owner_id = ? AND id = ?").get(owner, parts[1]) as { id: string; name: string } | undefined;
+    const row = db.prepare("SELECT id, name, steps FROM workflows WHERE owner_id = ? AND id = ?")
+      .get(owner, parts[1]) as { id: string; name: string; steps: string | null } | undefined;
     if (!row) return { response: json({ error: "Workflow not found" }, 404), status: 404, owner };
-    const note = "Saved a run record. No workflow worker is configured, so no step was executed.";
+    const outcome = runWorkflow(db, owner, row);
     const id = newId();
     tx(db, () => {
       db.prepare(
-        "INSERT INTO workflow_runs (id, owner_id, workflow_id, status, note, at) VALUES (?, ?, ?, 'not_executed', ?, ?)",
-      ).run(id, owner, row.id, note, Date.now());
-      publish(db, owner, "configuration.updated", row.id, { resource: "workflow_run", id, workflowId: row.id, workflow: row.name, status: "not_executed", note });
+        "INSERT INTO workflow_runs (id, owner_id, workflow_id, status, note, at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(id, owner, row.id, outcome.status, outcome.note, Date.now());
+      recordUsage(db, owner, "workflow_runs", 1, row.id);
+      publish(db, owner, "configuration.updated", row.id, { resource: "workflow_run", id, workflowId: row.id, workflow: row.name, status: outcome.status, note: outcome.note });
     });
-    log(owner, "warn", "workflows", `${row.name}: ${note}`);
-    return { response: json({ ok: true, status: "not_executed", note }), status: 202, owner };
+    log(owner, outcome.status === "succeeded" ? "info" : "warn", "workflows", `${row.name}: ${outcome.note}`);
+    return { response: json({ ok: outcome.status === "succeeded", status: outcome.status, note: outcome.note, steps: outcome.steps }), status: 200, owner };
   }
 
   if (key === "POST drives") {
@@ -1269,10 +1345,10 @@ function listDatabases(owner: string) {
 
 function listFunctions(owner: string) {
   return openDb().prepare(
-    "SELECT id, name, route, invocations, 0 AS hasSource FROM functions WHERE owner_id = ? ORDER BY created_at DESC",
+    "SELECT id, name, route, invocations, source IS NOT NULL AS hasSource FROM functions WHERE owner_id = ? ORDER BY created_at DESC",
   ).all(owner).map((row) => {
     const item = row as { id: string; name: string; route: string; invocations: number; hasSource: number };
-    return { ...item, hasSource: false };
+    return { ...item, hasSource: item.hasSource === 1 };
   });
 }
 

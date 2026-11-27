@@ -32,6 +32,7 @@ const GROUPS = [
     { href: "/databases", label: "Databases", icon: "db" },
     { href: "/functions", label: "Functions", icon: "zap" },
     { href: "/workflows", label: "Workflows", icon: "grid" },
+    { href: "/reserve", label: "Proof of reserve", icon: "shield" },
     { href: "/shell", label: "CloudShell", icon: "grid" },
     { href: "/node", label: "Node console", icon: "android" },
     { href: "/team", label: "Team", icon: "users" },

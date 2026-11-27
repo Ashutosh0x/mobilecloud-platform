@@ -223,13 +223,18 @@ export function listBuilds(db: DatabaseSync, owner: string) {
 
 export function listWorkflows(db: DatabaseSync, owner: string) {
   const rows = db.prepare(
-    "SELECT id, name, created_at AS createdAt FROM workflows WHERE owner_id = ? ORDER BY created_at DESC",
-  ).all(owner) as { id: string; name: string; createdAt: number }[];
+    "SELECT id, name, steps, created_at AS createdAt FROM workflows WHERE owner_id = ? ORDER BY created_at DESC",
+  ).all(owner) as { id: string; name: string; steps: string | null; createdAt: number }[];
   return rows.map((row) => {
     const last = db.prepare(
       "SELECT status, note, at FROM workflow_runs WHERE owner_id = ? AND workflow_id = ? ORDER BY at DESC LIMIT 1",
     ).get(owner, row.id) as { status: string; note: string; at: number } | undefined;
-    return { ...row, lastRun: last ?? null };
+    let stepCount = 0;
+    try {
+      const parsed = JSON.parse(row.steps ?? "[]");
+      if (Array.isArray(parsed)) stepCount = parsed.length;
+    } catch { /* an unreadable step list counts as zero */ }
+    return { id: row.id, name: row.name, createdAt: row.createdAt, stepCount, lastRun: last ?? null };
   });
 }
 
@@ -270,9 +275,9 @@ export function capabilities() {
     { name: "Mobile CI runners", state: "unavailable", detail: "No bare-metal ARM64 pool, Gradle daemon snapshot, or Android SDK runner is configured." },
     { name: "Play Integrity and App Attest", state: "unavailable", detail: "No attestation credentials are configured." },
     { name: "AI Gateway", state: "unavailable", detail: "No model provider key is configured." },
-    { name: "Workflow worker", state: "unavailable", detail: "Workflows can be saved. Runs are recorded and are not executed." },
-    { name: "Webhook delivery", state: "unavailable", detail: "Webhook setup stores metadata only; no outbound requests are sent." },
+    { name: "Workflow worker", state: "active", detail: "A workflow stores an ordered step list and runs each step against your own functions in this process, stopping at the first failure." },
+    { name: "Webhook delivery", state: "active", detail: "A delivery is queued in the same transaction as its event, signed with HMAC-SHA256, retried with exponential backoff up to 5 attempts, and recorded in a delivery log." },
     { name: "Console screen privacy", state: "active", detail: "The optional screen password does not authorize API requests." },
-    { name: "Local resource records", state: "active", detail: "Functions, DNS, team invites and billing are not provisioned; storage and databases have limited local-only lifecycles." },
+    { name: "Local resource records", state: "active", detail: "Functions execute in a bounded in-process runtime. DNS, team invites, and billing are not provisioned; storage and databases have limited local-only lifecycles." },
   ];
 }

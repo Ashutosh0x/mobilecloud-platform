@@ -5,7 +5,7 @@
 ### **The Autonomous Smartphone Edge Cloud & Institutional Proof-of-Reserve Protocol**
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-185%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-216%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 [![Rust](https://img.shields.io/badge/Rust-1.100-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![Android](https://img.shields.io/badge/Android-API%2030--35-3ddc84?style=for-the-badge&logo=android&logoColor=white)](android-app)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7f52ff?style=for-the-badge&logo=kotlin&logoColor=white)](android-app)
@@ -38,18 +38,21 @@ The web console and the Android app are two synchronized clients of one backend:
 | Claim | Status |
 | :--- | :--- |
 | Android APK | A **console client**. It does not run the Rust edge engine. |
-| Dashboard builds and deployments | The dashboard **records** requests; it does not execute them. Engine dispatch is disabled until isolated workers and tenant authorization exist. |
+| Dashboard project deployments | The dashboard **records** deployment and build requests; it does not dispatch them to the engine. Engine dispatch is disabled until isolated workers and tenant authorization exist. |
+| Functions runtime | **Bounded, in-process.** A function stores a JavaScript handler and runs in a `node:vm` context with no `require`, `process`, `fetch`, filesystem, or timers — synchronously, under a 250 ms wall-clock timeout. It isolates globals, not the process; it is not a sandbox for hostile code. |
+| Workflow worker | **In-process.** A workflow stores an ordered step list that references your own functions; a run executes each step, threads its output into the next, and stops at the first failure. |
+| Webhook delivery | **Working.** A delivery is queued in the same transaction as its event, signed with HMAC-SHA256, retried with capped exponential backoff up to 5 attempts, and recorded in a delivery log. Loopback and private targets are refused. |
 | Local build preview | **Not sandboxed.** The preview runs in the plain app UID. Do not run untrusted repositories. |
 | Browser CloudShell | **Working.** Requires a running edge engine and a trusted gateway in front of it. |
 | SSH daemon | **Working.** Refuses a non-loopback bind unless an Ed25519 key is authorized. |
 | Trading engine | **Paper / demo.** Not validated for live execution. |
-| Proof of reserve | Verified against the Stellar **testnet**. Custody and CPA attestation are `NOT_ESTABLISHED`. |
+| Proof of reserve | The control plane stores the Rust kernel's reconciliation output **read-only** and reports an explicit unverified state when no attestation exists; it never computes a ratio itself. Verified against the Stellar **testnet**. Custody and CPA attestation are `NOT_ESTABLISHED`. |
 | On-device AI/ML inference (ONNX, TFLite, NPU) | **Not implemented.** No inference code exists in this repository. |
 | Fleet mesh | **Not implemented.** A console screen exists; there is no discovery, load-balancing, or replication engine. |
-| Billing & metering | **Not implemented.** A console screen exists; there is no metering or billing engine. |
+| Billing & payments | **Not implemented.** Usage is metered (append-only counters per meter), but there is no payment provider, invoicing, or charging. |
 | Hardware battery bypass, energy figures, "zero-millisecond UPS" | **Not claimed.** No measurement in this repository supports them. |
 
-> The full, evidence-backed audit of every claimed system and feature — including the four subsystems above that the source report over-claimed — is in [`docs/FEATURE-REPORT.md`](docs/FEATURE-REPORT.md).
+> The full, evidence-backed audit of every claimed system and feature — including the subsystems above that the source report over-claimed — is in [`docs/FEATURE-REPORT.md`](docs/FEATURE-REPORT.md).
 
 ---
 
@@ -161,7 +164,7 @@ MobileCloud combines two decoupled, high-performance engines within one monorepo
 * **Strict network isolation**: `network_security_config.xml` forbids cleartext traffic; exemptions are loopback only.
 
 ### 5. Next.js 15 Web Management Console (`apps/web-dashboard`)
-* **Console views**: Projects, Deployments, Builds, Logs, Analytics, Monitoring, Observability, Speed, Firewall, Device, Settings, Domains, Storage, Databases, Functions, Workflows, Node, Team, Billing — and a CloudShell route.
+* **Console views**: Projects, Deployments, Builds, Logs, Analytics, Monitoring, Observability, Speed, Firewall, Device, Settings, Domains, Storage, Databases, Functions, Workflows, Node, Team, Billing, Proof of reserve — and a CloudShell route.
 * **Realtime gateway**: a dependency-free RFC 6455 WebSocket server that tails the same SQLite WAL the API writes.
 * **QR device linking**: a two-minute single-use pairing code that the phone scans and the browser owner approves.
 * **Optimistic UI with rollback**: mutations apply locally and roll back to the last confirmed snapshot if the server rejects them.
@@ -213,6 +216,13 @@ MobileCloud combines two decoupled, high-performance engines within one monorepo
 * **Resilient Client Loop**: exponential backoff with jitter on reconnect plus application-level `Heartbeat` / `HeartbeatAck` liveness on top of the tunnel.
 * **Edge Shield (`mobilecloud-shield`)**: a composable Tower `Layer` / `Service` chain for edge services — CrowdSec-compatible IP blocklist, sliding-window rate limiter, and a regex WAF (path traversal, SQL injection, XSS, command injection) that percent-decodes the URI before matching so encoded payloads cannot slip through.
 
+### 12. Platform Services: Functions, Workflows, Webhooks, Metering & Proof-of-Reserve
+* **Bounded Functions Runtime**: store a JavaScript handler and invoke it. The handler runs in a `node:vm` context with no `require`, `process`, `fetch`, filesystem, or timers — synchronously, under source and output byte caps and a 250 ms wall-clock timeout. It isolates globals, not the process; it is not a sandbox for hostile code.
+* **Workflow Worker**: a workflow stores an ordered step list that references your own functions; a run executes each step, threads its output into the next, and stops at the first failure.
+* **Signed Webhook Delivery**: a delivery is enqueued inside the same transaction as the event it describes, so the queue row and the event commit together; `UNIQUE(webhook_id, event_id)` makes a redelivered event impossible to send twice. Each request is signed HMAC-SHA256, retried with capped exponential backoff up to 5 attempts, and recorded in a delivery log. Loopback and private-network targets are refused unless explicitly opted in for local testing. A separate worker process drains the queue so the request path never blocks on a third party.
+* **Usage Metering**: append-only `usage_events` rows per meter (`function_invocations`, `workflow_runs`, `webhook_deliveries`, `object_bytes`), surfaced through `GET /api/v1/usage`. There is no payment provider, invoicing, or charging.
+* **Proof-of-Reserve Console View**: a `/reserve` route renders the Rust kernel's reconciliation output **read-only** — the control plane never computes a ratio itself — and reports an explicit `unverified` state when no attestation exists.
+
 ---
 
 ## System Architecture
@@ -241,7 +251,7 @@ flowchart TD
     end
 
     subgraph WebPlane["Web Clients"]
-        CONSOLE["apps/web-dashboard<br/>Next.js 15 · 19 console views"]
+        CONSOLE["apps/web-dashboard<br/>Next.js 15 · 20 console views"]
         CLOUDSHELL["web-cloudshell<br/>WebGL Xterm.js · file manager · preview picker"]
     end
 
@@ -347,7 +357,7 @@ graph TD
 
     subgraph AppPlane["Mobile & Web Applications"]
         ANDROID["android-app (com.mobilecloud.node)<br/>• Kotlin 2.0 + Jetpack Compose<br/>• JNI forkpty terminal + VirtualKeyBar<br/>• TerminalSessionService (wake lock)<br/>• BiometricPrompt · Glance widgets"]
-        DASHBOARD["apps/web-dashboard<br/>• Next.js 15 developer console<br/>• 19 platform views<br/>• Shared realtime client (one socket)"]
+        DASHBOARD["apps/web-dashboard<br/>• Next.js 15 developer console<br/>• 20 platform views<br/>• Shared realtime client (one socket)"]
         CLOUDSHELL["web-cloudshell<br/>• WebGL Xterm.js browser PTY<br/>• File manager + web preview picker<br/>• Auto-reconnecting WebSockets"]
     end
 
@@ -376,14 +386,14 @@ graph TD
 | :--- | :--- | :--- |
 | **`por-kernel`** | 58 tests | `U256` checked arithmetic, zero overflows across 10,000 edge cases, strict T+1 DTCC clearing window, zero-rehypothecation (`shares_on_loan == 0`). |
 | **`por-verifier`** | 25 tests | Monotonic sequence replay defense, TTL freshness expiration, O(N) ascending-key validation, duplicate signer rejection, 5-tier solvency state transitions. |
-| **`core-engine`** | 35 tests | Build Output v3 routing, agentic deployment ingress, cache tag revalidation, atomic promotion and rollback, PTY session allocation, terminal ticket single-use, origin allowlisting, preview session port binding, file-transfer path confinement. |
+| **`core-engine`** | 36 tests | Build Output v3 routing, agentic deployment ingress, cache tag revalidation (tag, path, and optimizer cache purge), atomic promotion and rollback, PTY session allocation, terminal ticket single-use, origin allowlisting, preview session port binding, file-transfer path confinement. |
 | **`trading-engine`** | 17 tests | Arbitrage profitability checks, integer-exact fee calculations, 4 risk invariants (atomic reverts, 2.5% max exposure, 15 bps slippage, 20% T+1 buffer). |
 | **`mobilecloud-tunnel`** | 7 tests | Ed25519 handshake sign → verify round-trip, `Host`-to-service-name routing (subdomain, nested subdomain, bare domain, unknown domain), and raw HTTP response parsing (with and without a body). |
 | **`mobilecloud-shield`** | 11 tests | Post-percent-decode WAF matching (SQL injection, path traversal, XSS) with a clean-request allow, sliding-window rate-limit admission, CrowdSec-JSON blocklist load/add/check/expiry-prune, and client-IP extraction from `X-Forwarded-For` / `X-Real-IP` with loopback fallback. |
 | **`por-xdr-toolkit`** | 4 tests | Protocol 30 XDR encoding/decoding, RFC 4506 `Option<ScVec>` presence-flag alignment. |
-| **`apps/web-dashboard`** | 28 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
+| **`apps/web-dashboard`** | 58 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Platform services: a function runs inside a `node:vm` context with no `require`/`process`/`fetch`/timers and is rejected when over the source or output byte cap or the 250 ms timeout; a workflow threads each step's output into the next and stops at the first failure; a webhook delivery is queued once per subscriber in the event's own transaction, signed HMAC-SHA256, backoff-capped at 5 attempts, and refused against loopback/private targets; usage counters append per meter; a PoR attestation is validated and stored read-only, and a missing attestation reports `unverified`. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
 
-**185 tests** in total.
+**216 tests** in total.
 
 ```bash
 # Rust workspace (default members)
@@ -413,9 +423,9 @@ cd apps/web-dashboard && npm test
 git clone https://github.com/Ashutosh0x/mobilecloud-platform.git
 cd mobilecloud-platform
 
-cargo test                      # 128 tests in the default members
+cargo test                      # 129 tests in the default members
 cargo test -p por-verifier      # 25 contract tests
-cd apps/web-dashboard && npm test && cd ../..   # 28 dashboard tests
+cd apps/web-dashboard && npm test && cd ../..   # 58 dashboard tests
 ```
 
 ### 3. Run the web console
@@ -507,6 +517,6 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 **MobileCloud & FurlPay** — one account, one data model, one durable event log.
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-185%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-216%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 
 </div>

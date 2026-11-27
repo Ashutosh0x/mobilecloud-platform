@@ -6,6 +6,7 @@
     "dev": "node server/run.mjs dev",
     "dev:web": "next dev --port 3210",
     "dev:realtime": "node server/realtime.mjs",
+    "dev:worker": "node --experimental-strip-types server/worker.ts",
     "build": "next build",
     "start": "node server/run.mjs start",
     "start:web": "next start --port 3210",

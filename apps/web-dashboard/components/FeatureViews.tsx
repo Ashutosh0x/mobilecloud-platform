@@ -196,19 +196,27 @@ export function DatabasesView() {
   );
 }
 
+const DEFAULT_SOURCE = `module.exports.handler = (req) => ({
+  status: 200,
+  body: { ok: true, route: req.path, received: req.body },
+});`;
+
 export function FunctionsView() {
   const { state, call, setToast } = useCloud();
   const [name, setName] = useState("");
   const [route, setRoute] = useState("/api/");
+  const [source, setSource] = useState(DEFAULT_SOURCE);
+  const [invokeInput, setInvokeInput] = useState("{}");
+  const [output, setOutput] = useState<string | null>(null);
   const rows = useFiltered(state.functions, (f) => `${f.name} ${f.route}`);
   return (
     <>
       <header className="page-head">
-        <div><h2>Functions</h2><p>Registration stores a name and route only. Function execution is not supported here.</p></div>
+        <div><h2>Functions</h2><p>A function stores a JavaScript handler and runs in a bounded in-process runtime with no filesystem, network, or timer access. It must return synchronously from <code>module.exports.handler</code>.</p></div>
         <form className="form-row" onSubmit={(e) => {
           e.preventDefault();
           void run(async () => {
-            await call("functions", { method: "POST", body: JSON.stringify({ name, route }) });
+            await call("functions", { method: "POST", body: JSON.stringify({ name, route, source }) });
             setName((value) => value === name ? "" : value);
           }, setToast, "Function registered");
         }}>
@@ -218,12 +226,36 @@ export function FunctionsView() {
         </form>
       </header>
       <article className="panel">
+        <label className="sub" htmlFor="fn-source">Handler source</label>
+        <textarea id="fn-source" className="code" rows={6} value={source} onChange={(e) => setSource(e.target.value)} spellCheck={false} />
+      </article>
+      <article className="panel">
         {rows.map((f) => (
-          <div key={f.id} className="list-row">
+          <div key={f.id} className="list-row" style={{ gridTemplateColumns: "1fr auto" }}>
             <div><div className="name">{f.name}</div><div className="sub">{f.route} · source {f.hasSource ? "stored" : "missing"} · {f.invocations} invocations</div></div>
+            <button className="ghost" type="button" disabled={!f.hasSource} onClick={() => {
+              let payload: unknown;
+              try {
+                payload = JSON.parse(invokeInput || "{}");
+              } catch {
+                setToast("Invoke body must be valid JSON");
+                return;
+              }
+              setOutput(null);
+              void run(async () => {
+                const data = await call(`functions/${f.id}/invoke`, { method: "POST", body: JSON.stringify(payload) });
+                setOutput(JSON.stringify(data, null, 2));
+                return { note: `${f.name} returned ${(data as { status?: number })?.status ?? 200}` };
+              }, setToast, "Invoked");
+            }}>Invoke</button>
           </div>
         ))}
         {rows.length === 0 && <p className="empty">No functions registered.</p>}
+      </article>
+      <article className="panel">
+        <label className="sub" htmlFor="fn-input">Invoke body (JSON)</label>
+        <textarea id="fn-input" className="code" rows={3} value={invokeInput} onChange={(e) => setInvokeInput(e.target.value)} spellCheck={false} />
+        {output && <pre className="code">{output}</pre>}
       </article>
     </>
   );
@@ -421,7 +453,7 @@ export function SettingsView() {
         }
       }}>
         <h3>Webhooks</h3>
-        <p className="sub">Webhook registrations are stored, but delivery is disabled.</p>
+        <p className="sub">A queued delivery is signed with <code>HMAC-SHA256</code> over <code>{"${timestamp}.${body}"}</code> and retried with backoff. Loopback and private targets are refused unless the operator opts in.</p>
         <div className="form-row">
           <input aria-label="Webhook URL" placeholder="https://example.com/hooks" value={hookUrl} onChange={(e) => setHookUrl(e.target.value)} required />
           <button className="primary" type="submit">Add</button>
@@ -433,6 +465,20 @@ export function SettingsView() {
             <button className="ghost" type="button" onClick={() => run(() => call(`webhooks/${hook.id}`, { method: "DELETE" }), setToast, "Webhook removed")}>Remove</button>
           </div>
         ))}
+        {state.webhookDeliveries.length > 0 && (
+          <>
+            <h3>Recent deliveries</h3>
+            {state.webhookDeliveries.map((delivery) => (
+              <div key={delivery.id} className="list-row">
+                <div>
+                  <div className="name">{delivery.eventType}</div>
+                  <div className="sub">{delivery.status} · attempt {delivery.attempts} · {delivery.responseStatus ?? delivery.lastError ?? "no response"}</div>
+                </div>
+                <div className="sub"><ClientTime ts={delivery.updatedAt} /></div>
+              </div>
+            ))}
+          </>
+        )}
       </form>
 
       <article className="panel">
@@ -471,6 +517,7 @@ export function TeamView() {
 export function BillingView() {
   const { state, call, setToast } = useCloud();
   const plans = ["community", "mesh", "hardware"];
+  const usage = state.usage;
   return (
     <>
       <header className="page-head"><div><h2>Billing</h2><p>{state.billing?.detail}</p></div></header>
@@ -482,6 +529,20 @@ export function BillingView() {
           </button>
         ))}
       </div>
+      <article className="panel">
+        <div className="name">Measured usage</div>
+        <div className="sub">{usage ? `${usage.note} Period started ` : "No usage has been measured yet."}{usage && <ClientTime ts={usage.periodStart} />}</div>
+        {usage?.metrics.map((metric) => (
+          <div key={metric.meter} className="list-row" style={{ gridTemplateColumns: "1fr auto" }}>
+            <div className="name">{metric.meter.replace(/_/g, " ")}</div>
+            <div className="sub" style={metric.over ? { color: "var(--warn, #b45309)" } : undefined}>
+              {metric.unit === "bytes" ? formatBytes(metric.value) : metric.value.toLocaleString()}
+              {metric.limit !== null ? ` of ${metric.unit === "bytes" ? formatBytes(metric.limit) : metric.limit.toLocaleString()}` : ""}
+              {metric.over ? " · over quota" : ""}
+            </div>
+          </div>
+        ))}
+      </article>
     </>
   );
 }

@@ -221,22 +221,41 @@ export function BuildsView() {
 export function WorkflowsView() {
   const { state, call, setToast } = useCloud();
   const [name, setName] = useState("");
+  const [steps, setSteps] = useState('[{"function":"quote"}]');
   const [drive, setDrive] = useState("");
   return (
     <>
-      <header className="page-head"><div><h2>Workflows and drives</h2><p>Workflow runs are recorded and not executed. Drives are real directories on this server, not microVM volumes.</p></div></header>
-      <form className="form-row" onSubmit={(e) => { e.preventDefault(); void run(async () => { const result = await call("workflows", { method: "POST", body: JSON.stringify({ name }) }); setName((value) => value === name ? "" : value); return result; }, setToast, "Workflow saved"); }}>
+      <header className="page-head"><div><h2>Workflows and drives</h2><p>A workflow runs an ordered list of your functions and stops at the first failure. Drives are real directories on this server, not microVM volumes.</p></div></header>
+      <form className="form-row" onSubmit={(e) => {
+        e.preventDefault();
+        void run(async () => {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(steps || "[]");
+          } catch {
+            setToast("Steps must be a JSON array");
+            return undefined;
+          }
+          const result = await call("workflows", { method: "POST", body: JSON.stringify({ name, steps: parsed }) });
+          setName((value) => value === name ? "" : value);
+          return result;
+        }, setToast, "Workflow saved");
+      }}>
         <input aria-label="Workflow name" placeholder="nightly-audit" value={name} onChange={(e) => setName(e.target.value)} required />
         <button className="primary" type="submit">Save workflow</button>
       </form>
+      <article className="panel">
+        <label className="sub" htmlFor="wf-steps">Steps: a JSON array of {"{"} function, input {"}"} referencing a function name or id</label>
+        <textarea id="wf-steps" className="code" rows={3} value={steps} onChange={(e) => setSteps(e.target.value)} spellCheck={false} />
+      </article>
       <article className="panel">
         {state.workflows.map((workflow) => (
           <div key={workflow.id} className="list-row" style={{ gridTemplateColumns: "1fr auto" }}>
             <div>
               <div className="name">{workflow.name}</div>
-              <div className="sub">{workflow.lastRun ? `${workflow.lastRun.status}: ${workflow.lastRun.note}` : "No run recorded"}</div>
+              <div className="sub">{workflow.stepCount ?? 0} step{workflow.stepCount === 1 ? "" : "s"} · {workflow.lastRun ? `${workflow.lastRun.status}: ${workflow.lastRun.note}` : "No run recorded"}</div>
             </div>
-            <button className="ghost" type="button" onClick={() => run(() => call(`workflows/${workflow.id}/run`, { method: "POST" }), setToast, "Recorded")}>Record run</button>
+            <button className="ghost" type="button" onClick={() => run(() => call(`workflows/${workflow.id}/run`, { method: "POST" }), setToast, "Workflow ran")}>Run</button>
           </div>
         ))}
         {state.workflows.length === 0 && <p className="empty">No workflows stored.</p>}
@@ -258,6 +277,55 @@ export function WorkflowsView() {
           </div>
         ))}
       </article>
+    </>
+  );
+}
+
+/** Renders an 18-decimal u128 base-unit string without floating-point rounding. */
+function baseUnits(raw: string): string {
+  const digits = raw.replace(/^0+(?=\d)/, "");
+  const padded = digits.padStart(19, "0");
+  const whole = padded.slice(0, -18).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const fraction = padded.slice(-18).replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole;
+}
+
+export function ProofOfReserveView() {
+  const por = useCloud().state.por;
+  const attestation = por.attestation;
+  return (
+    <>
+      <header className="page-head">
+        <div>
+          <h2>Proof of reserve</h2>
+          <p>Reconciliation runs in the Rust por-kernel; this console stores and serves its output read-only. It never computes a reserve ratio, so until an attestation is published the state is honestly unverified.</p>
+        </div>
+      </header>
+      <article className="panel">
+        <div className={`sub ${por.verified ? "" : "notice"}`}>{por.status} · {por.reason}</div>
+      </article>
+      {attestation && (
+        <>
+          <section className="stats">
+            <article className="stat"><div><b>{attestation.status}</b><span>Reserve status</span></div></article>
+            <article className="stat"><div><b>{(attestation.reserveRatioBps / 100).toFixed(2)}%</b><span>Reserve ratio</span></div></article>
+            <article className="stat"><div><b>{attestation.evidenceAgeSec}s</b><span>Evidence age</span></div></article>
+            <article className="stat"><div><b>{attestation.ledgerSequence ?? "—"}</b><span>Ledger sequence</span></div></article>
+          </section>
+          <article className="panel">
+            <h3>Balance sheet (18-decimal base units)</h3>
+            <div className="list-row"><div className="name">Total backing</div><div className="sub">{baseUnits(attestation.totalBackingBase)}</div></div>
+            <div className="list-row"><div className="name">Total liabilities</div><div className="sub">{baseUnits(attestation.totalLiabilitiesBase)}</div></div>
+            <div className="list-row"><div className="name">Net difference</div><div className="sub">{baseUnits(attestation.netDifferenceBase)}</div></div>
+          </article>
+          <article className="panel">
+            <div className="list-row"><div className="name">Digest</div><div className="sub">{attestation.digest ?? "not provided"}</div></div>
+            <div className="list-row"><div className="name">Quorum</div><div className="sub">{attestation.quorum ?? "not provided"}</div></div>
+            <div className="list-row"><div className="name">Observed</div><div className="sub"><ClientTime ts={attestation.observedAt} /></div></div>
+            <div className="list-row"><div className="name">Recorded</div><div className="sub"><ClientTime ts={attestation.recordedAt} /></div></div>
+          </article>
+        </>
+      )}
     </>
   );
 }

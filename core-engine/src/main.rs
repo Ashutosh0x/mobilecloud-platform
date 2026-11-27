@@ -92,6 +92,9 @@ fn valid_projects(projects: &HashMap<String, PreviewProject>) -> bool {
 pub struct AppState {
     pub home: PathBuf,
     pub engine_bin: PathBuf,
+    /// Content-addressed cache root (`home/cache`); revalidating a project
+    /// evicts its transformed-image entries.
+    pub cache: PathBuf,
     deployments: DeploymentStore,
     projects: HashMap<String, PreviewProject>,
     logs: HashMap<String, broadcast::Sender<String>>,
@@ -121,7 +124,7 @@ impl AppState {
             "invalid or ambiguous MOBILECLOUD_PREVIEW_PROJECTS"
         );
         let home = std::path::absolute(home)?;
-        for dir in ["sources", "deployments", "engine/bin", "home"] {
+        for dir in ["sources", "deployments", "engine/bin", "home", "cache"] {
             std::fs::create_dir_all(home.join(dir))?;
         }
         let logs = projects
@@ -130,6 +133,7 @@ impl AppState {
             .collect();
         Ok(Self {
             engine_bin: home.join("engine/bin"),
+            cache: home.join("cache"),
             deployments: DeploymentStore::new(home.join("deployments")),
             home,
             projects,
@@ -622,6 +626,10 @@ async fn rollback_deployment(
 #[derive(serde::Deserialize)]
 struct CacheRevalidateRequest {
     project: String,
+    /// Optional source filter: only cached transforms whose recorded source
+    /// URL contains this value are evicted.
+    #[serde(default)]
+    tag: Option<String>,
 }
 
 async fn cache_revalidate(
@@ -635,11 +643,35 @@ async fn cache_revalidate(
     if let Err(response) = project_config(&state, &payload.project) {
         return response;
     }
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({"error": "cache revalidation is not supported"})),
-    )
-        .into_response()
+    let cache_root = state.cache.clone();
+    let project = payload.project.clone();
+    let tag = payload.tag.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        proxy::image_optimizer::purge(&cache_root, &project, tag.as_deref())
+    })
+    .await;
+    match result {
+        Ok(Ok(purged)) => Json(serde_json::json!({
+            "project": payload.project, "purged": purged, "revalidated": true
+        }))
+        .into_response(),
+        Ok(Err(e)) => {
+            error!(project = %payload.project, error = %e, "cache revalidation failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cache revalidation failed",
+            )
+                .into_response()
+        }
+        Err(e) => {
+            error!(project = %payload.project, error = %e, "cache revalidation task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cache revalidation failed",
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn get_project_deployments(
@@ -881,6 +913,10 @@ async fn proxy_handler(State(state): State<Arc<AppState>>, request: Request) -> 
     }) else {
         return (StatusCode::NOT_FOUND, "unknown deployment host").into_response();
     };
+    // Dynamic image route: served from the content-addressed transform cache.
+    if request.uri().path() == "/_mobilecloud/image" {
+        return image_response(&state, project, request).await;
+    }
     let Ok(permit) = state.deployment_slots.clone().try_acquire_owned() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "deployment listener busy").into_response();
     };
@@ -896,6 +932,52 @@ async fn proxy_handler(State(state): State<Arc<AppState>>, request: Request) -> 
                 "deployment routing failed",
             )
                 .into_response()
+        }
+    }
+}
+
+/// Serve `/_mobilecloud/image` from the active deployment's policy manifest and
+/// the project's content-addressed transform cache.
+async fn image_response(state: &Arc<AppState>, project: &str, request: Request) -> Response {
+    let query = request.uri().query().unwrap_or_default().to_owned();
+    let accept = request
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let output = match state.deployments.active_output(project) {
+        Ok(Some(output)) => output,
+        Ok(None) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "no live deployment").into_response()
+        }
+        Err(e) => {
+            error!(%project, error = %e, "image route: deployment store unavailable");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "deployment routing failed",
+            )
+                .into_response();
+        }
+    };
+    let cache_root = proxy::image_optimizer::cache_dir_for(&state.cache, project);
+    match proxy::image_optimizer::handle_image_request(cache_root, output, &query, &accept).await {
+        Ok(response) => response,
+        Err(proxy::image_optimizer::ImageError::BadRequest) => {
+            (StatusCode::BAD_REQUEST, "invalid image request").into_response()
+        }
+        Err(proxy::image_optimizer::ImageError::ForbiddenSource) => {
+            (StatusCode::FORBIDDEN, "image source not permitted").into_response()
+        }
+        Err(proxy::image_optimizer::ImageError::ForbiddenDimensions) => {
+            (StatusCode::FORBIDDEN, "image dimensions not permitted").into_response()
+        }
+        Err(proxy::image_optimizer::ImageError::TransformUnavailable) => {
+            (StatusCode::NOT_IMPLEMENTED, "image transform unavailable").into_response()
+        }
+        Err(e) => {
+            error!(%project, error = %e, "image transform failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "image transform failed").into_response()
         }
     }
 }
@@ -1192,18 +1274,19 @@ mod tests {
             .0,
             400
         );
-        assert_eq!(
-            request(
-                router,
-                "POST",
-                "/api/v1/cache/revalidate",
-                AUTH,
-                r#"{"project":"demo","tag":"test"}"#
-            )
-            .await
-            .0,
-            501
-        );
+        // Cache revalidation now performs real eviction (an empty cache reports
+        // zero purged) rather than the former 501 stub.
+        let (status, body) = request(
+            router,
+            "POST",
+            "/api/v1/cache/revalidate",
+            AUTH,
+            r#"{"project":"demo","tag":"test"}"#,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(body.contains("\"revalidated\":true"), "{body}");
+        assert!(body.contains("\"purged\":0"), "{body}");
     }
 
     #[tokio::test]

@@ -32,10 +32,10 @@ const children = new Set();
 const restarts = new Set();
 let stopping = false;
 
-function launch(label, script, args, env, failures = 0) {
+function launch(label, script, args, env, failures = 0, nodeFlags = []) {
   if (stopping) return;
   const started = Date.now();
-  const child = spawn(process.execPath, [script, ...args], { cwd: appRoot, env, stdio: "inherit" });
+  const child = spawn(process.execPath, [...nodeFlags, script, ...args], { cwd: appRoot, env, stdio: "inherit" });
   children.add(child);
   const restart = () => {
     if (!children.delete(child) || stopping) return;
@@ -44,7 +44,7 @@ function launch(label, script, args, env, failures = 0) {
     console.error(`[run] ${label} stopped; restarting in ${delay} ms`);
     const timer = setTimeout(() => {
       restarts.delete(timer);
-      launch(label, script, args, env, next);
+      launch(label, script, args, env, next, nodeFlags);
     }, delay);
     restarts.add(timer);
   };
@@ -68,12 +68,15 @@ process.on("SIGTERM", shutdown);
 const webEnv = { ...process.env, PORT: port, NODE_ENV: mode === "start" ? "production" : "development", MOBILECLOUD_REALTIME_PORT: realtimePort };
 const realtimeEnv = { ...webEnv };
 delete realtimeEnv.MOBILECLOUD_BOOTSTRAP_PASSWORD;
+const workerEnv = { ...realtimeEnv };
 launch("web", nextBin, [mode, "--hostname", process.env.MOBILECLOUD_WEB_HOST ?? "127.0.0.1", "--port", port], webEnv);
 launch("realtime", join(here, "realtime.mjs"), [], realtimeEnv);
+launch("worker", join(here, "worker.ts"), [], workerEnv, 0, ["--experimental-strip-types"]);
 
 console.log("");
 console.log(`  MobileCloud control plane`);
 console.log(`  web app   http://localhost:${port}`);
 console.log(`  realtime  ws://localhost:${realtimePort}/api/realtime`);
+console.log(`  worker    webhook delivery queue`);
 console.log(`  mode      ${mode}`);
 console.log("");

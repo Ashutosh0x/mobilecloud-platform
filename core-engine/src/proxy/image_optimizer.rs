@@ -82,6 +82,52 @@ impl ImagesManifest {
     }
 }
 
+/// Directory holding one project's transformed-image cache.
+pub fn cache_dir_for(root: &Path, project: &str) -> PathBuf {
+    root.join(project).join("images")
+}
+
+/// Purge cached transforms for `project`. A transform is content-addressed as
+/// `<sha256(params)>.<format>` with a `<sha256(params)>.json` sidecar recording
+/// its source URL; when `tag` is given, only entries whose source equals or
+/// contains `tag` are removed. Returns the number of transforms evicted. A
+/// missing cache directory is not an error (nothing to revalidate).
+pub fn purge(root: &Path, project: &str, tag: Option<&str>) -> std::io::Result<usize> {
+    let dir = cache_dir_for(root, project);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut purged = 0usize;
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            continue; // sidecars are removed with their transform below
+        }
+        let sidecar = path.with_extension("json");
+        if let Some(tag) = tag {
+            let source = std::fs::read_to_string(&sidecar)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|meta| {
+                    meta.get("source")
+                        .and_then(|s| s.as_str())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            if !source.contains(tag) {
+                continue;
+            }
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            let _ = std::fs::remove_file(&sidecar);
+            purged += 1;
+        }
+    }
+    Ok(purged)
+}
+
 /// Handle one image request. `query` is the raw query string of the
 /// `/_mobilecloud/image` route.
 pub async fn handle_image_request(
@@ -126,6 +172,11 @@ pub async fn handle_image_request(
     if !cached.exists() {
         transform_with_libvips(&output_dir, url, width, quality, format, &cached)?;
     }
+    // Record the source so `cache revalidate --tag` can evict a specific asset.
+    let _ = std::fs::write(
+        cache_root.join(format!("{key}.json")),
+        serde_json::json!({"source": url, "format": format}).to_string(),
+    );
 
     let bytes = std::fs::read(&cached)?;
     let mut response = Response::builder()
@@ -253,5 +304,36 @@ mod tests {
         let params = parse_query("url=%2F_next%2Fimage%3Fid%3D7&w=1080&q=80");
         assert_eq!(params.get("url").unwrap(), "/_next/image?id=7");
         assert_eq!(params.get("w").unwrap(), "1080");
+    }
+
+    fn cache_entry(root: &Path, project: &str, key: &str, source: &str) {
+        let dir = cache_dir_for(root, project);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{key}.webp")), b"transform").unwrap();
+        std::fs::write(
+            dir.join(format!("{key}.json")),
+            serde_json::json!({"source": source}).to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn purge_evicts_transforms_and_honours_the_tag_filter() {
+        let root = tempfile::tempdir().unwrap();
+        cache_entry(root.path(), "demo", "aaaa", "/hero.png");
+        cache_entry(root.path(), "demo", "bbbb", "/logo.svg");
+        cache_entry(root.path(), "other", "cccc", "/hero.png");
+
+        // A tag evicts only the matching source (and its sidecar).
+        assert_eq!(purge(root.path(), "demo", Some("hero")).unwrap(), 1);
+        let dir = cache_dir_for(root.path(), "demo");
+        assert!(!dir.join("aaaa.webp").exists() && !dir.join("aaaa.json").exists());
+        assert!(dir.join("bbbb.webp").exists());
+
+        // A project purge clears the remainder without touching other projects.
+        assert_eq!(purge(root.path(), "demo", None).unwrap(), 1);
+        assert_eq!(purge(root.path(), "other", None).unwrap(), 1);
+        // Revalidating an absent project is a no-op, not an error.
+        assert_eq!(purge(root.path(), "absent", None).unwrap(), 0);
     }
 }
