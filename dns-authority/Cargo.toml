@@ -1,0 +1,31 @@
+[package]
+name = "mc-dns-authority"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MobileCloud sovereign authoritative DNS server — replaces Cloudflare DNS (GeoDNS + management API)"
+
+[lib]
+name = "mc_dns_authority"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mc-dns-authority"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "io-util"] }
+axum = "0.7"
+tower-http = { version = "0.6", features = ["trace"] }
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

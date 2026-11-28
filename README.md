@@ -5,7 +5,7 @@
 ### **The Autonomous Smartphone Edge Cloud & Institutional Proof-of-Reserve Protocol**
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-363%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-413%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 [![Rust](https://img.shields.io/badge/Rust-1.100-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![Android](https://img.shields.io/badge/Android-API%2030--35-3ddc84?style=for-the-badge&logo=android&logoColor=white)](android-app)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7f52ff?style=for-the-badge&logo=kotlin&logoColor=white)](android-app)
@@ -22,6 +22,7 @@
 [![Ed25519](https://img.shields.io/badge/Ed25519-232F3E?style=for-the-badge&logo=gnubash&logoColor=white)](core-engine)
 [![Edge Tunnel](https://img.shields.io/badge/Edge_Tunnel-yamux_%2B_WSS-6E40C9?style=for-the-badge&logo=websocket&logoColor=white)](edge/mobilecloud-tunnel)
 [![Edge Shield](https://img.shields.io/badge/Edge_Shield-WAF_%2B_Rate_Limit-0A3069?style=for-the-badge&logo=shield&logoColor=white)](edge/mobilecloud-shield)
+[![Sovereign DNS](https://img.shields.io/badge/Sovereign_DNS-RFC_1035_Authority_%2B_GeoDNS-2ea44f?style=for-the-badge&logo=rust&logoColor=white)](dns-authority)
 
 <br/>
 
@@ -54,6 +55,7 @@ The web console and the Android app are two synchronized clients of one backend:
 | Proof of reserve | The control plane stores the Rust kernel's reconciliation output **read-only** and reports an explicit unverified state when no attestation exists; it never computes a ratio itself. Verified against the Stellar **testnet**. Custody and CPA attestation are `NOT_ESTABLISHED`. |
 | On-device AI/ML inference (ONNX, TFLite, NPU) | **Not implemented.** No inference code exists in this repository. |
 | Fleet mesh | **Node-management slice implemented** in the `fleet-mesh` crate: enrollment, Ed25519 device identity, replay-protected signed heartbeats, revocation, liveness sweeps, capability/energy telemetry with measurement provenance, and deterministic resource-aware placement, behind a fail-closed authenticated API. **Not yet implemented:** peer discovery, device-to-device transport (NAT traversal/encryption), load balancing, replication, distributed job orchestration, and dashboard wiring. No device-to-device traffic has been exercised on real hardware. |
+| Sovereign DNS authority | **Built, tested, not deployed.** `dns-authority/` (`mc-dns-authority`) is a self-contained authoritative DNS server: a hand-rolled RFC 1035/3596/2782/6844 wire codec with name compression, zone and record storage, authoritative resolution (REFUSED for zones we do not own; NODATA and NXDOMAIN are distinct and both carry a SOA), GeoDNS PoP selection for `proxied` A records, a Cloudflare-shaped management API on `:8053`, UDP/TCP DNS listeners on `:53`, and Prometheus counters. 50 unit tests, including a live loopback UDP round-trip. **Not done:** DNSSEC signing, zone transfer (AXFR/IXFR), BGP/Anycast announcement, a replicated store, and any production traffic. `furlpay.com` is still served by the third-party DNS provider until a zone is deliberately cut over. |
 | Billing & payments | **Not implemented.** Usage is metered (append-only counters per meter), but there is no payment provider, invoicing, or charging. |
 | Hardware battery bypass, energy figures, "zero-millisecond UPS" | **Not claimed.** No measurement in this repository supports them. |
 
@@ -289,6 +291,20 @@ A passkey is the primary factor on every surface; the password remains only as t
 
 See [docs/FURLPAY-DEPLOYMENT.md](docs/FURLPAY-DEPLOYMENT.md).
 
+### 15. Sovereign DNS Authority (`dns-authority`)
+
+The platform's current edge relies on a third-party authoritative DNS provider. The `mc-dns-authority` crate is the first layer of removing that dependency: a DNS server that MobileCloud owns end to end, from the wire codec upward.
+
+* **Hand-rolled wire codec, no resolver library in the hot path**: `wire.rs` implements RFC 1035 §4 message parsing and encoding — including name compression on output — plus the rdata for A, AAAA, CNAME, MX, TXT, NS, SRV, CAA and SOA (RFC 3596, RFC 2782, RFC 6844). `ANY` is accepted; EDNS(0) presence widens the UDP budget to 1232 bytes. Tests cover the codec directly, not through a dependency.
+* **Honest negative answers**: a name that exists but holds no record of the requested type answers `NOERROR` with an empty answer section (NODATA); a name that does not exist answers `NXDOMAIN`; a query for a zone we are not authoritative for answers `REFUSED` rather than inventing an answer. Both negative outcomes carry the zone's SOA so resolvers can cache them, and the SOA is synthesised when the zone does not define one.
+* **GeoDNS**: a `proxied` A record answers with the edge PoP nearest the client — resolved from a CIDR-to-region table — instead of the record's literal value, so the origin address is never handed to a random resolver. CNAME chains are followed only while the target stays inside our own zones, with a bounded depth.
+* **Cloudflare-shaped management API (`:8053`)**: `GET/POST /api/v1/dns/zones`, `…/zones/:zone/records`, `PUT`/`DELETE …/records/:id`, and `GET /api/v1/dns/health`. The JSON shape mirrors the DNS API it replaces so existing tooling only changes its base URL. A name may be relative (`auth`) or absolute (`auth.furlpay.com`); both collapse to the same record. Every route except the health probe and `/metrics` is gated behind a bearer token when one is configured.
+* **Crash-safe state**: a record is upserted by id *or* by its natural key `(zone, name, type, value)`, and the JSON snapshot is written to a temporary file and renamed, so an interrupted write can never leave a torn store.
+* **DNS on `:53` (UDP and TCP)**: UDP answers that would exceed the budget are truncated with the `TC` bit set and their sections emptied, which tells the client to retry over TCP; a TCP answer carries a two-byte length prefix.
+* **Observability**: dependency-free Prometheus text on `/metrics` — query, answer, refusal, NXDOMAIN, SERVFAIL, malformed, truncation and transport counters, plus a per-qtype/per-rcode breakdown.
+
+Everything is configured from the environment (`MC_DNS_UDP`, `MC_DNS_TCP`, `MC_DNS_API`, `MC_DNS_STORE`, `MC_DNS_DEFAULT_REGION`, `MC_DNS_API_TOKEN`). This is **not** a drop-in replacement for a global anycast network: there is no DNSSEC signing, no zone transfer, no BGP announcement, and no replication. See the release-status table above for the honest boundary.
+
 ## System Architecture
 
 ```mermaid
@@ -418,6 +434,7 @@ graph TD
         SHIELD["edge/mobilecloud-shield (lib)<br/>• IP Blocklist (CrowdSec JSON)<br/>• Sliding-Window Rate Limiter<br/>• Regex WAF (traversal/SQLi/XSS/CMDi)"]
         FLEET["fleet-mesh (lib)<br/>• Node Registry + Revocation<br/>• Ed25519 Device Identity<br/>• Replay-Protected Heartbeats<br/>• Resource-Aware Placement"]
         CLICRATE["cli (bin: mobilecloud)<br/>• Device Grant + PKCE Login<br/>• Scoped Token Refresh<br/>• Device & Session Revocation"]
+        DNSAUTH["dns-authority (bin/lib: mc-dns-authority)<br/>• Hand-Rolled RFC 1035 Wire Codec<br/>• Authoritative Resolver + Zone Store<br/>• GeoDNS PoP Selection<br/>• Cloudflare-Shaped DNS API :8053<br/>• UDP/TCP :53 + Prometheus Metrics"]
 
         subgraph Tools["Workspace Tools"]
             ATTESTOR["tools/por-attestor<br/>Pre-sorted 5-Key Ed25519 Signer"]
@@ -450,6 +467,7 @@ graph TD
     CORE --> TRADING
     FLEET <-->|Enrollment · signed heartbeats| ANDROID
     FLEET -.->|node inventory| DASHBOARD
+    DNSAUTH -.->|"management API :8053 (not yet wired to the Domains view)"| DASHBOARD
 ```
 
 ---
@@ -480,6 +498,7 @@ k6 run -e TARGET=https://your.edge.host benchmarks/k6-load-test.js
 | **`trading-engine`** | 17 tests | Arbitrage profitability checks, integer-exact fee calculations, 4 risk invariants (atomic reverts, 2.5% max exposure, 15 bps slippage, 20% T+1 buffer). |
 | **`mobilecloud-tunnel`** | 7 tests | Ed25519 handshake sign → verify round-trip, `Host`-to-service-name routing (subdomain, nested subdomain, bare domain, unknown domain), and raw HTTP response parsing (with and without a body). |
 | **`mobilecloud-shield`** | 11 tests | Post-percent-decode WAF matching (SQL injection, path traversal, XSS) with a clean-request allow, sliding-window rate-limit admission, CrowdSec-JSON blocklist load/add/check/expiry-prune, and client-IP extraction from `X-Forwarded-For` / `X-Real-IP` with loopback fallback. |
+| **`mc-dns-authority`** | 50 tests | Wire codec round-trips (parse → encode with name compression), label and name length limits, TXT chunking, and A/AAAA/CNAME/MX/TXT/NS/SRV/CAA/SOA rdata parsing; a name that exists without the queried type answers NODATA (NOERROR + SOA) while an unknown name answers NXDOMAIN, and both carry the SOA; a query for a zone we do not own is REFUSED with no zone echoed; a CNAME chain is followed only while it stays inside our zones and is bounded; a CAA record set restricts issuance to the named CA while an empty set leaves it unrestricted; a `proxied` A record answers with the nearest edge PoP instead of its literal value; the store upserts by id *and* by the natural key `(zone, name, type, value)` and its JSON snapshot is written atomically (temp file + rename); the management API accepts relative and absolute record names, normalises types to upper case, rejects an invalid rdata value, refuses a duplicate zone with a conflict, and gates the zone routes behind a bearer token while leaving the health probe open; a UDP answer over the budget sets `TC` and empties every section; and a real loopback UDP query round-trips end to end. |
 | **`fleet-mesh`** | 43 tests | Ed25519 device-identity sign → verify round-trip and fail-closed verification of malformed keys/signatures; constant-time token comparison; strictly-increasing heartbeat sequence numbers that reject replays, gaps and unknown/revoked nodes; enrollment-token and operator-bearer authorization (401 on any missing, malformed, or wrong credential); deterministic resource-aware node selection (cores → RAM → storage → id); telemetry that refuses an `Unsupported` measurement carrying data and rejects battery > 100% or used > total; liveness classification and stale/offline sweeps; enrollment idempotency per device public key. |
 | **`por-xdr-toolkit`** | 4 tests | Protocol 30 XDR encoding/decoding, RFC 4506 `Option<ScVec>` presence-flag alignment. |
 | **`apps/web-dashboard`** | 92 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. Authentication: a device grant issues a scoped CLI token once after approval and is refused before it; refresh tokens rotate and a replayed token revokes the family; a `cli:full` bearer can revoke devices and sessions but cannot mutate the account; QR login reaches `APPROVED` only through the phone's signature over the browser's challenge and the challenge is single use; WebAuthn options are bound to the console's RP id and require user verification; the risk engine blocks impossible travel and scores a new country and address as `medium`. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Platform services: a function runs inside a `node:vm` context with no `require`/`process`/`fetch`/timers and is rejected when over the source or output byte cap or the 250 ms timeout; a workflow threads each step's output into the next and stops at the first failure; a webhook delivery is queued once per subscriber in the event's own transaction, signed HMAC-SHA256, backoff-capped at 5 attempts, and refused against loopback/private targets; usage counters append per meter; a PoR attestation is validated and stored read-only, and a missing attestation reports `unverified`. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
@@ -492,7 +511,7 @@ k6 run -e TARGET=https://your.edge.host benchmarks/k6-load-test.js
 | **`mobilecloud-cli`** | 8 tests | PKCE S256 against the RFC 7636 test vector, query decoding, UTC timestamp and relative-time formatting, table truncation, server-URL validation (HTTPS only except loopback, no credentials/path/query), and a credentials-file round trip with the profile lifecycle. |
 | **`web-cloudshell`** | `tsc --noEmit` + `vite build` | Type-checked and bundled; the WebGL Xterm.js client, files panel, and preview picker are verified by a passing build, not by an automated suite. |
 
-**363 tests** in total (Rust default members `183` + `por-verifier` `25` + dashboard `151` + `por-xdr-toolkit` `4`).
+**413 tests** in total (Rust default members `233` + `por-verifier` `25` + dashboard `151` + `por-xdr-toolkit` `4`).
 
 ```bash
 # Rust workspace (default members)
@@ -530,7 +549,7 @@ node scripts/integrity-manifest.mjs
 git clone https://github.com/Ashutosh0x/mobilecloud-platform.git
 cd mobilecloud-platform
 
-cargo test                      # 183 tests in the default members
+cargo test                      # 233 tests in the default members
 cargo test -p por-verifier      # 25 contract tests
 cd apps/web-dashboard && npm test && cd ../..   # 151 dashboard tests
 ```
@@ -668,6 +687,6 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 **MobileCloud & FurlPay** — one account, one data model, one durable event log.
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-363%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-413%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 
 </div>
