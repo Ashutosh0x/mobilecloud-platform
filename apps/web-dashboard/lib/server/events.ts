@@ -52,6 +52,22 @@ export const EVENT_TYPES = [
   "device.connected",
   "device.disconnected",
   "device.updated",
+  // Domain lifecycle. Each of the three independent signals (DNS, SSL, Health)
+  // and every administrative transition is appended to the outbox in the same
+  // transaction as the status change, so the web and Android clients converge
+  // without polling and a dropped frame can never lose a verdict.
+  "domain.created",
+  "domain.dns_pending",
+  "domain.dns_verified",
+  "domain.dns_failed",
+  "domain.ssl_provisioning",
+  "domain.ssl_active",
+  "domain.ssl_failed",
+  "domain.ssl_renewing",
+  "domain.ssl_renewed",
+  "domain.health_changed",
+  "domain.deleted",
+  "domain.suspended",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];

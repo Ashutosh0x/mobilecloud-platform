@@ -3,7 +3,8 @@ import { mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { CSRF_COOKIE, CSRF_HEADER } from "../csrf.ts";
-import type { RangeKey, User } from "../types.ts";
+import type { DnsSignal, Domain, DomainLastError, DomainPropagation, HealthSignal, RangeKey, SslSignal, User, VerificationMethod } from "../types.ts";
+import { deriveStatus } from "../domain-status.ts";
 import { BUILDER_DISABLED, builderConfig, dispatchDeploy, dispatchRollback, probeBuilder } from "./builder.ts";
 import { ROLES, hasPermission, normalizeRole, roleFor, viewerMayMutate } from "./rbac.ts";
 import { dataRoot, isRetiredPassword, newId, openDb, tokenHash, verifyPassword } from "./db.ts";
@@ -52,6 +53,8 @@ import { insertAttestation, porState, validateAttestation } from "./por.ts";
 import { approveFromBrowser, approvePairing, closePairing, createPairing, expireStale, listDevices, markAwaitingApproval, publicPairing, readPairing, renameDevice, revokeDevice, scanPairing, scanProofMatches, secretMatches } from "./pairing.ts";
 import { encodePairingTicket, renderPairingQr } from "./qr.ts";
 import { renderLoginQr } from "./qr.ts";
+import { checkCname, checkTxtToken, detectDnsProvider } from "./dns.ts";
+import { validateHostname } from "./domain-validation.ts";
 
 const COOKIE = "mc_session";
 const WEEK = 7 * 24 * 3600 * 1000;
@@ -2404,23 +2407,193 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     }
   }
 
+  // ---- Domain configuration lifecycle -------------------------------------
+  //
+  // Adding a domain only stores intent plus the DNS instructions the operator
+  // must follow; nothing here claims DNS, SSL or health has succeeded. Those
+  // three signals are updated solely by verification (and, in Phase 2, the
+  // Cloudflare integration), and the lifecycle status is always *derived* from
+  // them, never written as a fixed string.
+
+  if (key === "POST domains/detect-provider") {
+    const input = await body(req, 8 * 1024);
+    const check = validateHostname(str(input.domain));
+    if (!check.ok) return { response: json({ error: check.error }, 400), status: 400, owner };
+    const detection = await detectDnsProvider(check.host);
+    return {
+      response: json({
+        detected: detection.detected,
+        domain: check.host,
+        provider: detection.provider
+          ? { id: detection.provider.id, name: detection.provider.name, logo: detection.provider.logo, autoConfig: detection.provider.autoConfig, zoneConnected: false, zoneId: null }
+          : null,
+        nameservers: detection.nameservers,
+        existingRecords: [],
+        error: detection.error,
+        note: detection.provider?.autoConfig
+          ? "Automatic record configuration is not enabled in this build. Add the records shown, then verify."
+          : "Add the DNS records shown for this domain, then run verification.",
+      }),
+      status: 200,
+      owner,
+    };
+  }
+
+  if (key === "GET domains") {
+    return { response: json({ domains: listDomains(owner) }), status: 200, owner };
+  }
+
   if (key === "POST domains") {
     const input = await body(req);
-    const host = str(input.host).toLowerCase();
-    if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(host)) return { response: json({ error: "Enter a hostname like app.example.com" }, 400), status: 400, owner };
+    const existing = (db.prepare("SELECT host FROM domains WHERE owner_id = ?").all(owner) as { host: string }[]).map((row) => row.host);
+    const check = validateHostname(str(input.host), existing);
+    if (!check.ok) return { response: json({ error: check.error }, 400), status: 400, owner };
     const project = db.prepare("SELECT id FROM projects WHERE owner_id = ? AND name = ?").get(owner, str(input.project)) as { id: string } | undefined;
     if (!project) return { response: json({ error: "Project not found" }, 404), status: 404, owner };
-    const detail = "Saved locally. No DNS provider is configured, so no records were published.";
+
+    const requestedMethod = str(input.verificationMethod);
+    const verificationMethod: VerificationMethod = (["cname", "txt", "http", "auto"] as const).includes(requestedMethod as VerificationMethod)
+      ? (requestedMethod as VerificationMethod)
+      : "cname";
+
+    const detection = await detectDnsProvider(check.host);
+    const tunnelTarget = domainTunnelTarget();
+    const verificationToken = `mc-verify=${randomBytes(9).toString("hex")}`;
+    const detail = tunnelTarget
+      ? `Add a CNAME for ${check.host} pointing at ${tunnelTarget}, then verify.`
+      : "Saved. This deployment has not published a tunnel target, so the CNAME value is not known yet.";
     const id = newId();
+    const now = Date.now();
     tx(db, () => {
       db.prepare(
-        "INSERT INTO domains (id, owner_id, project_id, host, status, detail, created_at) VALUES (?, ?, ?, ?, 'recorded', ?, ?)",
-      ).run(id, owner, project.id, host, detail, Date.now());
-      publish(db, owner, "configuration.updated", id, { resource: "domain", id, host, projectId: project.id, status: "recorded" });
+        `INSERT INTO domains (id, owner_id, project_id, host, status, detail, created_at, dns_provider, dns_status, ssl_status, health_status, tunnel_target, verification_token, verification_method, updated_at)
+         VALUES (?, ?, ?, ?, 'pending_dns', ?, ?, ?, 'pending', 'none', 'unknown', ?, ?, ?, ?)`,
+      ).run(id, owner, project.id, check.host, detail, now, detection.provider?.id ?? null, tunnelTarget, verificationToken, verificationMethod, now);
+      publish(db, owner, "domain.created", id, { domainId: id, host: check.host, project: str(input.project) });
     });
-    log(owner, "info", "domains", `recorded ${host}`);
-    return { response: json({ ok: true }), status: 201, owner };
+    log(owner, "info", "domains", `added ${check.host}`);
+    const created = readDomain(db, owner, id);
+    return { response: json({ ok: true, domain: created ? rowToDomain(created) : null }), status: 201, owner };
   }
+
+  if (method === "GET" && parts[0] === "domains" && parts[1] && parts.length === 2) {
+    const row = readDomain(db, owner, parts[1]);
+    if (!row) return { response: json({ error: "Domain not found" }, 404), status: 404, owner };
+    return { response: json({ domain: rowToDomain(row) }), status: 200, owner };
+  }
+
+  if (method === "GET" && parts[0] === "domains" && parts[1] && parts[2] === "certificate") {
+    const row = readDomain(db, owner, parts[1]);
+    if (!row) return { response: json({ error: "Domain not found" }, 404), status: 404, owner };
+    const domain = rowToDomain(row);
+    return {
+      response: json({
+        host: domain.host,
+        sslStatus: domain.sslStatus,
+        sslExpiresAt: domain.sslExpiresAt,
+        sslIssuer: domain.sslIssuer,
+        tunnelTarget: domain.tunnelTarget,
+        note: domain.sslStatus === "none" ? "No certificate has been issued for this host yet." : null,
+      }),
+      status: 200,
+      owner,
+    };
+  }
+
+  if (method === "GET" && parts[0] === "domains" && parts[1] && parts[2] === "propagation") {
+    const row = readDomain(db, owner, parts[1]);
+    if (!row) return { response: json({ error: "Domain not found" }, 404), status: 404, owner };
+    return { response: json({ propagation: parseDomainJson<DomainPropagation>(row.propagation) }), status: 200, owner };
+  }
+
+  if (method === "PUT" && parts[0] === "domains" && parts[1] && parts.length === 2) {
+    const row = readDomain(db, owner, parts[1]);
+    if (!row) return { response: json({ error: "Domain not found" }, 404), status: 404, owner };
+    const input = await body(req);
+    const projectName = str(input.project);
+    let projectId: string | null = null;
+    if (projectName) {
+      const project = db.prepare("SELECT id FROM projects WHERE owner_id = ? AND name = ?").get(owner, projectName) as { id: string } | undefined;
+      if (!project) return { response: json({ error: "Project not found" }, 404), status: 404, owner };
+      projectId = project.id;
+    }
+    const requestedMethod = str(input.verificationMethod);
+    const verificationMethod = (["cname", "txt", "http", "auto"] as const).includes(requestedMethod as VerificationMethod)
+      ? requestedMethod
+      : null;
+    if (!projectId && !verificationMethod) return { response: json({ error: "Nothing to update" }, 400), status: 400, owner };
+    const now = Date.now();
+    tx(db, () => {
+      if (projectId) db.prepare("UPDATE domains SET project_id = ?, updated_at = ? WHERE owner_id = ? AND id = ?").run(projectId, now, owner, row.id);
+      if (verificationMethod) db.prepare("UPDATE domains SET verification_method = ?, updated_at = ? WHERE owner_id = ? AND id = ?").run(verificationMethod, now, owner, row.id);
+    });
+    const updated = readDomain(db, owner, row.id);
+    return { response: json({ ok: true, domain: updated ? rowToDomain(updated) : null }), status: 200, owner };
+  }
+
+  if (method === "POST" && parts[0] === "domains" && parts[1] && parts[2] === "verify") {
+    const row = readDomain(db, owner, parts[1]);
+    if (!row) return { response: json({ error: "Domain not found" }, 404), status: 404, owner };
+    const domain = rowToDomain(row);
+
+    let dnsStatus: DnsSignal;
+    let detail: string;
+    let lastError: DomainLastError | null = null;
+
+    const useTxt = domain.verificationMethod === "txt" || (domain.verificationMethod === "auto" && !domain.tunnelTarget);
+    if (useTxt) {
+      if (!domain.verificationToken) {
+        dnsStatus = "pending";
+        detail = "This domain has no verification token yet.";
+      } else {
+        const check = await checkTxtToken(domain.host, domain.verificationToken);
+        dnsStatus = check.status;
+        detail = dnsStatus === "verified"
+          ? "Ownership token found. DNS is verified."
+          : dnsStatus === "misconfigured"
+            ? `A TXT record exists but does not carry the expected token (found ${check.found.length}).`
+            : "No ownership TXT record was found yet.";
+        if (dnsStatus === "misconfigured") lastError = { code: "CNAME_WRONG_TARGET", message: detail, at: Date.now() };
+      }
+    } else {
+      const check = await checkCname(domain.host, domain.tunnelTarget);
+      dnsStatus = check.status;
+      if (dnsStatus === "verified") {
+        detail = "CNAME points at the tunnel. DNS is verified.";
+      } else if (dnsStatus === "misconfigured") {
+        if (check.conflict) {
+          detail = `An ${check.conflict} record exists for this hostname. Remove it before adding a CNAME.`;
+          lastError = { code: "A_RECORD_CONFLICT", message: detail, at: Date.now() };
+        } else {
+          detail = `CNAME points to ${check.found ?? "an unknown target"}, expected ${check.expected ?? "the tunnel target"}.`;
+          lastError = { code: "CNAME_WRONG_TARGET", message: detail, at: Date.now() };
+        }
+      } else if (dnsStatus === "missing") {
+        detail = check.expected ? `No CNAME record found. Add a CNAME pointing at ${check.expected}.` : "No CNAME record found yet.";
+        lastError = check.expected ? { code: "CNAME_MISSING", message: detail, at: Date.now() } : null;
+      } else {
+        detail = "DNS lookup is still pending; no record was visible yet.";
+      }
+    }
+
+    const now = Date.now();
+    const verifiedAt = dnsStatus === "verified" ? now : row.dns_verified_at;
+    const healthStatus = (row.health_status || "unknown") as HealthSignal;
+    const sslStatus = (row.ssl_status || "none") as SslSignal;
+    const status = deriveStatus({ dnsStatus, sslStatus, healthStatus, sslExpiresAt: row.ssl_expires_at, now, suspended: row.status === "suspended", deleting: false });
+    const propagation: DomainPropagation = { regions: [{ name: "public-resolver", resolved: dnsStatus === "verified" }], lastCheckedAt: now };
+    tx(db, () => {
+      db.prepare(
+        "UPDATE domains SET dns_status = ?, detail = ?, status = ?, dns_verified_at = ?, propagation = ?, last_error = ?, updated_at = ? WHERE owner_id = ? AND id = ?",
+      ).run(dnsStatus, detail, status, verifiedAt, JSON.stringify(propagation), lastError ? JSON.stringify(lastError) : null, now, owner, row.id);
+      if (dnsStatus === "verified") publish(db, owner, "domain.dns_verified", row.id, { domainId: row.id, verifiedAt: now });
+      else if (dnsStatus === "misconfigured") publish(db, owner, "domain.dns_failed", row.id, { domainId: row.id, error: detail });
+      else publish(db, owner, "domain.dns_pending", row.id, { domainId: row.id });
+    });
+    const updated = readDomain(db, owner, row.id);
+    return { response: json({ ok: true, domain: updated ? rowToDomain(updated) : null }), status: 200, owner };
+  }
+
   if (method === "DELETE" && parts[0] === "domains" && parts[1]) {
     const existing = db.prepare("SELECT host FROM domains WHERE owner_id = ? AND id = ?").get(owner, parts[1]) as
       | { host: string }
@@ -2428,8 +2601,9 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     if (!existing) return { response: json({ error: "Domain not found" }, 404), status: 404, owner };
     tx(db, () => {
       db.prepare("DELETE FROM domains WHERE owner_id = ? AND id = ?").run(owner, parts[1]);
-      publish(db, owner, "configuration.updated", parts[1], { resource: "domain", id: parts[1], host: existing.host, deleted: true });
+      publish(db, owner, "domain.deleted", parts[1], { domainId: parts[1] });
     });
+    log(owner, "info", "domains", `removed ${existing.host}`);
     return { response: json({ ok: true }), status: 200, owner };
   }
 
@@ -3317,12 +3491,103 @@ function listDeployments(owner: string) {
   ).all(owner);
 }
 
-function listDomains(owner: string) {
-  return openDb().prepare(
-    `SELECT d.id, d.host, p.name AS project, d.status, d.detail
-     FROM domains d JOIN projects p ON p.id = d.project_id
-     WHERE d.owner_id = ? ORDER BY d.created_at DESC`,
-  ).all(owner);
+type DomainRow = {
+  id: string;
+  owner_id: string;
+  host: string;
+  project: string;
+  detail: string;
+  status: string;
+  dns_provider: string | null;
+  dns_status: string | null;
+  ssl_status: string | null;
+  health_status: string | null;
+  dns_verified_at: number | null;
+  ssl_expires_at: number | null;
+  ssl_issuer: string | null;
+  tunnel_target: string | null;
+  verification_token: string | null;
+  verification_method: string | null;
+  propagation: string | null;
+  last_error: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+/** The Cloudflare Tunnel target the platform routes through, when configured. */
+function domainTunnelTarget(): string | null {
+  const id = process.env.CLOUDFLARE_TUNNEL_ID?.trim();
+  return id ? `${id}.cfargotunnel.com` : null;
+}
+
+function parseDomainJson<T>(value: string | null): T | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Projects a database row onto the public `Domain` contract.
+ *
+ * The lifecycle `status` is always *derived* from the three independent signals
+ * so a stale stored value can never make the clients report a false success.
+ */
+function rowToDomain(row: DomainRow): Domain {
+  const now = Date.now();
+  const dnsStatus = (row.dns_status || "pending") as DnsSignal;
+  const sslStatus = (row.ssl_status || "none") as SslSignal;
+  const healthStatus = (row.health_status || "unknown") as HealthSignal;
+  return {
+    id: row.id,
+    host: row.host,
+    project: row.project,
+    status: deriveStatus({
+      dnsStatus,
+      sslStatus,
+      healthStatus,
+      sslExpiresAt: row.ssl_expires_at,
+      now,
+      suspended: row.status === "suspended",
+      deleting: row.status === "deleting",
+    }),
+    detail: row.detail,
+    dnsProvider: row.dns_provider,
+    dnsStatus,
+    sslStatus,
+    healthStatus,
+    dnsVerifiedAt: row.dns_verified_at,
+    sslExpiresAt: row.ssl_expires_at,
+    sslIssuer: row.ssl_issuer,
+    tunnelTarget: row.tunnel_target,
+    verificationToken: row.verification_token,
+    verificationMethod: (row.verification_method || "cname") as VerificationMethod,
+    propagation: parseDomainJson<DomainPropagation>(row.propagation),
+    lastError: parseDomainJson<DomainLastError>(row.last_error),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+const DOMAIN_COLUMNS = `d.id, d.owner_id, d.host, p.name AS project, d.detail, d.status,
+  d.dns_provider, d.dns_status, d.ssl_status, d.health_status,
+  d.dns_verified_at, d.ssl_expires_at, d.ssl_issuer, d.tunnel_target,
+  d.verification_token, d.verification_method, d.propagation, d.last_error,
+  d.created_at, d.updated_at`;
+
+function readDomain(db: DatabaseSync, owner: string, id: string): DomainRow | undefined {
+  return db.prepare(
+    `SELECT ${DOMAIN_COLUMNS} FROM domains d JOIN projects p ON p.id = d.project_id WHERE d.owner_id = ? AND d.id = ?`,
+  ).get(owner, id) as DomainRow | undefined;
+}
+
+function listDomains(owner: string): Domain[] {
+  const rows = openDb().prepare(
+    `SELECT ${DOMAIN_COLUMNS} FROM domains d JOIN projects p ON p.id = d.project_id WHERE d.owner_id = ? ORDER BY d.created_at DESC`,
+  ).all(owner) as DomainRow[];
+  return rows.map(rowToDomain);
 }
 
 function listDatabases(owner: string) {

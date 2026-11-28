@@ -26,12 +26,55 @@ export type Deployment = {
   createdAt: number;
 };
 
+/** Lifecycle phase derived from the three independent signals (see lib/domain-status.ts). */
+export type DomainStatus =
+  | "pending_dns" | "dns_verified" | "ssl_provisioning" | "active"
+  | "ssl_expiring" | "ssl_expired" | "dns_misconfigured"
+  | "suspended" | "deleting";
+
+/** Independent signal 1: does the DNS record point where we expect? */
+export type DnsSignal = "pending" | "verified" | "misconfigured" | "missing";
+/** Independent signal 2: the TLS certificate lifecycle. */
+export type SslSignal = "none" | "provisioning" | "active" | "renewing" | "expired" | "failed";
+/** Independent signal 3: is the origin actually serving? */
+export type HealthSignal = "ok" | "degraded" | "down" | "unknown";
+export type VerificationMethod = "cname" | "txt" | "http" | "auto";
+
+export type DomainErrorCode =
+  | "CNAME_MISSING" | "CNAME_WRONG_TARGET" | "A_RECORD_CONFLICT"
+  | "CAA_BLOCKS_CA" | "SSL_TIMEOUT" | "TUNNEL_UNREACHABLE"
+  | "NS_LOOKUP_FAILED" | "UNEXPECTED_DNS_CHANGE";
+
+export type DomainPropagation = {
+  regions: { name: string; resolved: boolean }[];
+  lastCheckedAt: number;
+};
+
+export type DomainLastError = { code: DomainErrorCode; message: string; at: number };
+
 export type Domain = {
   id: string;
   host: string;
   project: string;
-  status: "recorded";
+  status: DomainStatus;
   detail: string;
+  /** Detected authoritative DNS provider (Cloudflare, Route 53, …), or null when unknown. */
+  dnsProvider: string | null;
+  dnsStatus: DnsSignal;
+  sslStatus: SslSignal;
+  healthStatus: HealthSignal;
+  dnsVerifiedAt: number | null;
+  sslExpiresAt: number | null;
+  sslIssuer: string | null;
+  /** The CNAME target the host must point at (e.g. <id>.cfargotunnel.com). */
+  tunnelTarget: string | null;
+  /** Public DNS TXT challenge value; safe to display (never a secret). */
+  verificationToken: string | null;
+  verificationMethod: VerificationMethod;
+  propagation: DomainPropagation | null;
+  lastError: DomainLastError | null;
+  createdAt: number;
+  updatedAt: number;
 };
 
 export type DbFile = {

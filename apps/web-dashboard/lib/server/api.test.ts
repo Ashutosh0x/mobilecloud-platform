@@ -263,3 +263,43 @@ test("a fully configured engine receives the dispatch with its bearer token", as
   const recorded = openDb().prepare("SELECT status FROM deployments WHERE owner_id = ? AND project_id IN (?, ?)").all(userId, demo.id, other.id) as { status: string }[];
   assert.deepEqual(recorded.map((row) => row.status).sort(), ["failed", "queued"]);
 });
+
+test("the domain lifecycle keeps its three signals honest until DNS actually verifies", async () => {
+  const { userId, ...auth } = await login();
+  assert.ok(userId);
+  const project = await request("projects", "POST", { name: "furlpay-web", framework: "Next.js", repoUrl: "https://github.com/acme/furlpay.git" }, auth);
+  assert.equal(project.status, 201);
+
+  // A reserved hostname is refused with a message, before anything is stored.
+  const bad = await request("domains", "POST", { host: "localhost", project: "furlpay-web" }, auth);
+  assert.equal(bad.status, 400);
+
+  const added = await request("domains", "POST", { host: "app.furlpay-example.com", project: "furlpay-web" }, auth);
+  assert.equal(added.status, 201);
+  const { domain } = await added.json();
+  assert.equal(domain.status, "pending_dns");
+  assert.equal(domain.dnsStatus, "pending");
+  assert.equal(domain.sslStatus, "none");
+  assert.equal(domain.healthStatus, "unknown");
+  assert.equal(domain.verificationMethod, "cname");
+  assert.equal(domain.sslExpiresAt, null);
+
+  const list = await (await request("domains", "GET", undefined, auth)).json();
+  assert.ok(list.domains.some((row: { id: string }) => row.id === domain.id));
+
+  // With no published tunnel target the CNAME check cannot verify anything, so
+  // the status must stay pending — never upgraded on a signal that did not pass.
+  const verified = await request(`domains/${domain.id}/verify`, "POST", undefined, auth);
+  assert.equal(verified.status, 200);
+  const afterVerify = (await verified.json()).domain;
+  assert.equal(afterVerify.dnsStatus, "pending");
+  assert.equal(afterVerify.status, "pending_dns");
+
+  const updated = await request(`domains/${domain.id}`, "PUT", { verificationMethod: "txt" }, auth);
+  assert.equal(updated.status, 200);
+  assert.equal((await updated.json()).domain.verificationMethod, "txt");
+
+  assert.equal((await request(`domains/${domain.id}`, "DELETE", undefined, auth)).status, 200);
+  const remaining = await (await request("domains", "GET", undefined, auth)).json();
+  assert.ok(!remaining.domains.some((row: { id: string }) => row.id === domain.id));
+});

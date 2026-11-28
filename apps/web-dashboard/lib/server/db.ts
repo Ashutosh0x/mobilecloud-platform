@@ -45,7 +45,20 @@ CREATE TABLE IF NOT EXISTS domains (
   host TEXT NOT NULL,
   status TEXT NOT NULL,
   detail TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  dns_provider TEXT,
+  dns_status TEXT NOT NULL DEFAULT 'pending',
+  ssl_status TEXT NOT NULL DEFAULT 'none',
+  health_status TEXT NOT NULL DEFAULT 'unknown',
+  dns_verified_at INTEGER,
+  ssl_expires_at INTEGER,
+  ssl_issuer TEXT,
+  tunnel_target TEXT,
+  verification_token TEXT,
+  verification_method TEXT NOT NULL DEFAULT 'cname',
+  propagation TEXT,
+  last_error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS db_files (
   id TEXT PRIMARY KEY,
@@ -795,6 +808,42 @@ function migrate(db: DatabaseSync) {
       cache_key: "TEXT",
     });
     db.exec("INSERT INTO control_plane_migrations (version) VALUES (9)");
+  }
+  // v10 turns a domain record into a lifecycle: three independent signals
+  // (DNS, SSL, Health) plus the data needed to instruct and verify DNS.
+  // Domains stored under the old record-only model are migrated honestly —
+  // `recorded` becomes `pending_dns` with unknown signals, never a false
+  // "active". The migration is skippable-if-present and safe to re-run.
+  if (!db.prepare("SELECT 1 FROM control_plane_migrations WHERE version = 10").get()) {
+    addColumns(db, "domains", {
+      dns_provider: "TEXT",
+      dns_status: "TEXT NOT NULL DEFAULT 'pending'",
+      ssl_status: "TEXT NOT NULL DEFAULT 'none'",
+      health_status: "TEXT NOT NULL DEFAULT 'unknown'",
+      dns_verified_at: "INTEGER",
+      ssl_expires_at: "INTEGER",
+      ssl_issuer: "TEXT",
+      tunnel_target: "TEXT",
+      verification_token: "TEXT",
+      verification_method: "TEXT NOT NULL DEFAULT 'cname'",
+      propagation: "TEXT",
+      last_error: "TEXT",
+      updated_at: "INTEGER NOT NULL DEFAULT 0",
+    });
+    db.prepare(
+      `UPDATE domains
+         SET status = 'pending_dns',
+             dns_status = 'pending',
+             ssl_status = 'none',
+             health_status = 'unknown',
+             verification_method = 'cname'
+       WHERE status = 'recorded'`,
+    ).run();
+    // The new columns default to 0 on existing rows; a pre-v10 domain was last
+    // touched when it was created, so mirror `created_at` rather than stamping
+    // a fabricated time.
+    db.prepare("UPDATE domains SET updated_at = created_at WHERE updated_at = 0").run();
+    db.exec("INSERT INTO control_plane_migrations (version) VALUES (10)");
   }
 }
 

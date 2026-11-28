@@ -32,6 +32,57 @@ export type RealtimeEvent = {
   payload: Record<string, unknown>;
 };
 
+/** Every event type the domain lifecycle can emit (see the spec §11.2). */
+export const DOMAIN_EVENT_TYPES = [
+  "domain.created",
+  "domain.dns_pending",
+  "domain.dns_verified",
+  "domain.dns_failed",
+  "domain.ssl_provisioning",
+  "domain.ssl_active",
+  "domain.ssl_failed",
+  "domain.ssl_renewing",
+  "domain.ssl_renewed",
+  "domain.health_changed",
+  "domain.deleted",
+  "domain.suspended",
+] as const;
+
+export type DomainEventType = (typeof DOMAIN_EVENT_TYPES)[number];
+
+/**
+ * The domain payloads carried inside the standard envelope. Ordering,
+ * de-duplication (by `event_id`) and gap recovery (by `sequence`) are handled
+ * by the client below — this union only describes what a domain event means.
+ */
+export type DomainEvent =
+  | { type: "domain.created"; domainId: string; host: string; project: string }
+  | { type: "domain.dns_pending"; domainId: string }
+  | { type: "domain.dns_verified"; domainId: string; verifiedAt: number }
+  | { type: "domain.dns_failed"; domainId: string; error: string }
+  | { type: "domain.ssl_provisioning"; domainId: string }
+  | { type: "domain.ssl_active"; domainId: string; expiresAt: number }
+  | { type: "domain.ssl_failed"; domainId: string; error: string }
+  | { type: "domain.ssl_renewing"; domainId: string }
+  | { type: "domain.ssl_renewed"; domainId: string; expiresAt: number }
+  | { type: "domain.health_changed"; domainId: string; healthy: boolean }
+  | { type: "domain.deleted"; domainId: string }
+  | { type: "domain.suspended"; domainId: string; reason: string };
+
+const DOMAIN_TYPES: readonly string[] = DOMAIN_EVENT_TYPES;
+
+/** Narrows any envelope to a domain envelope without trusting the payload shape. */
+export function isDomainEvent(event: RealtimeEvent): event is RealtimeEvent & { event_type: DomainEventType } {
+  return DOMAIN_TYPES.includes(event.event_type);
+}
+
+/** The domain id a domain event refers to (`resource_id` first, payload fallback). */
+export function domainEventId(event: RealtimeEvent): string | null {
+  if (event.resource_id) return event.resource_id;
+  const value = event.payload?.domainId;
+  return typeof value === "string" ? value : null;
+}
+
 export type RealtimeState = {
   status: RealtimeStatus;
   accountId: string | null;

@@ -1,10 +1,11 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { Deployment } from "@/lib/types";
+import type { Deployment, Domain } from "@/lib/types";
 import { formatBytes } from "@/lib/format";
 import { useCloud } from "@/lib/store";
 import { ClientTime, Duration } from "./Time";
+import { DomainAnnouncer, DomainDnsCard, SignalTiles, StatusPill } from "./DomainDnsCard";
 
 function useFiltered<T>(rows: T[], pick: (row: T) => string) {
   const { state } = useCloud();
@@ -20,6 +21,39 @@ async function run(action: () => Promise<unknown>, setToast: (m: string | null) 
   } catch (error) {
     setToast(error instanceof Error ? error.message : "Request failed");
   }
+}
+
+/* A fast, inline mirror of the server's lib/server/domain-validation.ts. The
+ * server re-validates every hostname before storing it, so this exists only to
+ * give the operator feedback without a round-trip — never as the authority. */
+const HOST_LABEL = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+const RESERVED_SUFFIXES = [".local", ".localhost", ".internal", ".test", ".invalid", ".example", ".home", ".lan", ".onion"];
+
+function hostValidationMessage(raw: string, existing: string[]): string | null {
+  if (!raw.trim()) return null; // An untouched field is not yet an error.
+  const host = raw.trim().toLowerCase()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//, "")
+    .replace(/[/?#].*$/, "")
+    .replace(/:\d+$/, "")
+    .replace(/^\*\./, "")
+    .replace(/^\.+/, "")
+    .replace(/\.+$/, "");
+  if (!host) return "Enter a hostname like app.example.com.";
+  if (host.length > 253) return "A hostname cannot be longer than 253 characters.";
+  if (host.includes(" ")) return "A hostname cannot contain spaces.";
+  const labels = host.split(".");
+  if (labels.length < 2) return "Enter a full hostname like app.example.com.";
+  for (const label of labels) {
+    if (!label) return "A hostname cannot contain an empty label.";
+    if (label.length > 63) return "Each part must be 63 characters or fewer.";
+    if (!HOST_LABEL.test(label)) return "Use letters, digits and hyphens only, and do not start or end a part with a hyphen.";
+  }
+  if (!/^[a-z]{2,}$/.test(labels[labels.length - 1])) return "Enter a hostname with a valid public suffix, like .com.";
+  if (host === "localhost" || host === "local" || RESERVED_SUFFIXES.some((suffix) => host === suffix.slice(1) || host.endsWith(suffix))) {
+    return "That hostname is reserved and cannot be configured.";
+  }
+  if (existing.some((candidate) => candidate.trim().toLowerCase() === host)) return `${host} is already configured on this account.`;
+  return null;
 }
 
 export function ProjectsView() {
@@ -125,47 +159,123 @@ export function DeploymentsView() {
 }
 
 export function DomainsView() {
-  const { state, call, setToast } = useCloud();
+  const { state, call, setToast, refresh } = useCloud();
   const [host, setHost] = useState("");
   const [selectedProject, setProject] = useState("");
   const [saving, setSaving] = useState(false);
-  const project = state.projects.find((item) => item.name === selectedProject)?.name ?? state.projects[0]?.name ?? "";
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [verifyingId, setVerifyingId] = useState<string | null>(null);
   const [drop, setDrop] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState<string | null>(null);
+  const project = state.projects.find((item) => item.name === selectedProject)?.name ?? state.projects[0]?.name ?? "";
   const rows = useFiltered(state.domains, (d) => `${d.host} ${d.project}`);
+  const typed = host.trim().toLowerCase();
+  const clientError = hostValidationMessage(typed, state.domains.map((d) => d.host));
+  const apexHint = !clientError && typed.split(".").length === 2;
+  const canSubmit = Boolean(project) && !clientError && !saving;
+
+  async function verifyDomain(id: string) {
+    setVerifyingId(id);
+    await run(async () => {
+      const result = await call(`domains/${id}/verify`, { method: "POST" });
+      const domain = result && typeof result === "object" && "domain" in result ? (result as { domain: Domain }).domain : null;
+      if (domain) setAnnouncement(domain.dnsStatus === "verified" ? `${domain.host} DNS verified.` : `${domain.host} is still ${domain.status.replace(/_/g, " ")}.`);
+      return result;
+    }, setToast, "DNS re-checked").finally(() => setVerifyingId(null));
+  }
+
   return (
     <>
+      <DomainAnnouncer message={announcement} />
       <header className="page-head">
         <div>
           <h2>Domains</h2>
-          <p>Hostnames are saved locally. No DNS provider is configured, so nothing is published.</p>
+          <p>Point a hostname at this platform’s tunnel, then verify. DNS, SSL and health are reported separately, and only after each one actually passes.</p>
         </div>
         <form className="form-row" onSubmit={(e) => {
           e.preventDefault();
-          if (!project || saving) return;
+          if (!canSubmit) return;
           setSaving(true);
           void run(async () => {
-            const result = await call("domains", { method: "POST", body: JSON.stringify({ host, project }) });
-            setHost((value) => value === host ? "" : value);
+            const result = await call("domains", { method: "POST", body: JSON.stringify({ host: typed, project }) });
+            setHost((value) => value.trim().toLowerCase() === typed ? "" : value);
             return result;
-          }, setToast, "Hostname recorded").finally(() => setSaving(false));
+          }, setToast, "Domain added").finally(() => setSaving(false));
         }}>
-          <input aria-label="Hostname" placeholder="app.example.com" value={host} onChange={(e) => setHost(e.target.value)} required />
+          <input
+            aria-label="Hostname"
+            placeholder="app.example.com"
+            value={host}
+            onChange={(e) => setHost(e.target.value)}
+            aria-invalid={clientError ? true : undefined}
+            aria-describedby={clientError ? "domain-host-error" : apexHint ? "domain-host-hint" : undefined}
+            required
+          />
           <select aria-label="Project" value={project} onChange={(e) => setProject(e.target.value)}>
             {state.projects.map((p) => <option key={p.id}>{p.name}</option>)}
           </select>
-          <button className="primary" type="submit" disabled={!project || saving}>{saving ? "Saving…" : "Record"}</button>
+          <button className="primary" type="submit" disabled={!canSubmit}>{saving ? "Adding…" : "Add domain"}</button>
         </form>
       </header>
-      <article className="panel">
-        {rows.map((d) => (
-          <div key={d.id} className="list-row" style={{ gridTemplateColumns: "1fr auto" }}>
-            <div><div className="name">{d.host}</div><div className="sub">{d.project} · {d.status} · {d.detail}</div></div>
-            <button className="danger" type="button" onClick={() => setDrop(d.id)}>Remove</button>
-          </div>
-        ))}
-        {rows.length === 0 && <p className="empty">No hostnames recorded.</p>}
-      </article>
-      {drop && <Confirm title="Remove this hostname?" body="Only the local record is deleted." onCancel={() => setDrop(null)} onYes={() => { const id = drop; setDrop(null); run(() => call(`domains/${id}`, { method: "DELETE" }, (s) => ({ domains: s.domains.filter((d) => d.id !== id) })), setToast, "Hostname removed"); }} />}
+      {clientError
+        ? <p className="banner bad" id="domain-host-error" role="alert">{clientError}</p>
+        : apexHint && <p className="sub" id="domain-host-hint">That looks like an apex domain. Add a subdomain such as www or app, or point the apex through the Cloudflare integration.</p>}
+
+      {state.status === "loading" && <article className="panel"><p className="empty">Loading domains…</p></article>}
+      {state.status === "error" && (
+        <p className="banner bad" role="alert">
+          Domains could not be loaded. <button className="ghost" type="button" onClick={() => void refresh()}>Retry</button>
+        </p>
+      )}
+
+      {state.status === "ready" && (
+        <article className="panel">
+          {rows.map((d) => (
+            <div key={d.id} className="list-row domain-row" style={{ gridTemplateColumns: "1fr" }}>
+              <div className="domain-row-head">
+                <div>
+                  <div className="name">{d.host}</div>
+                  <div className="sub">{d.project} · added <ClientTime ts={d.createdAt} /></div>
+                </div>
+                <StatusPill status={d.status} />
+              </div>
+              <SignalTiles domain={d} />
+              <div className="form-row">
+                <button className="ghost" type="button" aria-expanded={openId === d.id} onClick={() => setOpenId((current) => current === d.id ? null : d.id)}>
+                  {openId === d.id ? "Hide records" : "Configure DNS"}
+                </button>
+                <button className="ghost" type="button" disabled={verifyingId === d.id} aria-busy={verifyingId === d.id} onClick={() => void verifyDomain(d.id)}>
+                  {verifyingId === d.id ? "Checking…" : "Verify DNS"}
+                </button>
+                <button className="danger" type="button" onClick={() => setDrop(d.id)}>Remove</button>
+              </div>
+              {openId === d.id && (
+                <DomainDnsCard
+                  domain={d}
+                  verifying={verifyingId === d.id}
+                  onVerify={() => void verifyDomain(d.id)}
+                  onCopied={(message) => { setAnnouncement(message); setToast(message); }}
+                />
+              )}
+            </div>
+          ))}
+          {rows.length === 0 && (
+            <div className="empty">
+              <p>No domains yet.</p>
+              <p className="sub">Add a hostname above to see the DNS records to publish.</p>
+            </div>
+          )}
+        </article>
+      )}
+
+      {drop && (
+        <Confirm
+          title="Remove this domain?"
+          body="The local record and its verification state are deleted. DNS records you added at your provider are not touched."
+          onCancel={() => setDrop(null)}
+          onYes={() => { const id = drop; setDrop(null); run(() => call(`domains/${id}`, { method: "DELETE" }, (s) => ({ domains: s.domains.filter((d) => d.id !== id) })), setToast, "Domain removed"); }}
+        />
+      )}
     </>
   );
 }

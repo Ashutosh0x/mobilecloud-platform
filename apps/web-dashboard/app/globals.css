@@ -308,3 +308,38 @@ dialog.modal::backdrop { background: rgba(0,0,0,0.72); }
 .phone { max-width: 960px; margin: 0 auto; padding: 28px 16px 48px; }
 .phone .cards { margin-top: 12px; }
 ul { color: var(--muted); }
+
+/* Domain configuration. The three signals render as three separate tiles and
+ * are never merged: a live domain with a down origin keeps a red health tile
+ * beside a green DNS tile. Only the lifecycle pill summarises all three. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.break { word-break: break-all; overflow-wrap: anywhere; }
+.signal-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.signal {
+  display: grid; gap: 4px; justify-items: start;
+  padding: 10px; border: 1px solid var(--line); border-left-width: 3px;
+  border-radius: 10px; background: #141414;
+}
+.signal[data-tone="ok"] { border-left-color: var(--green); }
+.signal[data-tone="warn"] { border-left-color: var(--amber); }
+.signal[data-tone="bad"] { border-left-color: var(--red); }
+.signal[data-tone="neutral"] { border-left-color: var(--line); }
+.signal-name { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.signal-detail { font-size: 12px; color: var(--muted); }
+.domain-row { grid-template-columns: 1fr; align-items: stretch; }
+.domain-row-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.dns-card { margin-top: 4px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: #141414; display: grid; gap: 10px; }
+.dns-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.dns-card-head h4 { margin: 0; }
+.dns-card code { font-family: var(--mono); font-size: 12px; }
+.copy-btn { min-height: 36px; }
+@media (max-width: 640px) {
+  .signal-strip { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+  * { scroll-behavior: auto !important; }
+}
