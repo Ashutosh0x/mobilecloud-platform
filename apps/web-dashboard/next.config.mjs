@@ -3,6 +3,12 @@ const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   allowedDevOrigins: ["127.0.0.1"],
+  // Each instance writes its own build output. `next build` and `next dev`
+  // share one directory by default, so a production build replaces the dev
+  // server's chunk manifest and the running console answers 200 while every
+  // `/_next/static` asset 404s. `MOBILECLOUD_NEXT_DIST_DIR` selects the
+  // directory; `server/instance.mjs` derives it from the instance's port.
+  distDir: process.env.MOBILECLOUD_NEXT_DIST_DIR || ".next",
   async rewrites() {
     // The identity endpoints are implemented by the catch-all API route. These
     // rewrites give them the paths the standards name, so a relying party can

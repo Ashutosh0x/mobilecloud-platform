@@ -124,3 +124,60 @@ MOBILECLOUD_BOOTSTRAP_PASSWORD='a-password-of-at-least-12-characters' npm run de
 A local run needs no tunnel and no public origin, but a phone cannot reach it:
 the Android app only speaks HTTPS to a console it trusts. For a phone on the
 same network, use a tunnel to a hostname the device can resolve.
+
+## 8. Isolated local instances
+
+`next build` and `next dev` both write into the same output directory. When a
+production build runs while a development server is serving, the build
+replaces that server's chunk manifest: the HTML still answers `200`, but every
+`/_next/static` asset answers `404` and the console renders unstyled. Two
+development servers that share one directory collide the same way.
+
+Each instance therefore owns its own build directory, its own database and its
+own realtime gateway. `MOBILECLOUD_NEXT_DIST_DIR` selects the directory, and
+`apps/web-dashboard/server/instance.mjs` derives it from the instance's port
+so the rule is the same in the build wrapper and in the server.
+
+| Instance | Dashboard | Realtime | Build output | Database |
+| :--- | :--- | :--- | :--- | :--- |
+| operator | `3210` | `3211` | `.next-operator` | `apps/web-dashboard/data/mobilecloud.db` |
+| demo | `3220` | `3221` | `.next-demo` | `.tmp/demo.db` |
+| production | `3230` | `3231` | `.next-production` | `.tmp/prod.db` |
+
+```powershell
+.\scripts\start-operator.ps1          # start one instance
+.\scripts\start-demo.ps1
+.\scripts\start-production.ps1
+.\scripts\stop-mobilecloud.ps1         # stop them again
+.\scripts\restart-mobilecloud.ps1     # restart without losing data
+.\scripts\health-mobilecloud.ps1      # verify the whole runtime
+```
+
+`npm --prefix apps/web-dashboard run build` writes `.next-production` and
+prints the directory the matching server must start from. The production
+server reads the same directory, so the bundle it serves is the bundle that
+was built — never the output of a development server.
+
+The scripts are safe to run repeatedly and they own their processes strictly:
+a process is stopped only when it both listens on the instance's port *and*
+runs from this repository's `apps/web-dashboard`. Unrelated Node services, the
+Codex runtime, the tunnels and the Rust engine are never touched, and no
+script deletes a database.
+
+`scripts/health-mobilecloud.ps1` checks more than HTTP status codes. It
+fetches each dashboard, requests every `/_next/static` asset the HTML
+references, confirms that no two instances share a database or a build
+directory, and looks for a webhook-worker restart loop in the logs.
+
+```powershell
+PS> .\scripts\health-mobilecloud.ps1
+Check                 Target      Ok    Detail
+-----                 -------      --    ------
+listening             operator    True  pid 26804 — owned by this repository
+api/health            operator    True  HTTP 200 — ok
+realtime              operator    True  HTTP 200 on :3211
+html                  operator    True  HTTP 200
+assets                operator    True  6 assets served
+...
+All checks passed.
+```

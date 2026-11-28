@@ -51,8 +51,11 @@ async function tick(): Promise<void> {
   }
 }
 
+// The timer is deliberately *not* unref'd. An unreferenced timer does not
+// keep the event loop alive, so the worker printed its banner and exited
+// immediately, leaving the webhook delivery queue undrained while the
+// supervisor restarted it in a loop.
 const timer = setInterval(() => { void tick(); }, INTERVAL_MS);
-timer.unref?.();
 
 process.on("SIGINT", () => { clearInterval(timer); process.exit(0); });
 process.on("SIGTERM", () => { clearInterval(timer); process.exit(0); });

@@ -15,12 +15,15 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveDatabasePath, resolveDistDir } from "./instance.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appRoot = join(here, "..");
 const mode = process.argv[2] === "start" ? "start" : "dev";
 const port = String(process.env.PORT ?? 3210);
 const realtimePort = String(process.env.MOBILECLOUD_REALTIME_PORT ?? 3211);
+const distDir = resolveDistDir({ mode, port });
+const databasePath = resolveDatabasePath({ env: process.env, cwd: appRoot });
 
 const nextBin = join(appRoot, "node_modules", "next", "dist", "bin", "next");
 if (!existsSync(nextBin)) {
@@ -65,7 +68,13 @@ function shutdown() {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-const webEnv = { ...process.env, PORT: port, NODE_ENV: mode === "start" ? "production" : "development", MOBILECLOUD_REALTIME_PORT: realtimePort };
+const webEnv = {
+  ...process.env,
+  PORT: port,
+  NODE_ENV: mode === "start" ? "production" : "development",
+  MOBILECLOUD_REALTIME_PORT: realtimePort,
+  MOBILECLOUD_NEXT_DIST_DIR: distDir,
+};
 const realtimeEnv = { ...webEnv };
 delete realtimeEnv.MOBILECLOUD_BOOTSTRAP_PASSWORD;
 const workerEnv = { ...realtimeEnv };
@@ -79,4 +88,6 @@ console.log(`  web app   http://localhost:${port}`);
 console.log(`  realtime  ws://localhost:${realtimePort}/api/realtime`);
 console.log(`  worker    webhook delivery queue`);
 console.log(`  mode      ${mode}`);
+console.log(`  build     ${distDir}`);
+console.log(`  database  ${databasePath}`);
 console.log("");

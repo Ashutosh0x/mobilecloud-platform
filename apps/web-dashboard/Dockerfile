@@ -11,6 +11,9 @@ RUN npm ci --ignore-scripts
 FROM node:24-bookworm-slim AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+# The build writes into its own directory so it can never replace the output of
+# a development server sharing this repository.
+ENV MOBILECLOUD_NEXT_DIST_DIR=.next-production
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
@@ -22,6 +25,7 @@ ENV NODE_ENV=production \
     PORT=3210 \
     MOBILECLOUD_REALTIME_PORT=3211 \
     MOBILECLOUD_WEB_HOST=0.0.0.0 \
+    MOBILECLOUD_NEXT_DIST_DIR=.next-production \
     MOBILECLOUD_DB=/app/data/mobilecloud.db \
     MOBILECLOUD_DATA_ROOT=/app/data
 
@@ -29,7 +33,7 @@ RUN groupadd --gid 10001 app \
  && useradd --uid 10001 --gid app --shell /usr/sbin/nologin --no-create-home app \
  && mkdir -p /app/data && chown app:app /app/data
 
-COPY --from=builder --chown=app:app /app/.next ./.next
+COPY --from=builder --chown=app:app /app/.next-production ./.next-production
 COPY --from=builder --chown=app:app /app/node_modules ./node_modules
 COPY --from=builder --chown=app:app /app/package.json ./package.json
 COPY --from=builder --chown=app:app /app/next.config.mjs ./next.config.mjs

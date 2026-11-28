@@ -6,6 +6,7 @@ import { formatBytes } from "@/lib/format";
 import { useCloud } from "@/lib/store";
 import { ClientTime, Duration } from "./Time";
 import { DomainAnnouncer, DomainDnsCard, SignalTiles, StatusPill } from "./DomainDnsCard";
+import { TimeseriesChart } from "./UiKit";
 
 function useFiltered<T>(rows: T[], pick: (row: T) => string) {
   const { state } = useCloud();
@@ -727,7 +728,6 @@ export function ShellPage() {
 export function AnalyticsView() {
   const { state, setRange } = useCloud();
   const points = state.analytics?.points ?? [];
-  const max = Math.max(1, ...points.map((p) => p.count));
   const ticks = useMemo(() => points.filter((_, i) => i % Math.ceil(points.length / 6) === 0), [points]);
   return (
     <>
@@ -740,19 +740,39 @@ export function AnalyticsView() {
         {state.analytics && state.analytics.total === 0 && <p className="empty">No requests recorded in this window.</p>}
         {state.analytics && state.analytics.total > 0 && (
           <>
-            <div className="chart-wrap">
-              <svg viewBox="0 0 300 90" preserveAspectRatio="none">
-                {points.map((point, i) => (
-                  <rect key={`${point.label}-${i}`} x={i * (300 / points.length)} y={90 - (point.count / max) * 84} width={Math.max(1, 300 / points.length - 1)} height={(point.count / max) * 84} fill="#3B82F6">
-                    <title>{`${point.label}: ${point.count}`}</title>
-                  </rect>
-                ))}
-              </svg>
-            </div>
-            <div className="sub">{ticks.map((t) => t.label).join("  ·  ")}</div>
+            <TimeseriesChart points={points} unit="requests" />
+            <div className="sub" style={{ marginTop: 8 }}>{ticks.map((t) => t.label).join("  ·  ")}</div>
           </>
         )}
       </article>
+      <section className="grid-2 even">
+        <article className="panel">
+          <div className="panel-head"><h3>Response percentiles</h3></div>
+          {state.observability ? (
+            <>
+              <div className="stats">
+                <article className="stat"><div><b>{state.observability.p50 ?? "—"}</b><span>p50 ms</span></div></article>
+                <article className="stat"><div><b>{state.observability.p95 ?? "—"}</b><span>p95 ms</span></div></article>
+                <article className="stat"><div><b>{state.observability.p99 ?? "—"}</b><span>p99 ms</span></div></article>
+                <article className="stat"><div><b>{state.observability.samples}</b><span>Samples</span></div></article>
+              </div>
+              <p className="sub">Percentiles come from the requests this server recorded in the last 24 hours.</p>
+            </>
+          ) : <p className="empty">No request samples yet.</p>}
+        </article>
+        <article className="panel">
+          <div className="panel-head"><h3>Status codes</h3></div>
+          {state.observability ? (
+            <div className="stats">
+              <article className="stat"><div><b>{state.observability.statuses.s2xx}</b><span>2xx</span></div></article>
+              <article className="stat"><div><b>{state.observability.statuses.s3xx}</b><span>3xx</span></div></article>
+              <article className="stat"><div><b>{state.observability.statuses.s4xx}</b><span>4xx</span></div></article>
+              <article className="stat"><div><b>{state.observability.statuses.s5xx}</b><span>5xx</span></div></article>
+            </div>
+          ) : <p className="empty">No request samples yet.</p>}
+          <p className="sub">These are the console API calls this account made. They are not edge traffic.</p>
+        </article>
+      </section>
     </>
   );
 }

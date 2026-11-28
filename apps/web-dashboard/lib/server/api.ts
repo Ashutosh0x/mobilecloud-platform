@@ -9,6 +9,7 @@ import { BUILDER_DISABLED, builderConfig, dispatchDeploy, dispatchRollback, prob
 import { ROLES, hasPermission, normalizeRole, roleFor, viewerMayMutate } from "./rbac.ts";
 import { dataRoot, isRetiredPassword, newId, openDb, tokenHash, verifyPassword } from "./db.ts";
 import { collectAnalytics, collectHost, collectMetrics } from "./metrics.ts";
+import { collectSubsystems } from "./health.ts";
 import { capabilities, collectObservability, inspectRequest, listBuilds, listDrives, listFirewallEvents, listRules, listWorkflows, observedJa4, summarizeVitals, trafficSummary } from "./platform.ts";
 import { approveDevice, clearProtection, createToken, gateCookie, identityProviders, listNotifications, listSessions, listTokens, listWebhooks, notify, pollDevice, protectionStatus, readGate, setProtection, startDevice, unlockProtection, userFromBearer } from "./identity.ts";
 import { assessLoginRisk, geoFor, listAuthEvents, logAuthEvent } from "./audit.ts";
@@ -2226,6 +2227,17 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     return { response: json(result), status: 200, owner };
   }
 
+  if (key === "GET health/subsystems") {
+    // The global health banner. Each entry is a check this process really
+    // performed; a subsystem that is not deployed is reported as
+    // `unconfigured`, never as a failure.
+    const report = await collectSubsystems(db, {
+      realtimeUrl: process.env.MOBILECLOUD_REALTIME_URL ?? `http://127.0.0.1:${realtimePort()}`,
+      engineUrl: process.env.MOBILECLOUD_ENGINE ?? null,
+      dnsApiUrl: process.env.MOBILECLOUD_DNS_API ?? null,
+    });
+    return { response: json(report), status: 200, owner };
+  }
   if (key === "GET metrics") return { response: json(collectMetrics(db, owner, operatorMetrics)), status: 200, owner };
   if (key === "GET host") return { response: json(collectHost(operatorMetrics)), status: 200, owner };
   if (key === "GET usage") return { response: json(collectUsage(db, owner, user.plan)), status: 200, owner };

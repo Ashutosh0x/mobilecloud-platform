@@ -41,6 +41,8 @@ cache/
 # Web dashboard
 apps/web-dashboard/node_modules/
 apps/web-dashboard/.next/
+# Per-instance build output (.next-operator, .next-demo, .next-production).
+apps/web-dashboard/.next-*/
 apps/web-dashboard/data/
 *.tsbuildinfo
 

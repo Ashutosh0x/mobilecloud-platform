@@ -1,6 +1,8 @@
 import {
+  ArrowRight,
   Bell,
   ChartLineUp,
+  CheckCircle,
   Cloud,
   CreditCard,
   Cube,
@@ -8,10 +10,12 @@ import {
   DeviceMobile,
   Fingerprint,
   Folder,
+  Gauge,
   Gear,
   GitBranch,
   GithubLogo,
   Globe,
+  Heartbeat,
   House,
   Lightning,
   MagnifyingGlass,
@@ -22,8 +26,12 @@ import {
   SquaresFour,
   Sun,
   TerminalWindow,
+  TrendDown,
+  TrendUp,
   User,
   Users,
+  Warning,
+  XCircle,
   type IconWeight,
 } from "@phosphor-icons/react";
 
@@ -92,6 +100,22 @@ export function Icon({ name, size = 16, weight = "regular" }: { name: string; si
       return <Sun {...shared} />;
     case "moon":
       return <Moon {...shared} />;
+    case "trend-up":
+      return <TrendUp {...shared} />;
+    case "trend-down":
+      return <TrendDown {...shared} />;
+    case "warning":
+      return <Warning {...shared} />;
+    case "check":
+      return <CheckCircle {...shared} />;
+    case "cross":
+      return <XCircle {...shared} />;
+    case "gauge":
+      return <Gauge {...shared} />;
+    case "heartbeat":
+      return <Heartbeat {...shared} />;
+    case "arrow-right":
+      return <ArrowRight {...shared} />;
     default:
       return null;
   }

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { formatBytes } from "@/lib/format";
 import { useCloud } from "@/lib/store";
+import { SecurityScorePanel } from "./SecurityScore";
 import { ClientTime } from "./Time";
 
 async function run(action: () => Promise<unknown>, setToast: (message: string | null) => void, ok: string) {
@@ -31,6 +32,7 @@ export function FirewallView() {
           <p>Rules apply to this API for your account. Account, overview, and firewall routes stay reachable so a rule cannot lock you out. A JA4 rule matches only when the request sends an x-ja4-fingerprint header. This process does not read the TLS ClientHello and does not invent a digest or a bot score.</p>
         </div>
       </header>
+      <SecurityScorePanel />
       <form className="panel form-row" onSubmit={(e) => {
         e.preventDefault();
         run(() => call("firewall", { method: "POST", body: JSON.stringify({ name, action, matchKey, matchOp, matchValue, headerName, limitCount: 30, windowSec: 60 }) }), setToast, "Rule saved");

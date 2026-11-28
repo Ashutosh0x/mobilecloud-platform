@@ -5,7 +5,7 @@
 ### **The Autonomous Smartphone Edge Cloud & Institutional Proof-of-Reserve Protocol**
 
 [![CI Status](https://img.shields.io/badge/CI-Passing-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/Tests-422%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
+[![Tests](https://img.shields.io/badge/Tests-501%20Passed-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#automated-test-matrix)
 [![Rust](https://img.shields.io/badge/Rust-1.100-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![Android](https://img.shields.io/badge/Android-API%2030--35-3ddc84?style=for-the-badge&logo=android&logoColor=white)](android-app)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7f52ff?style=for-the-badge&logo=kotlin&logoColor=white)](android-app)
@@ -23,6 +23,9 @@
 [![Edge Tunnel](https://img.shields.io/badge/Edge_Tunnel-yamux_%2B_WSS-6E40C9?style=for-the-badge&logo=websocket&logoColor=white)](edge/mobilecloud-tunnel)
 [![Edge Shield](https://img.shields.io/badge/Edge_Shield-WAF_%2B_Rate_Limit-0A3069?style=for-the-badge&logo=shield&logoColor=white)](edge/mobilecloud-shield)
 [![Sovereign DNS](https://img.shields.io/badge/Sovereign_DNS-RFC_1035_Authority_%2B_GeoDNS-2ea44f?style=for-the-badge&logo=rust&logoColor=white)](dns-authority)
+[![Design System](https://img.shields.io/badge/Design_System-Phosphor_Icons_%2B_Tokens-7C4DFF?style=for-the-badge)](apps/web-dashboard/components/UiKit.tsx)
+[![GitHub](https://img.shields.io/badge/GitHub-Apps_%2B_Live_Builds-181717?style=for-the-badge&logo=github&logoColor=white)](docs/GITHUB-INTEGRATION.md)
+[![Subsystems](https://img.shields.io/badge/Health-Real_Subsystem_Probes-00C853?style=for-the-badge&logo=prometheus&logoColor=white)](docs/DEPLOYMENT.md)
 
 <br/>
 
@@ -48,6 +51,11 @@ The web console and the Android app are two synchronized clients of one backend:
 | Workflow worker | **In-process.** A workflow stores an ordered step list that references your own functions; a run executes each step, threads its output into the next, and stops at the first failure. |
 | Webhook delivery | **Working.** A delivery is queued in the same transaction as its event, signed with HMAC-SHA256, retried with capped exponential backoff up to 5 attempts, and recorded in a delivery log. Loopback and private targets are refused. |
 | Local build preview | **Not sandboxed.** The preview runs in the plain app UID. Do not run untrusted repositories. |
+| GitHub integration | **Working.** An OAuth app installs on an account, its token is sealed at rest with AES-256-GCM under a master key in the database, webhooks are verified with a constant-time HMAC-SHA256 comparison and fail closed when no secret is configured, and a connected repository can be imported as a project. **Not done:** GitHub App manifest hosting, installation tokens for other users' repositories, and marketplace listings. |
+| Live builds | **Working, with a hard boundary.** The `web` and `android` targets run the platform's own fixed commands and stream their output as `BuildEvent`s over the realtime bus. The `repository` target only *analyses* a repository — fetch, framework detection, content hashing, cache decision and a preview — it never executes repository code. Repository code is never executed by the control plane. |
+| Console design system | **Working.** One token set (brand `#0066FF`, cyan `#00D4FF`, green `#00C853`, orange `#FF6D00`, red `#FF1744`, purple `#7C4DFF`, gold `#FFD600`) drives both the dark and the light palette, every glyph is an official Phosphor icon, and the shared UI kit provides the sparkline, time-series, score ring, gauge, health banner and trend card. The Command Center dashboard renders only measured values; a figure that was not measured stays blank. |
+| Subsystem health | **Working.** `GET /api/health/subsystems` probes the database, the realtime gateway, the edge engine and the DNS authority over HTTP with a hard timeout and reports each one as healthy, degraded, down or *unconfigured*. An absent subsystem is never reported as a failure. |
+| Local build isolation | **Working.** Each local instance owns its Next.js output directory (`.next-operator`, `.next-demo`, `.next-production`), so a production build can never replace a running development server's assets. The operational scripts verify more than HTTP status: they fetch every `/_next/static` asset the dashboard references. |
 | Browser CloudShell | **Working.** Requires a running edge engine and a trusted gateway in front of it. |
 | SSH daemon | **Working.** Refuses a non-loopback bind unless an Ed25519 key is authorized. |
 | Authentication & CLI | **Implemented and covered by tests.** Passkeys (WebAuthn), "Login with MobileCloud" QR approval, RFC 8628 device grant and PKCE, client-scoped sessions with rotating refresh tokens, an append-only audit trail, and a weighted login risk engine. The `mobilecloud` CLI signs in, refreshes, lists devices and sessions, and revokes both. **Not done:** the Android approval screen and notifier compile but are not yet routed from `MainActivity`; no FCM/APNs push transport is configured; passkey attestation is `none` (AAGUID recorded, not verified). |
@@ -217,6 +225,11 @@ MobileCloud combines two decoupled, high-performance engines within one monorepo
 * **Realtime gateway**: a dependency-free RFC 6455 WebSocket server that tails the same SQLite WAL the API writes.
 * **QR device linking**: a two-minute single-use pairing code that the phone scans and the browser owner approves.
 * **Optimistic UI with rollback**: mutations apply locally and roll back to the last confirmed snapshot if the server rejects them.
+* **One design system**: a single token set drives the dark and the light palette — brand blue `#0066FF`, cyan `#00D4FF`, green `#00C853`, orange `#FF6D00`, red `#FF1744`, purple `#7C4DFF`, gold `#FFD600` — with the documented type scale (H1 32/40/700, H2 24/32/600, body 14/22, small 12/18, code 13/20). Every glyph is an official Phosphor icon; no icon is hand-drawn. The theme is resolved before the first paint, so there is no flash of the wrong theme.
+* **Shared UI kit** (`components/UiKit.tsx`): a sparkline, a hoverable time-series chart, an animated security score ring, a circular gauge, a global health banner and a trend card. Each component takes its numbers from the caller and never invents a measurement — an empty series shows an explicit empty state instead of a flat line that would read as "steady traffic".
+* **The Command Center**: the dashboard answers *is anything broken?* first — a global health banner that probes the database, the realtime gateway, the edge engine and the DNS authority and distinguishes *down* from *not deployed* — then the metric row with sparklines and trend arrows, then traffic beside what needs attention, then the account's own deployments, projects and activity.
+* **Security score**: a weighted score over six checks the console can really evaluate (firewall coverage, rule activity, server-error share, live sessions, token expiry, console screen protection). A check that could not be measured is *skipped* and its weight removed — the console never awards or withholds points for something it could not see.
+* **Isolated local instances**: the operator console, the demo console and the production console each own their Next.js output directory, their database and their realtime gateway, so a production build can never replace a running development server's assets. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ### 6. Agentic Direct Deployment & Distributed Cache Revalidation Engine
 * **Direct Agent API Ingress (`POST /api/v1/deploy/agent`)**: an endpoint for AI coding agents to trigger builds, with token authentication and a custom agent id recorded on the deployment.
@@ -316,6 +329,18 @@ The platform's current edge relies on a third-party authoritative DNS provider. 
 
 Everything is configured from the environment (`MC_DNS_UDP`, `MC_DNS_TCP`, `MC_DNS_API`, `MC_DNS_STORE`, `MC_DNS_DEFAULT_REGION`, `MC_DNS_API_TOKEN`). This is **not** a drop-in replacement for a global anycast network: there is no DNSSEC signing, no zone transfer, no BGP announcement, and no replication. See the release-status table above for the honest boundary.
 
+### 16. GitHub Integration & Live Builds
+
+* **One app, one account**: an OAuth installation is authorized from the console, exchanged for a token, and stored **sealed at rest** — AES-256-GCM under a master key that lives in the database, never in the source tree, never in a log line. A revoked installation deletes its token with it.
+* **Webhooks that fail closed**: a delivery is verified with a constant-time HMAC-SHA256 comparison over the raw body. With no secret configured the webhook endpoint refuses every delivery instead of accepting unsigned ones.
+* **Import as project**: a connected repository is listed, browsed (tree and file), and imported as a project in the console with its framework detected from its manifest.
+* **A build that streams**: a build publishes `BuildEvent`s — `log`, `progress`, `step`, `metric`, `error`, `complete` — on the realtime bus, so the console shows the run as it happens rather than after it finishes. A build has steps, a duration, a cache decision and a preview address of the form `/preview/<branch>-<build8>`.
+* **Content-addressed cache**: the cache key is derived from the sources themselves, so an unchanged tree is a cache hit and any change is a miss.
+* **The isolation boundary holds**: only the platform's own fixed commands run (`web`, `android`). A `repository` build **analyses** the repository — fetch, detect, hash, decide, preview — and never executes its code. The engine's rule that repository code is not executed by the control plane is enforced by the runner, not by convention.
+* **CI/CD to the domain**: `.github/workflows/deploy.yml` builds the console image, publishes it to GHCR, and deploys it behind the Cloudflare tunnel; `docs/DEPLOYMENT.md` holds the runbook and `docs/BUILD-SYSTEM.md` the build model.
+
+See [docs/GITHUB-INTEGRATION.md](docs/GITHUB-INTEGRATION.md) and [docs/BUILD-SYSTEM.md](docs/BUILD-SYSTEM.md).
+
 ## System Architecture
 
 ```mermaid
@@ -342,10 +367,12 @@ flowchart TD
     end
 
     subgraph WebPlane["Clients & Identity Plane"]
-        CONSOLE["apps/web-dashboard<br/>Next.js 15 · 20 console views"]
+        CONSOLE["apps/web-dashboard<br/>Next.js 15 · Command Center · design system"]
         AUTH["Identity plane<br/>passkeys · Login with MobileCloud<br/>device & PKCE grants · scoped sessions · audit"]
         CLI["mobilecloud CLI (Rust)<br/>device grant · PKCE · rotating refresh"]
         CLOUDSHELL["web-cloudshell<br/>WebGL Xterm.js · file manager · preview picker"]
+        GH["GitHub integration<br/>OAuth app · sealed token · signed webhooks"]
+        BUILDS["Live builds<br/>BuildEvent stream · preview URLs<br/>repository target analyses only"]
     end
 
     subgraph PoRProtocol["FurlPay Proof-of-Reserve Protocol"]
@@ -369,6 +396,9 @@ flowchart TD
     APP --> JNI --> PTY
     APP -.->|"passkey · QR approval"| AUTH
     CONSOLE -->|"session + CSRF"| AUTH
+    CONSOLE <-->|"repos · webhooks · builds"| GH
+    CONSOLE -->|"BuildEvent stream"| BUILDS
+    GH -->|"signed webhook"| CONSOLE
     CLI <-->|"HTTPS + Bearer"| AUTH
     KRN --> CoreDaemon
     CONSOLE <-->|"REST / WebSocket"| CoreDaemon
@@ -512,7 +542,7 @@ k6 run -e TARGET=https://your.edge.host benchmarks/k6-load-test.js
 | **`mc-dns-authority`** | 59 tests | Wire codec round-trips (parse → encode with name compression), label and name length limits, TXT chunking, and A/AAAA/CNAME/MX/TXT/NS/SRV/CAA/SOA rdata parsing; a name that exists without the queried type answers NODATA (NOERROR + SOA) while an unknown name answers NXDOMAIN, and both carry the SOA; a query for a zone we do not own is REFUSED with no zone echoed and without the authoritative bit; a CNAME chain is followed only while it stays inside our zones and is bounded; a CAA record set restricts issuance to the named CA while an empty set leaves it unrestricted; a `proxied` A record answers with the nearest edge PoP instead of its literal value, a non-geo-locatable client (an IPv6 peer) gets the default PoP, and a `proxied` AAAA is withheld as NODATA rather than leaking its origin; a zone with geo routing disabled answers the literal value; a CNAME is refused at a name that already holds another record, and another type is refused at a CNAME name; a query's EDNS OPT is echoed back while a plain query gets none; the store upserts by id *and* by the natural key `(zone, name, type, value)` and its JSON snapshot is written atomically (temp file + rename); the management API accepts relative and absolute record names, normalises types to upper case, rejects an invalid rdata value, refuses a duplicate zone with a conflict, and gates the zone routes behind a bearer token while leaving the health probe open; a UDP answer over the budget sets `TC` and empties every section; and a real loopback UDP query round-trips end to end. |
 | **`fleet-mesh`** | 43 tests | Ed25519 device-identity sign → verify round-trip and fail-closed verification of malformed keys/signatures; constant-time token comparison; strictly-increasing heartbeat sequence numbers that reject replays, gaps and unknown/revoked nodes; enrollment-token and operator-bearer authorization (401 on any missing, malformed, or wrong credential); deterministic resource-aware node selection (cores → RAM → storage → id); telemetry that refuses an `Unsupported` measurement carrying data and rejects battery > 100% or used > total; liveness classification and stale/offline sweeps; enrollment idempotency per device public key. |
 | **`por-xdr-toolkit`** | 4 tests | Protocol 30 XDR encoding/decoding, RFC 4506 `Option<ScVec>` presence-flag alignment. |
-| **`apps/web-dashboard`** | 92 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. Authentication: a device grant issues a scoped CLI token once after approval and is refused before it; refresh tokens rotate and a replayed token revokes the family; a `cli:full` bearer can revoke devices and sessions but cannot mutate the account; QR login reaches `APPROVED` only through the phone's signature over the browser's challenge and the challenge is single use; WebAuthn options are bound to the console's RP id and require user verification; the risk engine blocks impossible travel and scores a new country and address as `medium`. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Platform services: a function runs inside a `node:vm` context with no `require`/`process`/`fetch`/timers and is rejected when over the source or output byte cap or the 250 ms timeout; a workflow threads each step's output into the next and stops at the first failure; a webhook delivery is queued once per subscriber in the event's own transaction, signed HMAC-SHA256, backoff-capped at 5 attempts, and refused against loopback/private targets; usage counters append per meter; a PoR attestation is validated and stored read-only, and a missing attestation reports `unverified`. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
+| **`apps/web-dashboard`** | 230 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. Authentication: a device grant issues a scoped CLI token once after approval and is refused before it; refresh tokens rotate and a replayed token revokes the family; a `cli:full` bearer can revoke devices and sessions but cannot mutate the account; QR login reaches `APPROVED` only through the phone's signature over the browser's challenge and the challenge is single use; WebAuthn options are bound to the console's RP id and require user verification; the risk engine blocks impossible travel and scores a new country and address as `medium`. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Platform services: a function runs inside a `node:vm` context with no `require`/`process`/`fetch`/timers and is rejected when over the source or output byte cap or the 250 ms timeout; a workflow threads each step's output into the next and stops at the first failure; a webhook delivery is queued once per subscriber in the event's own transaction, signed HMAC-SHA256, backoff-capped at 5 attempts, and refused against loopback/private targets; usage counters append per meter; a PoR attestation is validated and stored read-only, and a missing attestation reports `unverified`. Subsystem health: a probe reports its round trip and status code, a refused connection and a timeout are results rather than exceptions, a deployment with nothing attached reports the database as healthy and every absent subsystem as `unconfigured`, and a broken gateway fails the whole report. Security score: a healthy account scores 100, a failing check costs only its own weight, a check that cannot be measured is skipped and its weight removed, and a perpetual API token is reported. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
 | **SSO provider** (in `apps/web-dashboard`) | 40 tests | OIDC discovery and JWKS; a full PKCE code exchange whose RS256 ID token is verified against the published key; confidential-client authentication (Basic and secret-post); scope-filtered claims; refresh rotation and reuse detection; RFC 7009 revocation; exact redirect and post-logout redirect matching. SAML: metadata, deflated and plain AuthnRequests, signed-request verification against the SP certificate, signature-wrapping rejection, DOCTYPE refusal, and a signed assertion in an auto-submit POST form. SCIM: hashed token auth, user and group CRUD, supported filters, PATCH/PUT deprovisioning that removes sessions and tokens, and a fail-closed `invalidFilter` error. |
 | **FurlPay integration** | 9 tests | First federated login creates no account silently; existing account linking requires explicit approval; matching email never merges; state/nonce enforced; issuer/audience/signature checked against real JWKS; code replay and expiry refused; IdP logout does not end FurlPay's session; SSO cannot authorize payment, withdrawal, wallet signing or agent spending; introspection, client management and signing-key overlap rotation. |
 | **Identity configuration** | 5 tests | Production requires an HTTPS origin/issuer and a strong operator password; known defaults are rejected; an unimplemented KMS provider blocks startup; enabling FurlPay requires a client id, HTTPS callback and issuer. |
@@ -522,7 +552,7 @@ k6 run -e TARGET=https://your.edge.host benchmarks/k6-load-test.js
 | **`mobilecloud-cli`** | 8 tests | PKCE S256 against the RFC 7636 test vector, query decoding, UTC timestamp and relative-time formatting, table truncation, server-URL validation (HTTPS only except loopback, no credentials/path/query), and a credentials-file round trip with the profile lifecycle. |
 | **`web-cloudshell`** | `tsc --noEmit` + `vite build` | Type-checked and bundled; the WebGL Xterm.js client, files panel, and preview picker are verified by a passing build, not by an automated suite. |
 
-**422 tests** in total (Rust default members `242` + `por-verifier` `25` + dashboard `151` + `por-xdr-toolkit` `4`).
+**501 tests** in total (Rust default members `242` + `por-verifier` `25` + dashboard `230` + `por-xdr-toolkit` `4`).
 
 ```bash
 # Rust workspace (default members)
@@ -562,7 +592,7 @@ cd mobilecloud-platform
 
 cargo test                      # 242 tests in the default members
 cargo test -p por-verifier      # 25 contract tests
-cd apps/web-dashboard && npm test && cd ../..   # 151 dashboard tests
+cd apps/web-dashboard && npm test && cd ../..   # 230 dashboard tests
 ```
 
 ### 3. Run the web console
@@ -578,6 +608,24 @@ npm run dev     # console :3210, realtime gateway :3211
 Open `http://localhost:3210`. The database defaults to `apps/web-dashboard/data/mobilecloud.db`; set `MOBILECLOUD_DB` to relocate it. The gateway is a separate process on purpose: a Next.js route handler cannot answer an HTTP `upgrade`, so the WebSocket listener runs beside the API and tails the same WAL file.
 
 Sign in with the password once, then add a passkey on `/device` (or from the Android app). After that, the login page offers **Login with MobileCloud**: scan the QR code with the phone and approve it there.
+
+#### Running several consoles at once
+
+Each instance needs its own build output, database and realtime gateway, or a
+production build will replace a running development server's assets and the
+console will render unstyled. The scripts own exactly that:
+
+```powershell
+.\scripts\start-operator.ps1        # :3210, the operator database, .next-operator
+.\scripts\start-demo.ps1            # :3220, .tmp/demo.db, .next-demo
+.\scripts\start-production.ps1      # :3230, .tmp/prod.db, .next-production
+.\scripts\health-mobilecloud.ps1    # checks health, assets, isolation and logs
+.\scripts\stop-mobilecloud.ps1      # stops only this repository's processes
+```
+
+`npm --prefix apps/web-dashboard run build` writes `.next-production` and
+prints the directory the matching server must start from. See
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full runbook.
 
 ### 4. Sign in from the CLI
 
@@ -657,6 +705,9 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 | Document | Contents |
 | :--- | :--- |
 | [CLOUDSHELL.md](docs/CLOUDSHELL.md) | The tri-modal terminal: credential model, web preview, file transfer, session durability, reverse-proxy configuration |
+| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Deploying the console behind a Cloudflare tunnel, the isolated local instances, the operational scripts and the health checks |
+| [GITHUB-INTEGRATION.md](docs/GITHUB-INTEGRATION.md) | The GitHub App: OAuth installation, sealed tokens, webhook verification, repository browsing and import |
+| [BUILD-SYSTEM.md](docs/BUILD-SYSTEM.md) | The live build system: build events, trusted targets, the analysis-only repository target and the cache key |
 | [DOMAIN-CONFIGURATION-UI-UX-2026.md](docs/DOMAIN-CONFIGURATION-UI-UX-2026.md) | Domain configuration UX across the web console and Android app: DNS provider auto-detection, verification, SSL/TLS lifecycle, real-time sync, and the full empty/loading/error state matrix |
 | [AUTH.md](docs/AUTH.md) | Unified authentication: passkey ceremonies, Login with MobileCloud, CLI device and PKCE grants, session scopes, refresh rotation, audit and login risk |
 | [SSO.md](docs/SSO.md) | Custom SSO provider: OIDC discovery and PKCE, signed ID tokens and JWKS, SAML 2.0 IdP, SCIM 2.0 provisioning, single logout, client administration |
