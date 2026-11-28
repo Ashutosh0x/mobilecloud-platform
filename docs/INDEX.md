@@ -51,12 +51,14 @@ on testnet on 2026-11-21 — including live rejections of six attack classes.
 | [ACURAST-TEE.md](ACURAST-TEE.md) | Attestor signing architecture and TEE roadmap |
 | [INTEGRATION-GUIDE.md](INTEGRATION-GUIDE.md) | How to read and independently verify the proof-of-reserve |
 | [CLOUDSHELL.md](CLOUDSHELL.md) | The tri-modal terminal: Android app, browser CloudShell, SSH; credential model, web preview, file transfer, session durability |
+| [DOMAIN-CONFIGURATION-UI-UX-2026.md](DOMAIN-CONFIGURATION-UI-UX-2026.md) | Domain configuration UX across the web console and Android app: DNS provider auto-detection, verification, SSL/TLS lifecycle, real-time sync, and the state/error matrix |
 | [AUTH.md](AUTH.md) | Unified authentication: passkeys, Login with MobileCloud, CLI device and PKCE grants, scoped sessions, refresh rotation, audit and login risk |
 | [SSO.md](SSO.md) | Custom SSO provider: OIDC discovery and PKCE, ID tokens and JWKS, SAML 2.0 IdP, SCIM 2.0 provisioning, single logout, client administration |
 | [IDENTITY-ARCHITECTURE.md](IDENTITY-ARCHITECTURE.md) | Identity-provider boundary, components, client roles and planned work |
 | [OIDC-PROVIDER.md](OIDC-PROVIDER.md) | OIDC endpoints, flows, claims, clients and consent |
 | [FURLPAY-INTEGRATION.md](FURLPAY-INTEGRATION.md) | FurlPay relying-party integration, logout and financial boundary |
 | [FURLPAY-DEPLOYMENT.md](FURLPAY-DEPLOYMENT.md) | furlpay.com DNS, Cloudflare Tunnel, Docker, PWA and deployment verification |
+| [FURLPAY-DOMAIN-EXPOSURE-2026.md](FURLPAY-DOMAIN-EXPOSURE-2026.md) | Worldwide domain exposure model: Cloudflare Tunnel, GHCR CI/CD, SSO federation, security hardening and multi-region scaling |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Deploying the identity console: tunnel setup, repository secrets, the CI workflow, verification and operating notes |
 | [ACCOUNT-LINKING.md](ACCOUNT-LINKING.md) | Explicit account linking without email merging |
 | [SESSION-AND-LOGOUT.md](SESSION-AND-LOGOUT.md) | Session scopes, revocation and logout semantics |

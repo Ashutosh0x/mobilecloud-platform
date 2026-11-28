@@ -627,12 +627,14 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 | Document | Contents |
 | :--- | :--- |
 | [CLOUDSHELL.md](docs/CLOUDSHELL.md) | The tri-modal terminal: credential model, web preview, file transfer, session durability, reverse-proxy configuration |
+| [DOMAIN-CONFIGURATION-UI-UX-2026.md](docs/DOMAIN-CONFIGURATION-UI-UX-2026.md) | Domain configuration UX across the web console and Android app: DNS provider auto-detection, verification, SSL/TLS lifecycle, real-time sync, and the full empty/loading/error state matrix |
 | [AUTH.md](docs/AUTH.md) | Unified authentication: passkey ceremonies, Login with MobileCloud, CLI device and PKCE grants, session scopes, refresh rotation, audit and login risk |
 | [SSO.md](docs/SSO.md) | Custom SSO provider: OIDC discovery and PKCE, signed ID tokens and JWKS, SAML 2.0 IdP, SCIM 2.0 provisioning, single logout, client administration |
 | [IDENTITY-ARCHITECTURE.md](docs/IDENTITY-ARCHITECTURE.md) | Identity-provider boundary, components, client roles and current-vs-planned status |
 | [OIDC-PROVIDER.md](docs/OIDC-PROVIDER.md) | Discovery, authorization/token/userinfo/introspection/revocation/logout, clients and consent |
 | [FURLPAY-INTEGRATION.md](docs/FURLPAY-INTEGRATION.md) | FurlPay as the first relying party: registration, login sequence, logout, financial boundary and what FurlPay must implement |
 | [FURLPAY-DEPLOYMENT.md](docs/FURLPAY-DEPLOYMENT.md) | Namecheap → Cloudflare DNS, tunnel, Docker deployment, PWA, verification, security baseline and cost estimates |
+| [FURLPAY-DOMAIN-EXPOSURE-2026.md](docs/FURLPAY-DOMAIN-EXPOSURE-2026.md) | Worldwide domain exposure model: Cloudflare Tunnel, GHCR CI/CD, SSO federation, security hardening, PWA distribution and the path to multi-region scaling |
 | [ACCOUNT-LINKING.md](docs/ACCOUNT-LINKING.md) | `(issuer, subject)` identity keys, explicit link confirmation, no email merging, unlinking and recovery |
 | [SESSION-AND-LOGOUT.md](docs/SESSION-AND-LOGOUT.md) | The four logout scopes, session revocation, refresh rotation and back-channel logout |
 | [KEY-MANAGEMENT.md](docs/KEY-MANAGEMENT.md) | RS256/SAML keys, rotation with JWKS overlap, production KMS requirement and emergency rotation |
