@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
-import { FunctionError, runFunction } from "./runtime.ts";
+import { FunctionError } from "./runtime.ts";
+import { executeFunction } from "./isolate.ts";
 
 /**
  * Workflow worker.
@@ -71,7 +72,7 @@ export function runWorkflow(db: DatabaseSync, owner: string, workflow: { id: str
       return { status: "failed", note: `Step ${index + 1} (${target.name}) failed: no handler source is stored`, steps: results };
     }
     try {
-      const result = runFunction(target.source, {
+      const result = executeFunction(target.source, {
         method: "POST",
         path: target.route,
         query: {},

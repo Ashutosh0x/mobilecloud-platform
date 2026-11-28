@@ -50,7 +50,10 @@ test("a sealed token opens again and a tampered one does not", () => {
   assert.notEqual(sealed, "gho_secret_token");
   assert.equal(openSecret(db, sealed), "gho_secret_token");
   const parts = sealed.split(".");
-  parts[2] = `${parts[2].slice(0, -2)}AA`;
+  // Flip the last ciphertext character to one it definitely is not, so the
+  // tamper always changes the bytes (appending a fixed "AA" could be a no-op).
+  const last = parts[2].slice(-1);
+  parts[2] = `${parts[2].slice(0, -1)}${last === "A" ? "B" : "A"}`;
   assert.equal(openSecret(db, parts.join(".")), null);
   db.close();
 });

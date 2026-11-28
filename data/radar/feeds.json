@@ -1,0 +1,11 @@
+{
+  "note": "Allowlisted public sources the Radar may poll. HTTPS only. Loopback/private targets are refused with the same policy as webhook delivery (see deliverableHost in apps/web-dashboard/lib/server/webhook.ts).",
+  "feeds": [
+    { "competitor": "Vercel", "url": "https://vercel.com/changelog" },
+    { "competitor": "Cloudflare", "url": "https://blog.cloudflare.com/rss/" },
+    { "competitor": "Fly.io", "url": "https://fly.io/blog/" },
+    { "competitor": "Netlify", "url": "https://www.netlify.com/blog/" },
+    { "competitor": "Supabase", "url": "https://supabase.com/blog" },
+    { "competitor": "Acurast", "url": "https://acurast.com/blog/" }
+  ]
+}

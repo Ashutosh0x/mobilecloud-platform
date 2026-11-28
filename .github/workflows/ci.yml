@@ -127,5 +127,7 @@ jobs:
           node-version: '24'
       - name: Feature status is generated, not hand-edited
         run: node scripts/render-feature-status.mjs --check
+      - name: Competitor Radar is fresh and mapped
+        run: node scripts/radar.mjs --check
       - name: Integrity manifest matches tracked files
         run: node scripts/integrity-manifest.mjs

@@ -50,6 +50,40 @@ function limitFor(meter: Meter): number | null {
   return Number.isFinite(raw) && raw >= 0 ? raw : null;
 }
 
+/** Current-period usage for a single meter, without building the whole report. */
+export function meterUsage(db: DatabaseSync, owner: string, meter: Meter, now = Date.now()): number {
+  if (meter === "object_bytes") {
+    const stored = db.prepare("SELECT COALESCE(SUM(bytes), 0) AS bytes FROM objects WHERE owner_id = ?").get(owner) as { bytes: number };
+    return Number(stored.bytes);
+  }
+  const row = db.prepare(
+    "SELECT COALESCE(SUM(qty), 0) AS qty FROM usage_events WHERE owner_id = ? AND meter = ? AND at >= ?",
+  ).get(owner, meter, periodStart(now)) as { qty: number };
+  return Number(row.qty);
+}
+
+export type QuotaBreach = { meter: Meter; limit: number; used: number; requested: number };
+
+/**
+ * The spend cap: a per-owner, per-meter ceiling for the current period.
+ *
+ * Returns a breach when recording [qty] more would push a configured limit
+ * over the top, otherwise null. A meter with no configured limit is never
+ * capped (nothing is invoiced because no payment provider is wired). Enforcing
+ * the cap is the caller's job — a synchronous API call rejects with 429.
+ */
+export function quotaBreach(db: DatabaseSync, owner: string, meter: Meter, qty = 1, now = Date.now()): QuotaBreach | null {
+  const limit = limitFor(meter);
+  if (limit === null) return null;
+  const used = meterUsage(db, owner, meter, now);
+  return used + qty > limit ? { meter, limit, used, requested: qty } : null;
+}
+
+/** Human-readable cap message shared by the API guard and the usage report. */
+export function quotaMessage(breach: QuotaBreach): string {
+  return `Spend cap reached: ${breach.used} of ${breach.limit} ${UNITS[breach.meter]} used this period. Raise MOBILECLOUD_QUOTA_${breach.meter.toUpperCase()} to allow more.`;
+}
+
 export function collectUsage(db: DatabaseSync, owner: string, plan: string, now = Date.now()): Usage {
   const start = periodStart(now);
   const counters = db.prepare(

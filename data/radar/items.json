@@ -1,0 +1,131 @@
+{
+  "note": "One record per competitor claim. Every row carries a source link and a summary written in our own words. Summaries are UNVERIFIED and must not be presented as fact: a model or a human condensed a competitor's post and may have misstated it. Verdict is MobileCloud's standing for that capability — have / partial / absent.",
+  "items": [
+    {
+      "id": "vercel-drives",
+      "competitor": "Vercel",
+      "date": "2026-10-24",
+      "source": "https://vercel.com/changelog",
+      "summary": "Persistent workspaces that an agent can keep using across runs, announced at Ship 2026 alongside async workers.",
+      "mapsTo": "Builder and project deployment dispatch",
+      "verdict": "absent"
+    },
+    {
+      "id": "vercel-daemons",
+      "competitor": "Vercel",
+      "date": "2026-10-24",
+      "source": "https://vercel.com/changelog",
+      "summary": "Background workers that keep running after the request that started them has returned.",
+      "mapsTo": "Workflows",
+      "verdict": "partial"
+    },
+    {
+      "id": "vercel-connect",
+      "competitor": "Vercel",
+      "date": "2026-10-24",
+      "source": "https://vercel.com/changelog",
+      "summary": "A connector directory so an agent can act on third-party services without holding the underlying credentials itself.",
+      "mapsTo": "FurlPay live backend integration",
+      "verdict": "absent"
+    },
+    {
+      "id": "vercel-dpop",
+      "competitor": "Vercel",
+      "date": "2026-11-05",
+      "source": "https://vercel.com/changelog",
+      "summary": "Sessions bound to a device, with proof-of-possession tokens for the CLI described as in progress.",
+      "mapsTo": "CLI device grant and PKCE",
+      "verdict": "partial"
+    },
+    {
+      "id": "vercel-sandbox-speed",
+      "competitor": "Vercel",
+      "date": "2026-11-05",
+      "source": "https://vercel.com/changelog",
+      "summary": "Sandbox startup made several times quicker, aimed at agents that need a fresh isolated environment per step.",
+      "mapsTo": "Functions runtime",
+      "verdict": "partial"
+    },
+    {
+      "id": "vercel-iso42001",
+      "competitor": "Vercel",
+      "date": "2026-11-12",
+      "source": "https://vercel.com/changelog",
+      "summary": "A completed ISO/IEC 42001 AI-management certification, an audited governance claim rather than a runtime feature.",
+      "mapsTo": "Production readiness",
+      "verdict": "absent"
+    },
+    {
+      "id": "fly-sprites",
+      "competitor": "Fly.io",
+      "date": "2026-11-08",
+      "source": "https://fly.io/blog/",
+      "summary": "Micro virtual machines built to host coding agents, with isolation as the product's whole reason to exist.",
+      "mapsTo": "Functions runtime",
+      "verdict": "absent"
+    },
+    {
+      "id": "fly-mcp",
+      "competitor": "Fly.io",
+      "date": "2026-11-08",
+      "source": "https://fly.io/blog/",
+      "summary": "One MCP endpoint that gives an agent scoped reach to its compute and a chosen subset of apps.",
+      "mapsTo": "Production readiness",
+      "verdict": "absent"
+    },
+    {
+      "id": "cloudflare-snapshots",
+      "competitor": "Cloudflare",
+      "date": "2026-11-03",
+      "source": "https://blog.cloudflare.com/rss/",
+      "summary": "Container filesystem snapshots that let an agent keep a workspace between invocations.",
+      "mapsTo": "Preview isolation",
+      "verdict": "partial"
+    },
+    {
+      "id": "cloudflare-monetization",
+      "competitor": "Cloudflare",
+      "date": "2026-11-10",
+      "source": "https://blog.cloudflare.com/rss/",
+      "summary": "A gateway that lets a seller charge an agent for a request, settling over the x402/HTTP 402 convention.",
+      "mapsTo": "Billing and payments",
+      "verdict": "absent"
+    },
+    {
+      "id": "netlify-server",
+      "competitor": "Netlify",
+      "date": "2026-11-06",
+      "source": "https://www.netlify.com/blog/",
+      "summary": "Long-running backends on the platform, moving it past the request/response shape of edge functions.",
+      "mapsTo": "Functions runtime",
+      "verdict": "partial"
+    },
+    {
+      "id": "netlify-connectors",
+      "competitor": "Netlify",
+      "date": "2026-11-06",
+      "source": "https://www.netlify.com/blog/",
+      "summary": "A large connector catalogue aimed at agents that need to reach many services out of the box.",
+      "mapsTo": "Production readiness",
+      "verdict": "absent"
+    },
+    {
+      "id": "supabase-compute",
+      "competitor": "Supabase",
+      "date": "2026-11-04",
+      "source": "https://supabase.com/blog",
+      "summary": "Services and agents that run next to the database with no limit on how long they stay up.",
+      "mapsTo": "Builder and project deployment dispatch",
+      "verdict": "partial"
+    },
+    {
+      "id": "acurast-network",
+      "competitor": "Acurast",
+      "date": "2026-11-02",
+      "source": "https://acurast.com/blog/",
+      "summary": "A self-reported large smartphone network doing confidential compute, with agents paying in USDC over x402.",
+      "mapsTo": "Fleet mesh",
+      "verdict": "partial"
+    }
+  ]
+}

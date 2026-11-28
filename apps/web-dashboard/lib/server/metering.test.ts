@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { newId, openDb } from "./db.ts";
-import { METERS, collectUsage, periodStart, record } from "./metering.ts";
+import { METERS, collectUsage, meterUsage, periodStart, quotaBreach, quotaMessage, record } from "./metering.ts";
 
 const db = openDb(join(mkdtempSync(join(tmpdir(), "mc-meter-")), "t.db"));
 
@@ -57,4 +57,40 @@ test("a configured quota flags a meter as over its limit", (t) => {
   assert.equal(metric?.over, true);
   // No payment provider is wired, so a breach is still not billable.
   assert.equal(usage.billable, false);
+});
+
+test("the spend cap blocks the operation that would exceed it", (t) => {
+  const owner = "meter-owner-5";
+  const previous = process.env.MOBILECLOUD_QUOTA_FUNCTION_INVOCATIONS;
+  t.after(() => { if (previous === undefined) delete process.env.MOBILECLOUD_QUOTA_FUNCTION_INVOCATIONS; else process.env.MOBILECLOUD_QUOTA_FUNCTION_INVOCATIONS = previous; });
+  process.env.MOBILECLOUD_QUOTA_FUNCTION_INVOCATIONS = "2";
+
+  record(db, owner, "function_invocations", 1);
+  // One below the cap: the next invocation still fits, so it is allowed.
+  assert.equal(quotaBreach(db, owner, "function_invocations"), null);
+
+  record(db, owner, "function_invocations", 1);
+  // At the cap: no further invocation may be recorded this period.
+  const breach = quotaBreach(db, owner, "function_invocations");
+  assert.deepEqual(breach, { meter: "function_invocations", limit: 2, used: 2, requested: 1 });
+  assert.match(quotaMessage(breach!), /2 of 2 invocations/);
+  assert.equal(meterUsage(db, owner, "function_invocations"), 2);
+});
+
+test("a meter with no configured cap is never blocked", () => {
+  const owner = "meter-owner-6";
+  record(db, owner, "webhook_deliveries", 5000);
+  assert.equal(quotaBreach(db, owner, "webhook_deliveries"), null);
+  assert.equal(meterUsage(db, owner, "webhook_deliveries"), 5000);
+});
+
+test("storage is capped as a gauge on top of prior writes", (t) => {
+  const owner = "meter-owner-7";
+  const previous = process.env.MOBILECLOUD_QUOTA_OBJECT_BYTES;
+  t.after(() => { if (previous === undefined) delete process.env.MOBILECLOUD_QUOTA_OBJECT_BYTES; else process.env.MOBILECLOUD_QUOTA_OBJECT_BYTES = previous; });
+  process.env.MOBILECLOUD_QUOTA_OBJECT_BYTES = "1000";
+  db.prepare("INSERT INTO objects (id, owner_id, bucket, key, path, bytes, created_at) VALUES (?, ?, 'b', ?, ?, 900, ?)")
+    .run(newId(), owner, newId(), `/tmp/${newId()}`, Date.now());
+  assert.equal(quotaBreach(db, owner, "object_bytes", 100), null);
+  assert.equal(quotaBreach(db, owner, "object_bytes", 101)?.used, 900);
 });

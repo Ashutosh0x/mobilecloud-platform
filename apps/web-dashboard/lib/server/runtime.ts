@@ -31,7 +31,7 @@ export function inProcessRuntimeAllowed(env: NodeJS.ProcessEnv = process.env): b
 
 /** Stable error text used by API routes and operators. */
 export const RUNTIME_DISABLED =
-  "In-process functions and workflows are disabled in production. Move execution to an isolated worker, or explicitly set MOBILECLOUD_IN_PROCESS_RUNTIME=1 for a non-production evaluation deployment.";
+  "In-process functions and workflows are disabled in production. Run handlers in an isolated worker by setting MOBILECLOUD_ISOLATED_RUNTIME=1, or explicitly set MOBILECLOUD_IN_PROCESS_RUNTIME=1 for a non-production evaluation deployment.";
 
 export type FunctionRequest = {
   method: string;
@@ -98,7 +98,8 @@ function resolveHandler(exported: unknown, sandbox: Record<string, unknown>): ((
   return null;
 }
 
-function normalize(raw: unknown): Omit<FunctionResult, "durationMs"> {
+/** Normalises a handler's raw return value into the API response shape. */
+export function normalizeResult(raw: unknown): Omit<FunctionResult, "durationMs"> {
   if (raw === undefined || raw === null) return { status: 200, headers: {}, body: null };
   if (typeof raw === "string") {
     if (Buffer.byteLength(raw, "utf8") > MAX_OUTPUT_BYTES) throw new FunctionError(413, "Handler response exceeds 256 KB");
@@ -165,6 +166,6 @@ export function runFunction(source: string, req: FunctionRequest): FunctionResul
   if (result && (typeof result === "object" || typeof result === "function") && typeof (result as { then?: unknown }).then === "function") {
     throw new FunctionError(422, "Async handlers are not supported; return a value synchronously");
   }
-  const normalized = normalize(result);
+  const normalized = normalizeResult(result);
   return { ...normalized, durationMs: Date.now() - started };
 }

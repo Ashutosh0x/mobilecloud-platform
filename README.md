@@ -681,6 +681,7 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 | [ACURAST-TEE.md](docs/ACURAST-TEE.md) | Attestor signing architecture and TEE roadmap |
 | [INTEGRATION-GUIDE.md](docs/INTEGRATION-GUIDE.md) | How to read and independently verify the proof-of-reserve |
 | [ROADMAP.md](docs/ROADMAP.md) | Phase 1–6 plan with honest status tags |
+| [COMPETITIVE-ROADMAP.md](docs/COMPETITIVE-ROADMAP.md) | P1–P10 answer to the agent-platform competitors (Vercel, Fly.io, Cloudflare, Netlify, Supabase, Acurast) with honest per-item status |
 | [AUDIT-EVIDENCE.md](docs/AUDIT-EVIDENCE.md) | Integrity manifests, verification scripts, commit anchors |
 | [FEATURE-REPORT.md](docs/FEATURE-REPORT.md) | Verified inventory of every claimed system and feature — implemented vs UI-only vs absent |
 | [FEATURE-STATUS.md](docs/FEATURE-STATUS.md) | Generated feature-status table; `features/status.json` is the source of truth |

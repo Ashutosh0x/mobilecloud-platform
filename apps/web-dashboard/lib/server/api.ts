@@ -45,8 +45,9 @@ import { createStepUp, StepUpError, verifyStepUp } from "./stepup.ts";
 import { approveQrLogin, consumeQrLogin, createQrLogin, denyQrLogin, QrLoginError, qrLoginStatus, scanQrLogin } from "./qrlogin.ts";
 import { createSession, listAccountSessions, type ClientType } from "./sessions.ts";
 import { EVENT_TYPES, changesSince, latestSeq, publish, snapshot, tx } from "./events.ts";
-import { collectUsage, record as recordUsage } from "./metering.ts";
-import { FunctionError, inProcessRuntimeAllowed, RUNTIME_DISABLED, validateSource, runFunction } from "./runtime.ts";
+import { collectUsage, quotaBreach, quotaMessage, record as recordUsage } from "./metering.ts";
+import { FunctionError, RUNTIME_DISABLED, validateSource } from "./runtime.ts";
+import { executeFunction, runtimeEnabled } from "./isolate.ts";
 import { deliverableHost, listDeliveries } from "./webhook.ts";
 import { parseSteps, runWorkflow } from "./workflows.ts";
 import { insertAttestation, porState, validateAttestation } from "./por.ts";
@@ -2623,7 +2624,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   }
 
   if (key === "POST functions") {
-    if (!inProcessRuntimeAllowed()) throw new RequestError(503, RUNTIME_DISABLED);
+    if (!runtimeEnabled()) throw new RequestError(503, RUNTIME_DISABLED);
     const input = await body(req);
     const name = safeSlug(str(input.name), "Function name");
     const routePath = str(input.route);
@@ -2640,7 +2641,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     return { response: json({ ok: true, hasSource: true }), status: 201, owner };
   }
   if (method === "POST" && parts[0] === "functions" && parts[2] === "invoke") {
-    if (!inProcessRuntimeAllowed()) throw new RequestError(503, RUNTIME_DISABLED);
+    if (!runtimeEnabled()) throw new RequestError(503, RUNTIME_DISABLED);
     const row = db.prepare("SELECT id, name, route, source FROM functions WHERE owner_id = ? AND id = ?")
       .get(owner, parts[1]) as { id: string; name: string; route: string; source: string | null } | undefined;
     if (!row) return { response: json({ error: "Function not found" }, 404), status: 404, owner };
@@ -2648,9 +2649,14 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       log(owner, "error", "functions", `${row.name} was not invoked: no handler source is stored`);
       return { response: json({ error: "No handler source is stored for this function, so it was not executed." }, 409), status: 409, owner };
     }
+    const cap = quotaBreach(db, owner, "function_invocations");
+    if (cap) {
+      log(owner, "warn", "functions", `${row.name} was blocked by the invocation spend cap (${cap.used}/${cap.limit})`);
+      throw new RequestError(429, quotaMessage(cap));
+    }
     const input = await body(req);
     const url = new URL(req.url);
-    const result = runFunction(row.source, {
+    const result = executeFunction(row.source, {
       method: "POST",
       path: row.route,
       query: Object.fromEntries(url.searchParams),
@@ -3285,7 +3291,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   }
 
   if (key === "POST workflows") {
-    if (!inProcessRuntimeAllowed()) throw new RequestError(503, RUNTIME_DISABLED);
+    if (!runtimeEnabled()) throw new RequestError(503, RUNTIME_DISABLED);
     const input = await body(req);
     const name = safeSlug(str(input.name), "Workflow name");
     const steps = parseSteps(input.steps);
@@ -3299,10 +3305,15 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
     return { response: json({ ok: true, steps: steps.length }), status: 201, owner };
   }
   if (method === "POST" && parts[0] === "workflows" && parts[2] === "run") {
-    if (!inProcessRuntimeAllowed()) throw new RequestError(503, RUNTIME_DISABLED);
+    if (!runtimeEnabled()) throw new RequestError(503, RUNTIME_DISABLED);
     const row = db.prepare("SELECT id, name, steps FROM workflows WHERE owner_id = ? AND id = ?")
       .get(owner, parts[1]) as { id: string; name: string; steps: string | null } | undefined;
     if (!row) return { response: json({ error: "Workflow not found" }, 404), status: 404, owner };
+    const cap = quotaBreach(db, owner, "workflow_runs");
+    if (cap) {
+      log(owner, "warn", "workflows", `${row.name} was blocked by the run spend cap (${cap.used}/${cap.limit})`);
+      throw new RequestError(429, quotaMessage(cap));
+    }
     const outcome = runWorkflow(db, owner, row);
     const id = newId();
     tx(db, () => {
