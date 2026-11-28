@@ -559,6 +559,89 @@ CREATE TABLE IF NOT EXISTS auth_events (
 CREATE INDEX IF NOT EXISTS idx_auth_events_user ON auth_events(user_id);
 CREATE INDEX IF NOT EXISTS idx_auth_events_type ON auth_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_auth_events_created ON auth_events(created_at);
+-- ============================================================================
+-- GITHUB INTEGRATION AND LIVE BUILDS
+-- ============================================================================
+-- A GitHub OAuth connection. The access token is sealed with AES-256-GCM
+-- under a master key that never leaves the database, so a plain database dump
+-- does not hand over the credential.
+CREATE TABLE IF NOT EXISTS github_connections (
+  id                TEXT    PRIMARY KEY,
+  owner_id          TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  github_id         TEXT    NOT NULL,
+  login             TEXT    NOT NULL,
+  avatar_url        TEXT,
+  access_token      TEXT    NOT NULL,               -- sealed
+  refresh_token     TEXT,                           -- sealed
+  token_expires_at  INTEGER,
+  scopes            TEXT,
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL,
+  UNIQUE(owner_id)
+);
+-- Repositories the connection can reach, refreshed from the GitHub API.
+CREATE TABLE IF NOT EXISTS repositories (
+  id                TEXT    PRIMARY KEY,            -- "<github_id>:<full_name>"
+  owner_id          TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  github_id         TEXT    NOT NULL,
+  full_name         TEXT    NOT NULL,
+  name              TEXT    NOT NULL,
+  owner_name        TEXT    NOT NULL,
+  private           INTEGER NOT NULL DEFAULT 0,
+  default_branch    TEXT    NOT NULL DEFAULT 'main',
+  language          TEXT,
+  stars             INTEGER NOT NULL DEFAULT 0,
+  description       TEXT,
+  pushed_at         INTEGER,
+  url               TEXT,
+  imported_project_id TEXT,
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL,
+  UNIQUE(owner_id, github_id)
+);
+-- Short-lived state for the OAuth round trip, so a callback can only finish
+-- the authorization it started.
+CREATE TABLE IF NOT EXISTS oauth_states (
+  state         TEXT    PRIMARY KEY,
+  owner_id      TEXT,
+  created_at    INTEGER NOT NULL,
+  expires_at    INTEGER NOT NULL
+);
+-- The master key that seals third-party credentials. One row, one key.
+CREATE TABLE IF NOT EXISTS secrets (
+  name       TEXT    PRIMARY KEY,
+  value      TEXT    NOT NULL,
+  created_at INTEGER NOT NULL
+);
+-- The live build stream. One row per step, one row per event.
+CREATE TABLE IF NOT EXISTS build_steps (
+  id          TEXT    PRIMARY KEY,
+  build_id    TEXT    NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+  name        TEXT    NOT NULL,
+  status      TEXT    NOT NULL,                    -- pending|running|success|failed|skipped
+  ordinal     INTEGER NOT NULL DEFAULT 0,
+  started_at  INTEGER,
+  finished_at INTEGER,
+  duration_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_build_steps_build ON build_steps(build_id, ordinal);
+CREATE TABLE IF NOT EXISTS build_events (
+  seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+  build_id     TEXT    NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+  type         TEXT    NOT NULL,                   -- log|progress|step|metric|error|complete
+  at           INTEGER NOT NULL,
+  stream       TEXT,                              -- stdout|stderr
+  line         TEXT,
+  percentage   INTEGER,
+  current_step TEXT,
+  eta          INTEGER,
+  step_name    TEXT,
+  step_status  TEXT,
+  duration     INTEGER,
+  metric       TEXT,
+  payload      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_build_events_build ON build_events(build_id, seq);
 `;
 
 let singleton: DatabaseSync | null = null;
@@ -693,6 +776,25 @@ function migrate(db: DatabaseSync) {
       END;
       INSERT INTO control_plane_migrations (version) VALUES (8);
     `);
+  }
+  // v9 adds the GitHub integration and the live build stream: a build now
+  // knows its repository, branch, commit and preview address, and it keeps a
+  // step timeline and an event log beside the row.
+  if (!db.prepare("SELECT 1 FROM control_plane_migrations WHERE version = 9").get()) {
+    addColumns(db, "builds", {
+      repository_id: "TEXT",
+      branch: "TEXT",
+      commit_sha: "TEXT",
+      preview_url: "TEXT",
+      started_at: "INTEGER",
+      finished_at: "INTEGER",
+      duration_ms: "INTEGER",
+      progress: "INTEGER NOT NULL DEFAULT 0",
+      trigger_source: "TEXT",
+      error: "TEXT",
+      cache_key: "TEXT",
+    });
+    db.exec("INSERT INTO control_plane_migrations (version) VALUES (9)");
   }
 }
 

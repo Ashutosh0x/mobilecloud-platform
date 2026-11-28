@@ -105,7 +105,7 @@ test("only development permits default loopback browser origins", async (t) => {
   assert.ok(cookies.every((cookie) => cookie.includes("; Secure")));
 });
 
-test("configured engine remains disabled for builds, deployments and management", async (t) => {
+test("a configured engine is never used: builds run locally, deployments stay blocked", async (t) => {
   const original = process.env.MOBILECLOUD_BUILDER_URL;
   process.env.MOBILECLOUD_BUILDER_URL = "http://127.0.0.1:1";
   t.after(() => { if (original === undefined) delete process.env.MOBILECLOUD_BUILDER_URL; else process.env.MOBILECLOUD_BUILDER_URL = original; });
@@ -113,11 +113,16 @@ test("configured engine remains disabled for builds, deployments and management"
   const created = await request("projects", "POST", { name: "ledger", framework: "Next.js", repoUrl: "https://github.com/acme/ledger.git" }, auth);
   assert.equal(created.status, 201);
   const { id } = await created.json();
-  for (const path of ["builds", "deployments"]) {
-    const result = await request(path, "POST", { projectId: id, target: "web" }, auth);
-    assert.equal(result.status, 403);
-    assert.equal((await result.json()).status, "blocked");
-  }
+  // A build is accepted and runs on the console host's own trusted targets; the
+  // engine is not contacted, so a configured engine URL changes nothing here.
+  const build = await request("builds", "POST", { projectId: id, target: "web" }, auth);
+  assert.equal(build.status, 202);
+  assert.ok((await build.json()).buildId);
+  // Deployment dispatch stays blocked until isolated workers and authorized
+  // management exist.
+  const deploy = await request("deployments", "POST", { projectId: id, target: "web" }, auth);
+  assert.equal(deploy.status, 403);
+  assert.equal((await deploy.json()).status, "blocked");
   const info = await (await request("builder", "GET", undefined, auth)).json();
   assert.equal(info.enabled, false);
   assert.equal(info.reachable, false);

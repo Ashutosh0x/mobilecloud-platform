@@ -10,6 +10,29 @@ import { collectAnalytics, collectHost, collectMetrics } from "./metrics.ts";
 import { capabilities, collectObservability, inspectRequest, listBuilds, listDrives, listFirewallEvents, listRules, listWorkflows, observedJa4, summarizeVitals, trafficSummary } from "./platform.ts";
 import { approveDevice, clearProtection, createToken, gateCookie, identityProviders, listNotifications, listSessions, listTokens, listWebhooks, notify, pollDevice, protectionStatus, readGate, setProtection, startDevice, unlockProtection, userFromBearer } from "./identity.ts";
 import { assessLoginRisk, geoFor, listAuthEvents, logAuthEvent } from "./audit.ts";
+import { listBuilds as listAccountBuilds, readBuild, readBuildEvents, startBuild } from "./builds.ts";
+import {
+  authorizationUrl,
+  beginAuthorization,
+  beginDeviceAuthorization,
+  consumeAuthorization,
+  deleteConnection,
+  exchangeCode,
+  fetchFile,
+  fetchRepositories,
+  fetchTree,
+  fetchViewer,
+  findRepository,
+  githubConfig,
+  listRepositories,
+  ownersForRepository,
+  parseWebhookEvent,
+  pollDeviceAuthorization,
+  readConnection,
+  saveConnection,
+  syncRepositories,
+  verifyWebhookSignature,
+} from "./github.ts";
 import { approveDeviceCode, authenticateClient, checkScope, createAuthorizationCode, createClient, deleteClient, denyDeviceCode, findClient, findDeviceCode, listClients, OAuthError, redeemAuthorizationCode, redeemDeviceCode, refreshTokens, startDeviceGrant, updateClient, type OAuthClient, type TokenPair } from "./oauth.ts";
 import { decodeJwtPayload, deliverBackchannelLogout, discovery, ensureSigningKey, issuer as issuerId, issueIdToken, issueLogoutToken, jwks as signingJwks, revokeToken as revokeOAuthToken, rotateSigningKey, userClaims } from "./oidc.ts";
 import { consentFor, hasConsentFor, listConsents, recordConsent, revokeConsent } from "./consent.ts";
@@ -382,6 +405,40 @@ async function body(req: Request, maxBytes = 64 * 1024): Promise<Record<string, 
     if (value && typeof value === "object" && !Array.isArray(value)) return value;
   } catch { /* rejected below */ }
   throw new RequestError(400, "Provide a valid JSON object");
+}
+
+/**
+ * Reads the request body as text.
+ *
+ * A webhook signature is computed over the exact bytes GitHub sent, so the
+ * body has to be read raw rather than parsed and re-serialised.
+ */
+async function rawBody(req: Request, maxBytes = 1024 * 1024): Promise<string> {
+  const reader = req.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  if (reader) {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > maxBytes) {
+        void reader.cancel().catch(() => undefined);
+        throw new RequestError(413, "Request body is too large");
+      }
+      chunks.push(value);
+    }
+  }
+  return Buffer.concat(chunks, length).toString("utf8");
+}
+
+/** Parses JSON without throwing; anything malformed becomes null. */
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
 function str(value: unknown) {
@@ -790,6 +847,63 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       headers.append("set-cookie", csrfCookieHeader(req, csrfToken, WEEK / 1000));
     }
     return { response: json({ user: auth?.user ?? null, csrfToken, token: auth?.via === "bearer" ? auth.token : null }, 200, headers), status: 200, owner: auth?.user.id ?? null };
+  }
+
+  // ---- GitHub: the public half --------------------------------------------
+  // The webhook receiver and the device authorization are reached by GitHub
+  // and by a CLI, not by a signed-in browser, so they live before the gate.
+  // Both are closed unless the operator configured the matching secret.
+
+  if (method === "POST" && parts[0] === "github" && parts[1] === "webhook") {
+    const config = githubConfig();
+    if (!config?.webhookSecret) throw new RequestError(503, "GitHub webhooks are not configured on this server.");
+    const raw = await rawBody(req, 1024 * 1024);
+    if (!verifyWebhookSignature(config.webhookSecret, raw, req.headers.get("x-hub-signature-256"))) {
+      throw new RequestError(401, "The webhook signature did not verify.");
+    }
+    const event = parseWebhookEvent(safeJson(raw));
+    if (!event || event.kind === "ignored") return { response: json({ ok: true, ignored: true }), status: 200, owner: null };
+    const owners = ownersForRepository(db, event.repositoryId);
+    for (const owner of owners) {
+      const repository = findRepository(db, owner, event.repositoryId);
+      if (!repository) continue;
+      const branch = event.branch ?? repository.defaultBranch;
+      const started = startBuild(db, {
+        ownerId: owner,
+        projectId: repository.importedProjectId ?? null,
+        projectName: repository.fullName,
+        target: "repository",
+        triggerSource: `github:${event.kind}`,
+        repositoryId: repository.id,
+        branch,
+        commit: event.commit,
+        note: `${event.kind} on ${event.fullName}`,
+      });
+      log(owner, "info", "builds", `github ${event.kind} on ${event.fullName}`);
+      void started;
+    }
+    return { response: json({ ok: true }), status: 200, owner: null };
+  }
+
+  if (method === "POST" && parts[0] === "github" && parts[1] === "device" && parts[2] === "code") {
+    const config = githubConfig();
+    if (!config) throw new RequestError(503, "GitHub is not configured on this server.");
+    const grant = await beginDeviceAuthorization(config);
+    return { response: json(grant), status: 200, owner: null };
+  }
+
+  if (method === "POST" && parts[0] === "github" && parts[1] === "device" && parts[2] === "token") {
+    const config = githubConfig();
+    if (!config) throw new RequestError(503, "GitHub is not configured on this server.");
+    const input = await body(req, 4096);
+    const result = await pollDeviceAuthorization(config, str(input.device_code) || str(input.deviceCode));
+    if (result.status !== "ok") return { response: json({ status: "pending", error: result.error ?? null }), status: 202, owner: null };
+    const session = authenticate(req, db);
+    if (!session) throw new RequestError(401, "Sign in before linking a GitHub account.");
+    requireCsrf(req, session);
+    const viewer = await fetchViewer(result.token!.accessToken);
+    saveConnection(db, session.user.id, viewer, result.token!);
+    return { response: json({ status: "ok", login: viewer.login }), status: 200, owner: session.user.id };
   }
 
   // ---- Unified authentication ---------------------------------------------
@@ -2085,7 +2199,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       firewall: { rules: listRules(db, owner), events: listFirewallEvents(db, owner), traffic: trafficSummary(db, owner) },
       observability: collectObservability(db, owner),
       vitals: summarizeVitals(db, owner),
-      builds: listBuilds(db, owner),
+      builds: listAccountBuilds(db, owner),
       workflows: listWorkflows(db, owner),
       drives: listDrives(db, owner),
       capabilities: capabilities(),
@@ -2682,22 +2796,184 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   if (key === "POST builds") {
     const input = await body(req);
     const target = str(input.target);
-    if (!["android", "web"].includes(target)) return { response: json({ error: "Target must be android or web" }, 400), status: 400, owner };
+    if (!["android", "web", "repository"].includes(target)) {
+      return { response: json({ error: "Target must be android, web or repository" }), status: 400, owner };
+    }
+    if (target === "repository") {
+      const repository = findRepository(db, owner, str(input.repositoryId) || str(input.repository_id));
+      if (!repository) return { response: json({ error: "Repository not found" }), status: 404, owner };
+      const connection = readConnection(db, owner);
+      if (!connection) return { response: json({ error: "Connect GitHub first" }), status: 409, owner };
+      const [repoOwner, repoName] = String(repository.fullName).split("/");
+      const branch = str(input.branch) || String(repository.defaultBranch);
+      const tree = await fetchTree(connection.accessToken, repoOwner, repoName, branch);
+      const files = await Promise.all(
+        tree.slice(0, 200).map(async (entry) => ({
+          path: entry.path,
+          content: await fetchFile(connection.accessToken, repoOwner, repoName, branch, entry.path),
+        })),
+      );
+      let manifest: unknown = null;
+      const manifestEntry = files.find((file) => file.path === "package.json");
+      if (manifestEntry) manifest = safeJson(manifestEntry.content);
+      const started = startBuild(db, {
+        ownerId: owner,
+        projectId: repository.importedProjectId ?? null,
+        projectName: String(repository.fullName),
+        target: "repository",
+        triggerSource: "console",
+        repositoryId: String(repository.id),
+        branch,
+        commit: str(input.commit) || null,
+        note: `Analysis of ${repository.fullName}@${branch}`,
+        files,
+        manifest,
+      });
+      return { response: json({ ok: true, buildId: started.id }), status: 202, owner };
+    }
     const project = db.prepare("SELECT id, name, repo_url AS repoUrl FROM projects WHERE owner_id = ? AND id = ?")
       .get(owner, str(input.projectId)) as { id: string; name: string; repoUrl: string | null } | undefined;
-    if (!project) return { response: json({ error: "Project not found" }, 404), status: 404, owner };
+    if (!project) return { response: json({ error: "Project not found" }), status: 404, owner };
+    const started = startBuild(db, {
+      ownerId: owner,
+      projectId: project.id,
+      projectName: project.name,
+      target: target as "web" | "android",
+      triggerSource: "console",
+      note: `${project.name} ${target}`,
+    });
+    return { response: json({ ok: true, buildId: started.id }), status: 202, owner };
+  }
 
-    if (target === "android") {
-      const note = "No bare-metal ARM64 runner, Gradle snapshot, or Android SDK is configured. The build was not started.";
-      recordBuild(db, owner, project, target, "blocked", note);
-      log(owner, "warn", "builds", `${project.name} ${target}: ${note}`);
-      return { response: json({ ok: true, status: "blocked", note }), status: 403, owner };
+  if (method === "GET" && parts[0] === "builds" && !parts[1]) {
+    return { response: json({ builds: listAccountBuilds(db, owner) }), status: 200, owner };
+  }
+
+  if (method === "GET" && parts[0] === "builds" && parts[1]) {
+    const detail = readBuild(db, owner, parts[1]);
+    if (!detail) return { response: json({ error: "Build not found" }), status: 404, owner };
+    const after = Number(new URL(req.url).searchParams.get("after") ?? 0);
+    return {
+      response: json({ ...detail, events: readBuildEvents(db, parts[1], Number.isFinite(after) ? after : 0) }),
+      status: 200,
+      owner,
+    };
+  }
+
+  if (method === "POST" && parts[0] === "github" && parts[1] === "connection") {
+    const session = authenticate(req, db);
+    if (!session) throw new RequestError(401, "Sign in to connect GitHub.");
+    requireCsrf(req, session);
+    const config = githubConfig();
+    if (!config) throw new RequestError(503, "GitHub is not configured on this server.");
+    const state = beginAuthorization(db, session.user.id);
+    return {
+      response: new Response(null, { status: 302, headers: { location: authorizationUrl(config, state) } }),
+      status: 302,
+      owner: session.user.id,
+    };
+  }
+
+  if (method === "GET" && parts[0] === "github" && parts[1] === "callback") {
+    const config = githubConfig();
+    if (!config) throw new RequestError(503, "GitHub is not configured on this server.");
+    const params = new URL(req.url).searchParams;
+    const code = str(params.get("code"));
+    const state = str(params.get("state"));
+    if (!code || !state) throw new RequestError(400, "GitHub did not return a code.");
+    const owner = consumeAuthorization(db, state);
+    if (!owner) throw new RequestError(400, "That authorization has expired. Start again.");
+    const token = await exchangeCode(config, code);
+    const viewer = await fetchViewer(token.accessToken);
+    saveConnection(db, owner, viewer, token);
+    syncRepositories(db, owner, await fetchRepositories(token.accessToken));
+    log(owner, "info", "github", `connected ${viewer.login}`);
+    const target = new URL("/github", originOf(req));
+    return { response: new Response(null, { status: 302, headers: { location: target.toString() } }), status: 302, owner };
+  }
+
+  if (method === "GET" && parts[0] === "github" && parts[1] === "status") {
+    const connection = readConnection(db, owner);
+    return {
+      response: json({
+        connected: Boolean(connection),
+        login: connection?.login ?? null,
+        avatarUrl: connection?.avatarUrl ?? null,
+        scopes: connection?.scopes ?? null,
+        repositories: listRepositories(db, owner).length,
+      }),
+      status: 200,
+      owner,
+    };
+  }
+
+  if (method === "GET" && parts[0] === "github" && parts[1] === "repos") {
+    return { response: json({ repositories: listRepositories(db, owner) }), status: 200, owner };
+  }
+
+  if (method === "POST" && parts[0] === "github" && parts[1] === "sync") {
+    const connection = readConnection(db, owner);
+    if (!connection) return { response: json({ error: "Connect GitHub first" }), status: 409, owner };
+    syncRepositories(db, owner, await fetchRepositories(connection.accessToken));
+    return { response: json({ repositories: listRepositories(db, owner) }), status: 200, owner };
+  }
+
+  if (method === "GET" && parts[0] === "github" && parts[1] === "tree") {
+    const connection = readConnection(db, owner);
+    if (!connection) return { response: json({ error: "Connect GitHub first" }), status: 409, owner };
+    const params = new URL(req.url).searchParams;
+    const repository = findRepository(db, owner, params.get("repository") ?? "");
+    if (!repository) return { response: json({ error: "Repository not found" }), status: 404, owner };
+    const [repoOwner, repoName] = String(repository.fullName).split("/");
+    const tree = await fetchTree(connection.accessToken, repoOwner, repoName, params.get("ref") || String(repository.defaultBranch));
+    return { response: json({ files: tree }), status: 200, owner };
+  }
+
+  if (method === "GET" && parts[0] === "github" && parts[1] === "file") {
+    const connection = readConnection(db, owner);
+    if (!connection) return { response: json({ error: "Connect GitHub first" }), status: 409, owner };
+    const params = new URL(req.url).searchParams;
+    const repository = findRepository(db, owner, params.get("repository") ?? "");
+    if (!repository) return { response: json({ error: "Repository not found" }), status: 404, owner };
+    const path = params.get("path") ?? "";
+    if (!path || path.length > 512) return { response: json({ error: "A file path is required" }), status: 400, owner };
+    const [repoOwner, repoName] = String(repository.fullName).split("/");
+    const content = await fetchFile(connection.accessToken, repoOwner, repoName, params.get("ref") || String(repository.defaultBranch), path);
+    return { response: json({ path, content }), status: 200, owner };
+  }
+
+  if (method === "POST" && parts[0] === "github" && parts[1] === "import") {
+    const input = await body(req, 8192);
+    const repository = findRepository(db, owner, str(input.repositoryId) || str(input.repository_id));
+    if (!repository) return { response: json({ error: "Repository not found" }), status: 404, owner };
+    if (repository.importedProjectId) {
+      return { response: json({ ok: true, projectId: repository.importedProjectId, alreadyImported: true }), status: 200, owner };
     }
+    const name = safeSlug(str(input.name) || String(repository.name), "Project name");
+    const projectId = newId();
+    tx(db, () => {
+      db.prepare(
+        "INSERT INTO projects (id, owner_id, name, framework, target, repo_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run(
+        projectId,
+        owner,
+        name,
+        str(input.framework) || String(repository.language ?? "unknown").toLowerCase(),
+        "web",
+        String(repository.url ?? `https://github.com/${repository.fullName}`),
+        Date.now(),
+      );
+      db.prepare("UPDATE repositories SET imported_project_id = ? WHERE id = ?").run(projectId, repository.id);
+    });
+    publish(db, owner, "configuration.updated", projectId, { resource: "project", id: projectId, name, imported: true });
+    log(owner, "info", "github", `imported ${repository.fullName} as ${name}`);
+    return { response: json({ ok: true, projectId }), status: 200, owner };
+  }
 
-    const note = project.repoUrl ? BUILDER_DISABLED : NO_REPO_NOTE;
-    recordBuild(db, owner, project, target, "blocked", note);
-    log(owner, "warn", "builds", `${project.name} ${target}: ${note}`);
-    return { response: json({ ok: true, status: "blocked", note }), status: 403, owner };
+  if (method === "DELETE" && parts[0] === "github" && parts[1] === "connection") {
+    deleteConnection(db, owner);
+    log(owner, "info", "github", "disconnected");
+    return { response: json({ ok: true }), status: 200, owner };
   }
 
   if (key === "POST workflows") {

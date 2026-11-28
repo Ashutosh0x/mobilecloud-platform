@@ -30,6 +30,7 @@ export const EVENT_TYPES = [
   "build.updated",
   "build.completed",
   "build.failed",
+  "build.event",
   "configuration.updated",
   "notification.created",
   "notification.read",
