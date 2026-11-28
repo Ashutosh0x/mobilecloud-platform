@@ -4,6 +4,7 @@ import Link from "next/link";
 import { formatBytes } from "@/lib/format";
 import { useCloud, type RangeKey } from "@/lib/store";
 import { Icon } from "./Icons";
+import { StatusPill } from "./StatusPill";
 import { ClientTime, Duration } from "./Time";
 
 const RANGES: RangeKey[] = ["1h", "24h", "7d", "30d"];
@@ -73,7 +74,7 @@ export function HomeDashboard() {
               {deployments.map((d) => (
                 <tr key={d.id}>
                   <td>{d.project}</td>
-                  <td className={`badge ${d.status === "failed" ? "error" : "warn"}`}>{d.status}</td>
+                  <td><StatusPill status={d.status} label={d.status} /></td>
                   <td><ClientTime ts={d.createdAt} /></td>
                 </tr>
               ))}

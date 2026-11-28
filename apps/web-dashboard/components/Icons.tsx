@@ -15,10 +15,12 @@ import {
   House,
   Lightning,
   MagnifyingGlass,
+  Moon,
   Pulse,
   RocketLaunch,
   ShieldCheck,
   SquaresFour,
+  Sun,
   TerminalWindow,
   User,
   Users,
@@ -86,6 +88,10 @@ export function Icon({ name, size = 16, weight = "regular" }: { name: string; si
       return <GithubLogo {...shared} />;
     case "branch":
       return <GitBranch {...shared} />;
+    case "sun":
+      return <Sun {...shared} />;
+    case "moon":
+      return <Moon {...shared} />;
     default:
       return null;
   }

@@ -48,9 +48,22 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     // otherwise trip a hydration mismatch on every page.
     <html lang="en" suppressHydrationWarning>
       <body className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
+        <ThemeScript />
         <Pwa />
         <StoreProvider>{children}</StoreProvider>
       </body>
     </html>
   );
+}
+
+/**
+ * Applies the stored theme before the first paint.
+ *
+ * Without this the page would render in the default palette and then switch,
+ * which is a flash on every load. The script is deliberately tiny and
+ * inline: it has to run before the stylesheet paints.
+ */
+function ThemeScript() {
+  const script = `try{var s=localStorage.getItem("mc-theme");var t=s==="light"||s==="dark"?s:(matchMedia("(prefers-color-scheme: light)").matches?"light":"dark");document.documentElement.dataset.theme=t;}catch(e){}`;
+  return <script dangerouslySetInnerHTML={{ __html: script }} />;
 }

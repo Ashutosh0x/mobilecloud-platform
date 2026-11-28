@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { request, useCloud } from "@/lib/store";
 import { realtimeLabel } from "@/lib/realtime";
+import { useTheme } from "@/lib/theme";
 import { Icon } from "./Icons";
 
 const GROUPS = [
@@ -78,6 +79,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [account, setAccount] = useState(false);
   const [cursor, setCursor] = useState(0);
   const [palette, setPalette] = useState("");
+  const [theme, toggleTheme] = useTheme();
   const [help, setHelp] = useState(false);
   const jumpDialog = useRef<HTMLDialogElement>(null);
   const helpDialog = useRef<HTMLDialogElement>(null);
@@ -121,6 +123,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
         setJump(true);
         return;
       }
+      if ((e.metaKey || e.ctrlKey) && e.key === ".") {
+        e.preventDefault();
+        toggleTheme();
+        return;
+      }
       if (e.key === "Escape") {
         setJump(false);
         setNotes(false);
@@ -148,7 +155,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [router]);
+  }, [router, toggleTheme]);
 
   useEffect(() => {
     if (!state.toast) return;
@@ -264,6 +271,15 @@ export function Shell({ children }: { children: React.ReactNode }) {
           <button className="icon-btn" type="button" aria-label="Notifications" aria-expanded={notes} onClick={() => { setNotes((v) => !v); setAccount(false); }}>
             <Icon name="bell" />
             {unread > 0 && <i className="ping" />}
+          </button>
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label={theme === "dark" ? "Switch to the light theme" : "Switch to the dark theme"}
+            title={theme === "dark" ? "Switch to the light theme" : "Switch to the dark theme"}
+            onClick={toggleTheme}
+          >
+            <Icon name={theme === "dark" ? "sun" : "moon"} size={18} />
           </button>
           <button className="avatar" type="button" aria-label="Account menu" aria-expanded={account} onClick={() => { setAccount((v) => !v); setNotes(false); }}>
             <Icon name="user" size={18} />
