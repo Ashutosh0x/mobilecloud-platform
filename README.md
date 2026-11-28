@@ -46,11 +46,14 @@ The web console and the Android app are two synchronized clients of one backend:
 | Claim | Status |
 | :--- | :--- |
 | Android APK | A **console client**. It does not run the Rust edge engine. |
-| Dashboard project deployments | The dashboard **records** deployment and build requests; it does not dispatch them to the engine. Engine dispatch is disabled until isolated workers and tenant authorization exist. |
-| Functions runtime | **Bounded, in-process.** A function stores a JavaScript handler and runs in a `node:vm` context with no `require`, `process`, `fetch`, filesystem, or timers — synchronously, under a 250 ms wall-clock timeout. It isolates globals, not the process; it is not a sandbox for hostile code. |
-| Workflow worker | **In-process.** A workflow stores an ordered step list that references your own functions; a run executes each step, threads its output into the next, and stops at the first failure. |
+| Dashboard project deployments | **Opt-in dispatch.** Deploy, rollback and deployment lookup proxy to the core engine only when `MOBILECLOUD_BUILDER_URL` *and* `MOBILECLOUD_BUILDER_TOKEN` are both set, and the engine re-validates the project, the clone URL and the ref. Without them the request is refused with `403` and recorded as blocked. **Not done:** per-tenant isolation on the engine side. |
+| Functions runtime | **Two runtimes, both bounded.** The default is a `node:vm` context with no `require`, `process`, `fetch`, filesystem or timers, run synchronously under a 250 ms wall-clock timeout: it isolates globals, not the process, and is fail-closed in production unless `MOBILECLOUD_IN_PROCESS_RUNTIME=1`. The opt-in runner (`MOBILECLOUD_ISOLATED_RUNTIME=1`) executes the same handler in a **separate child process** with a hard V8 old-space ceiling and a parent kill backstop, so a runaway loop or a memory bomb can only take down the child. Nine hostile-code tests assert the server survives. It is process and resource isolation — **not** a filesystem or network jail. |
+| Workflow worker | **In-process.** A workflow stores an ordered step list that references your own functions; a run executes each step, threads its output into the next, and stops at the first failure. It inherits the functions-runtime gate and uses the same executor. |
 | Webhook delivery | **Working.** A delivery is queued in the same transaction as its event, signed with HMAC-SHA256, retried with capped exponential backoff up to 5 attempts, and recorded in a delivery log. Loopback and private targets are refused. |
 | Local build preview | **Not sandboxed.** The preview runs in the plain app UID. Do not run untrusted repositories. |
+| Domain lifecycle | **Phase 1 implemented.** A domain carries three *independent* signals — DNS, TLS and origin health — and the lifecycle is derived from DNS alone, deliberately: a live domain with a down origin keeps a green lifecycle tone and a red health tone at the same time. The console detects the authoritative DNS provider by NS lookup against a curated public-suffix list, validates the hostname on the server with a mirrored client check, shows the exact records to add, and verifies them. **Not done:** the console never writes DNS for you, SSL is *recorded, not provisioned* (`ssl_status` stays `none` until a certificate authority is wired), the origin is not probed yet, and there is no multi-region propagation map. See [docs/DOMAINS.md](docs/DOMAINS.md). |
+| Team roles and RBAC | **Implemented.** An `owner`/`member`/`viewer` matrix is enforced on every API mutation and in the team console: invite with a role, promote and demote with last-owner protection, remove a member. An unknown role fails closed. Resources are scoped by `owner_id` — one account per console, with no organisation membership tables. |
+| Spend caps | **Working.** Usage is metered per meter and a per-period cap (`MOBILECLOUD_QUOTA_<METER>`) rejects further function invocations and workflow runs with `429` once it is reached. There is still no payment provider, wallet, KYC, card vault or invoicing. |
 | GitHub integration | **Working.** An OAuth app installs on an account, its token is sealed at rest with AES-256-GCM under a master key in the database, webhooks are verified with a constant-time HMAC-SHA256 comparison and fail closed when no secret is configured, and a connected repository can be imported as a project. **Not done:** GitHub App manifest hosting, installation tokens for other users' repositories, and marketplace listings. |
 | Live builds | **Working, with a hard boundary.** The `web` and `android` targets run the platform's own fixed commands and stream their output as `BuildEvent`s over the realtime bus. The `repository` target only *analyses* a repository — fetch, framework detection, content hashing, cache decision and a preview — it never executes repository code. Repository code is never executed by the control plane. |
 | Console design system | **Working.** One token set (brand `#0066FF`, cyan `#00D4FF`, green `#00C853`, orange `#FF6D00`, red `#FF1744`, purple `#7C4DFF`, gold `#FFD600`) drives both the dark and the light palette, every glyph is an official Phosphor icon, and the shared UI kit provides the sparkline, time-series, score ring, gauge, health banner and trend card. The Command Center dashboard renders only measured values; a figure that was not measured stays blank. |
@@ -64,7 +67,8 @@ The web console and the Android app are two synchronized clients of one backend:
 | On-device AI/ML inference (ONNX, TFLite, NPU) | **Not implemented.** No inference code exists in this repository. |
 | Fleet mesh | **Node-management slice implemented** in the `fleet-mesh` crate: enrollment, Ed25519 device identity, replay-protected signed heartbeats, revocation, liveness sweeps, capability/energy telemetry with measurement provenance, and deterministic resource-aware placement, behind a fail-closed authenticated API. **Not yet implemented:** peer discovery, device-to-device transport (NAT traversal/encryption), load balancing, replication, distributed job orchestration, and dashboard wiring. No device-to-device traffic has been exercised on real hardware. |
 | Sovereign DNS authority | **Built, tested, not deployed.** `dns-authority/` (`mc-dns-authority`) is a self-contained authoritative DNS server: a hand-rolled RFC 1035/3596/2782/6844 wire codec with name compression, zone and record storage, authoritative resolution (REFUSED for zones we do not own; NODATA and NXDOMAIN are distinct and both carry a SOA), GeoDNS PoP selection for `proxied` A records, a Cloudflare-shaped management API on `:8053`, UDP/TCP DNS listeners on `:53`, and Prometheus counters. 50 unit tests, including a live loopback UDP round-trip. **Not done:** DNSSEC signing, zone transfer (AXFR/IXFR), BGP/Anycast announcement, a replicated store, and any production traffic. `furlpay.com` is still served by the third-party DNS provider until a zone is deliberately cut over. |
-| Billing & payments | **Not implemented.** Usage is metered (append-only counters per meter), but there is no payment provider, invoicing, or charging. |
+| Billing & payments | **Not implemented.** Usage is metered (append-only counters per meter) and a per-period spend cap is enforced per meter, but there is no payment provider, invoicing, or charging. |
+| Competitor Radar | **Partial.** A curated self-audit maps each competitor record to this repository's own components, and a CI guard enforces a source link, a public host, a valid mapping and freshness. The console button and scheduled live fetching are not built. |
 | Hardware battery bypass, energy figures, "zero-millisecond UPS" | **Not claimed.** No measurement in this repository supports them. |
 
 > The full, evidence-backed audit of every claimed system and feature — including the subsystems above that the source report over-claimed — is in [`docs/FEATURE-REPORT.md`](docs/FEATURE-REPORT.md).
@@ -341,6 +345,63 @@ Everything is configured from the environment (`MC_DNS_UDP`, `MC_DNS_TCP`, `MC_D
 
 See [docs/GITHUB-INTEGRATION.md](docs/GITHUB-INTEGRATION.md) and [docs/BUILD-SYSTEM.md](docs/BUILD-SYSTEM.md).
 
+### 17. Domain Lifecycle — DNS, TLS and Origin Health
+
+The console does not show one green badge for a domain. It shows three signals
+that are allowed to disagree, because they *do* disagree in the wild:
+
+| Signal | What it means | Where it comes from |
+| :--- | :--- | :--- |
+| DNS | Does the record point where we expect? | a real lookup against the authoritative nameservers |
+| TLS | Where is the certificate in its lifecycle? | recorded from the provisioning flow |
+| Health | Is the origin actually serving? | an origin probe (not implemented yet) |
+
+* **The lifecycle is derived from DNS alone.** `deriveStatus` gates the state
+  machine on DNS and deliberately does not fold health into it, so a live
+  domain with a down origin keeps a green lifecycle tone and a red health tone
+  at the same time. Collapsing them would hide the outage.
+* **Provider auto-detection**: the authoritative provider is detected by NS
+  lookup against a curated public-suffix list — Cloudflare, Route 53, DigitalOcean
+  and the rest — so the console can tell the operator *which* records to add
+  rather than guessing.
+* **Validation on both sides**: the hostname is validated on the server, and the
+  same rule is mirrored in the console and in the Android card, so the browser
+  and the API agree on what a legal name is.
+* **Honest SSL**: SSL is *recorded, not provisioned*. `ssl_status` stays `none`
+  until a certificate authority is wired, so a domain can reach `dns_verified`
+  and deliberately stop there. Nothing is shown as `active` on a timer, and the
+  API says so in its own response.
+* **One model, two clients**: the web console renders a lifecycle pill, three
+  signal tiles and a copy-to-clipboard DNS instruction card; the Android app
+  renders the same three signals and the same card, and mirrors the validation
+  rule.
+
+The full ledger, including what is deliberately absent, is in
+[docs/DOMAINS.md](docs/DOMAINS.md); the design it implements is in
+[docs/DOMAIN-CONFIGURATION-UI-UX-2026.md](docs/DOMAIN-CONFIGURATION-UI-UX-2026.md).
+
+### 18. Isolated Execution, Spend Caps & Engine Dispatch
+
+* **Two function runtimes** (see the release-status table): the bounded
+  in-process `node:vm` runtime, and an opt-in process-isolated runner that
+  executes each handler in a fresh child process with a hard V8 old-space
+  ceiling and a parent kill backstop. Nine hostile-code tests assert that a
+  runaway loop, a memory bomb and a host-global reach cannot take down the
+  server.
+* **Per-period spend caps**: a cap per meter rejects further function
+  invocations and workflow runs with `429` once it is reached, so an account
+  cannot run unbounded work on a shared plan.
+* **Opt-in engine dispatch**: deploy, rollback and deployment lookup reach the
+  core engine only when both the builder URL and the builder token are
+  configured; the engine re-validates the project, the clone URL and the ref.
+  Without them the request is refused with `403` and recorded as blocked, so
+  the default deployment records intent without pretending to act on it.
+* **Role enforcement**: an `owner`/`member`/`viewer` matrix gates every
+  mutation, with last-owner protection on demotion and removal.
+
+The per-item status against the competitor set is in
+[docs/COMPETITIVE-ROADMAP.md](docs/COMPETITIVE-ROADMAP.md).
+
 ## System Architecture
 
 ```mermaid
@@ -486,7 +547,7 @@ graph TD
 
     subgraph AppPlane["Mobile & Web Applications"]
         ANDROID["android-app (com.mobilecloud.node)<br/>• Kotlin 2.0 + Jetpack Compose<br/>• JNI forkpty terminal + VirtualKeyBar<br/>• TerminalSessionService (wake lock)<br/>• BiometricPrompt · Glance widgets"]
-        DASHBOARD["apps/web-dashboard<br/>• Next.js 15 developer console<br/>• 20 platform views<br/>• Shared realtime client (one socket)"]
+        DASHBOARD["apps/web-dashboard<br/>• Next.js 15 developer console<br/>• Command Center + design system<br/>• Domain lifecycle · RBAC · spend caps<br/>• Shared realtime client (one socket)"]
         CLOUDSHELL["web-cloudshell<br/>• WebGL Xterm.js browser PTY<br/>• File manager + web preview picker<br/>• Auto-reconnecting WebSockets"]
     end
 
@@ -542,7 +603,7 @@ k6 run -e TARGET=https://your.edge.host benchmarks/k6-load-test.js
 | **`mc-dns-authority`** | 59 tests | Wire codec round-trips (parse → encode with name compression), label and name length limits, TXT chunking, and A/AAAA/CNAME/MX/TXT/NS/SRV/CAA/SOA rdata parsing; a name that exists without the queried type answers NODATA (NOERROR + SOA) while an unknown name answers NXDOMAIN, and both carry the SOA; a query for a zone we do not own is REFUSED with no zone echoed and without the authoritative bit; a CNAME chain is followed only while it stays inside our zones and is bounded; a CAA record set restricts issuance to the named CA while an empty set leaves it unrestricted; a `proxied` A record answers with the nearest edge PoP instead of its literal value, a non-geo-locatable client (an IPv6 peer) gets the default PoP, and a `proxied` AAAA is withheld as NODATA rather than leaking its origin; a zone with geo routing disabled answers the literal value; a CNAME is refused at a name that already holds another record, and another type is refused at a CNAME name; a query's EDNS OPT is echoed back while a plain query gets none; the store upserts by id *and* by the natural key `(zone, name, type, value)` and its JSON snapshot is written atomically (temp file + rename); the management API accepts relative and absolute record names, normalises types to upper case, rejects an invalid rdata value, refuses a duplicate zone with a conflict, and gates the zone routes behind a bearer token while leaving the health probe open; a UDP answer over the budget sets `TC` and empties every section; and a real loopback UDP query round-trips end to end. |
 | **`fleet-mesh`** | 43 tests | Ed25519 device-identity sign → verify round-trip and fail-closed verification of malformed keys/signatures; constant-time token comparison; strictly-increasing heartbeat sequence numbers that reject replays, gaps and unknown/revoked nodes; enrollment-token and operator-bearer authorization (401 on any missing, malformed, or wrong credential); deterministic resource-aware node selection (cores → RAM → storage → id); telemetry that refuses an `Unsupported` measurement carrying data and rejects battery > 100% or used > total; liveness classification and stale/offline sweeps; enrollment idempotency per device public key. |
 | **`por-xdr-toolkit`** | 4 tests | Protocol 30 XDR encoding/decoding, RFC 4506 `Option<ScVec>` presence-flag alignment. |
-| **`apps/web-dashboard`** | 230 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. Authentication: a device grant issues a scoped CLI token once after approval and is refused before it; refresh tokens rotate and a replayed token revokes the family; a `cli:full` bearer can revoke devices and sessions but cannot mutate the account; QR login reaches `APPROVED` only through the phone's signature over the browser's challenge and the challenge is single use; WebAuthn options are bound to the console's RP id and require user verification; the risk engine blocks impossible travel and scores a new country and address as `medium`. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Platform services: a function runs inside a `node:vm` context with no `require`/`process`/`fetch`/timers and is rejected when over the source or output byte cap or the 250 ms timeout; a workflow threads each step's output into the next and stops at the first failure; a webhook delivery is queued once per subscriber in the event's own transaction, signed HMAC-SHA256, backoff-capped at 5 attempts, and refused against loopback/private targets; usage counters append per meter; a PoR attestation is validated and stored read-only, and a missing attestation reports `unverified`. Subsystem health: a probe reports its round trip and status code, a refused connection and a timeout are results rather than exceptions, a deployment with nothing attached reports the database as healthy and every absent subsystem as `unconfigured`, and a broken gateway fails the whole report. Security score: a healthy account scores 100, a failing check costs only its own weight, a check that cannot be measured is skipped and its weight removed, and a perpetual API token is reported. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
+| **`apps/web-dashboard`** | 230 tests | Real-time synchronization: a mutation commits its outbox row in the same transaction; a live WebSocket client receives it; a reconnect replays missed changes exactly once and in order; cross-account isolation; anonymous socket upgrade and unauthenticated `GET /api/sync/changes` are rejected. Authentication: a device grant issues a scoped CLI token once after approval and is refused before it; refresh tokens rotate and a replayed token revokes the family; a `cli:full` bearer can revoke devices and sessions but cannot mutate the account; QR login reaches `APPROVED` only through the phone's signature over the browser's challenge and the challenge is single use; WebAuthn options are bound to the console's RP id and require user verification; the risk engine blocks impossible travel and scores a new country and address as `medium`. QR device pairing: scan → browser approval → claim mints a credential **and** signs the phone in; a tampered secret, a stranger's pairing, an unapproved early claim, an expired session and a replayed claim are each refused; a new QR code supersedes the previous one. Platform services: a function runs inside a `node:vm` context with no `require`/`process`/`fetch`/timers and is rejected when over the source or output byte cap or the 250 ms timeout; a workflow threads each step's output into the next and stops at the first failure; a webhook delivery is queued once per subscriber in the event's own transaction, signed HMAC-SHA256, backoff-capped at 5 attempts, and refused against loopback/private targets; usage counters append per meter; a PoR attestation is validated and stored read-only, and a missing attestation reports `unverified`. Domain lifecycle: the status is derived from DNS alone so a live domain with a down origin keeps both tones, the provider is detected by NS lookup, a hostname is validated on the server, and the domain events reach the outbox. Roles: the owner/member/viewer matrix is enforced on every mutation and an unknown role fails closed. Isolation: nine hostile-code tests assert that a runaway loop, a memory bomb and a host-global reach cannot take the server down. Subsystem health: a probe reports its round trip and status code, a refused connection and a timeout are results rather than exceptions, a deployment with nothing attached reports the database as healthy and every absent subsystem as `unconfigured`, and a broken gateway fails the whole report. Security score: a healthy account scores 100, a failing check costs only its own weight, a check that cannot be measured is skipped and its weight removed, and a perpetual API token is reported. Runs the real `server/realtime.mjs` gateway as a child process, not a mock. |
 | **SSO provider** (in `apps/web-dashboard`) | 40 tests | OIDC discovery and JWKS; a full PKCE code exchange whose RS256 ID token is verified against the published key; confidential-client authentication (Basic and secret-post); scope-filtered claims; refresh rotation and reuse detection; RFC 7009 revocation; exact redirect and post-logout redirect matching. SAML: metadata, deflated and plain AuthnRequests, signed-request verification against the SP certificate, signature-wrapping rejection, DOCTYPE refusal, and a signed assertion in an auto-submit POST form. SCIM: hashed token auth, user and group CRUD, supported filters, PATCH/PUT deprovisioning that removes sessions and tokens, and a fail-closed `invalidFilter` error. |
 | **FurlPay integration** | 9 tests | First federated login creates no account silently; existing account linking requires explicit approval; matching email never merges; state/nonce enforced; issuer/audience/signature checked against real JWKS; code replay and expiry refused; IdP logout does not end FurlPay's session; SSO cannot authorize payment, withdrawal, wallet signing or agent spending; introspection, client management and signing-key overlap rotation. |
 | **Identity configuration** | 5 tests | Production requires an HTTPS origin/issuer and a strong operator password; known defaults are rejected; an unimplemented KMS provider blocks startup; enabling FurlPay requires a client id, HTTPS callback and issuer. |
@@ -709,6 +770,7 @@ The manifest seals the 26 regression snapshots, the contract sources, the crate 
 | [GITHUB-INTEGRATION.md](docs/GITHUB-INTEGRATION.md) | The GitHub App: OAuth installation, sealed tokens, webhook verification, repository browsing and import |
 | [BUILD-SYSTEM.md](docs/BUILD-SYSTEM.md) | The live build system: build events, trusted targets, the analysis-only repository target and the cache key |
 | [DOMAIN-CONFIGURATION-UI-UX-2026.md](docs/DOMAIN-CONFIGURATION-UI-UX-2026.md) | Domain configuration UX across the web console and Android app: DNS provider auto-detection, verification, SSL/TLS lifecycle, real-time sync, and the full empty/loading/error state matrix |
+| [DOMAINS.md](docs/DOMAINS.md) | The domain lifecycle status ledger: what is implemented per phase, and the limitations that are deliberate |
 | [AUTH.md](docs/AUTH.md) | Unified authentication: passkey ceremonies, Login with MobileCloud, CLI device and PKCE grants, session scopes, refresh rotation, audit and login risk |
 | [SSO.md](docs/SSO.md) | Custom SSO provider: OIDC discovery and PKCE, signed ID tokens and JWKS, SAML 2.0 IdP, SCIM 2.0 provisioning, single logout, client administration |
 | [IDENTITY-ARCHITECTURE.md](docs/IDENTITY-ARCHITECTURE.md) | Identity-provider boundary, components, client roles and current-vs-planned status |
