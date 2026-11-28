@@ -146,8 +146,14 @@ struct CreateZoneRequest {
     owner_id: String,
     #[serde(default)]
     dnssec_enabled: bool,
-    #[serde(default)]
+    /// Defaults to on, matching [`Zone::new`]: a `proxied` record must answer
+    /// with an edge PoP unless an operator explicitly opts the zone out.
+    #[serde(default = "default_true")]
     geo_routing_enabled: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 fn default_owner() -> String {
@@ -285,6 +291,7 @@ async fn create_record<S: DnsStore + 'static>(
 ) -> Result<(StatusCode, Json<RecordDto>), ApiError> {
     let zone = require_zone(&state, &zone).await?;
     let record = build_record(&zone, None, &body)?;
+    guard_cname_coexistence(&state, &record).await?;
     let stored = state.store.put_record(record).await?;
     Ok((StatusCode::CREATED, Json(RecordDto::from(&stored))))
 }
@@ -312,6 +319,7 @@ async fn update_record<S: DnsStore + 'static>(
         return Err(ApiError::not_found(format!("record {id} not found in zone '{zone}'")));
     }
     let record = build_record(&zone, Some(id), &body)?;
+    guard_cname_coexistence(&state, &record).await?;
     let stored = state.store.put_record(record).await?;
     Ok(Json(RecordDto::from(&stored)))
 }
@@ -359,6 +367,40 @@ fn build_record(zone: &str, id: Option<u64>, body: &RecordRequest) -> Result<Rec
         record.id = id;
     }
     Ok(record)
+}
+
+/// Enforce the rule that a CNAME may not coexist with any other record at the
+/// same name (RFC 1034 §3.6.2). Without this a CNAME silently shadows every
+/// other record at that name, making them unreachable through the resolver.
+async fn guard_cname_coexistence<S: DnsStore + 'static>(
+    state: &AppState<S>,
+    record: &Record,
+) -> Result<(), ApiError> {
+    let fqdn = record.fqdn();
+    // Ignore the record an update is replacing.
+    let others: Vec<Record> = state
+        .store
+        .find_records(&fqdn)
+        .await
+        .into_iter()
+        .filter(|other| other.id != record.id)
+        .collect();
+    if others.is_empty() {
+        return Ok(());
+    }
+    if record.record_type == RecordType::Cname {
+        return Err(ApiError::conflict(format!(
+            "'{fqdn}' already holds {} other record(s); a CNAME cannot coexist with any other record",
+            others.len()
+        )));
+    }
+    if others.iter().any(|other| other.record_type == RecordType::Cname) {
+        return Err(ApiError::conflict(format!(
+            "'{fqdn}' is a CNAME; add {} records at a different name",
+            record.record_type.as_str()
+        )));
+    }
+    Ok(())
 }
 
 /// Accept both `"auth"` and `"auth.furlpay.com"` for a record in `furlpay.com`.
@@ -472,6 +514,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_created_zones_default_geo_routing_on() {
+        let (app, _state) = test_app();
+        let (status, zone) = send(
+            app.clone(),
+            json_request("POST", "/api/v1/dns/zones", json!({ "domain": "furlpay.com" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            zone["geo_routing_enabled"], true,
+            "a proxied record must answer from the edge, not leak its origin, by default"
+        );
+
+        // An operator can still opt a zone out explicitly.
+        let (status, opted_out) = send(
+            app,
+            json_request(
+                "POST",
+                "/api/v1/dns/zones",
+                json!({ "domain": "optout.com", "geo_routing_enabled": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(opted_out["geo_routing_enabled"], false);
+    }
+
+    #[tokio::test]
     async fn records_accept_absolute_and_relative_names() {
         let (app, _state) = test_app();
         let app = seed_zone(app).await;
@@ -580,6 +650,72 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn rejects_a_cname_that_would_shadow_other_records() {
+        let (app, _state) = test_app();
+        let app = seed_zone(app).await;
+
+        // An A record at 'big'.
+        let (status, _) = send(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/v1/dns/zones/furlpay.com/records",
+                json!({ "name": "big", "type": "A", "value": "203.0.113.10" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // A CNAME at the same name must be refused, not silently shadow the A.
+        let (status, body) = send(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/v1/dns/zones/furlpay.com/records",
+                json!({ "name": "big", "type": "CNAME", "value": "elsewhere.furlpay.com" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body["error"].as_str().unwrap().contains("CNAME"));
+
+        // And the reverse: a CNAME name cannot later take another type.
+        let (status, _) = send(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/v1/dns/zones/furlpay.com/records",
+                json!({ "name": "alias", "type": "CNAME", "value": "big.furlpay.com" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (status, _) = send(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/v1/dns/zones/furlpay.com/records",
+                json!({ "name": "alias", "type": "A", "value": "203.0.113.20" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // Multiple A records at the same name are still legal.
+        let (status, _) = send(
+            app,
+            json_request(
+                "POST",
+                "/api/v1/dns/zones/furlpay.com/records",
+                json!({ "name": "big", "type": "A", "value": "203.0.113.11" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     #[tokio::test]

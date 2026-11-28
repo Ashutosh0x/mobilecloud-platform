@@ -139,6 +139,14 @@ impl GeoRouter {
             .unwrap_or(&self.regions[self.default_index]);
         region.pops[0]
     }
+
+    /// The default region's first PoP. Used when a client cannot be
+    /// geo-located at all — a native IPv6 peer against this IPv4 client table —
+    /// so a proxied record answers with an edge address instead of leaking the
+    /// origin.
+    pub fn default_pop(&self) -> Ipv4Addr {
+        self.regions[self.default_index].pops[0]
+    }
 }
 
 #[cfg(test)]
@@ -180,6 +188,12 @@ mod tests {
     fn unknown_clients_fall_back_to_the_default_region() {
         let geo = router();
         assert_eq!(geo.region_for("8.8.8.8".parse().unwrap()), "us-east");
+    }
+
+    #[test]
+    fn default_pop_is_the_default_region_entry_point() {
+        let geo = router();
+        assert_eq!(geo.default_pop(), "192.0.2.10".parse::<Ipv4Addr>().unwrap());
     }
 
     #[test]

@@ -10,7 +10,11 @@
 //! * A name that does not exist in one of our zones is `NXDOMAIN`.
 //! * Both negative outcomes carry the zone's `SOA` so resolvers cache them.
 //! * `proxied` records answer with the nearest edge PoP address, resolved
-//!   through the [`GeoRouter`]; the literal value is never leaked.
+//!   through the [`GeoRouter`]; the literal value is never leaked. This only
+//!   applies inside a zone whose `geo_routing_enabled` is set. A client that
+//!   cannot be geo-located (a native IPv6 peer) gets the default region's PoP,
+//!   and a proxied `AAAA` — for which this IPv4-only PoP table has no answer —
+//!   is withheld as NODATA rather than handed back verbatim.
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -123,15 +127,17 @@ impl<S: DnsStore + 'static> AuthoritativeResolver<S> {
 
             if !question.is_any() {
                 for record in records.iter().filter(|r| r.rtype() == question.qtype) {
-                    match self.answer_for(record, client) {
-                        Ok(answer) => answers.push(answer),
+                    match self.answer_for(record, client, zone.geo_routing_enabled) {
+                        Ok(Some(answer)) => answers.push(answer),
+                        Ok(None) => {}
                         Err(_) => return ResolutionOutcome::servfail(),
                     }
                 }
             } else {
                 for record in &records {
-                    match self.answer_for(record, client) {
-                        Ok(answer) => answers.push(answer),
+                    match self.answer_for(record, client, zone.geo_routing_enabled) {
+                        Ok(Some(answer)) => answers.push(answer),
+                        Ok(None) => {}
                         Err(_) => return ResolutionOutcome::servfail(),
                     }
                 }
@@ -165,19 +171,35 @@ impl<S: DnsStore + 'static> AuthoritativeResolver<S> {
     }
 
     /// Build the wire answer for one stored record, applying geo substitution
-    /// for proxied A records.
+    /// for proxied records.
+    ///
+    /// A proxied record never leaks its literal origin:
+    ///
+    /// * a proxied `A` answers with the nearest edge PoP — the client's own PoP
+    ///   when it can be geo-located, otherwise the default region's PoP;
+    /// * a proxied `AAAA` has no answer in this IPv4-only PoP table, so it is
+    ///   withheld (`Ok(None)`) and surfaces to the client as NODATA;
+    /// * every other type, and every record in a zone with geo routing off, is
+    ///   returned verbatim.
     fn answer_for(
         &self,
         record: &crate::record::Record,
         client: Option<Ipv4Addr>,
-    ) -> Result<ResourceRecord, crate::record::RecordError> {
+        geo_enabled: bool,
+    ) -> Result<Option<ResourceRecord>, crate::record::RecordError> {
         let mut rdata = record.to_rdata()?;
-        if record.proxied {
+        if record.proxied && geo_enabled {
             match (&rdata, record.record_type) {
                 (RData::A(_), crate::record::RecordType::A) => {
-                    if let Some(client) = client {
-                        rdata = RData::A(self.geo.resolve_nearest(client));
-                    }
+                    let pop = client
+                        .map(|client| self.geo.resolve_nearest(client))
+                        .unwrap_or_else(|| self.geo.default_pop());
+                    rdata = RData::A(pop);
+                }
+                (RData::Aaaa(_), crate::record::RecordType::Aaaa) => {
+                    // The PoP table is IPv4-only: answer NODATA rather than the
+                    // origin address.
+                    return Ok(None);
                 }
                 (RData::Name(_), crate::record::RecordType::Cname) => {
                     // A proxied CNAME still points at the tunnel target; the
@@ -186,7 +208,7 @@ impl<S: DnsStore + 'static> AuthoritativeResolver<S> {
                 _ => {}
             }
         }
-        Ok(ResourceRecord::new(&record.fqdn(), record.ttl, rdata))
+        Ok(Some(ResourceRecord::new(&record.fqdn(), record.ttl, rdata)))
     }
 
     /// The zone's own SOA, or a synthesised one so negative answers are always
@@ -365,5 +387,62 @@ mod tests {
         let outcome = resolver.resolve(&Question::new("furlpay.com", TYPE_TXT), None).await;
         assert_eq!(outcome.rcode, RCODE_NOERROR);
         assert_eq!(outcome.answers.len(), 1);
+    }
+
+    /// A store whose single zone holds one proxied `A` and one proxied `AAAA`.
+    async fn resolver_with_proxied_records(
+        geo_enabled: bool,
+    ) -> AuthoritativeResolver<MemoryStore> {
+        let store = Arc::new(MemoryStore::new());
+        let mut zone = Zone::new("furlpay.com", "owner");
+        zone.geo_routing_enabled = geo_enabled;
+        store.create_zone(zone).await.unwrap();
+        store
+            .put_record(
+                Record::new("furlpay.com", "cdn", RecordType::A, "203.0.113.99", 300, None, true)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        store
+            .put_record(
+                Record::new("furlpay.com", "cdn", RecordType::Aaaa, "2001:db8::1", 300, None, true)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        AuthoritativeResolver::new(store, Arc::new(GeoRouter::default()), Arc::new(Metrics::new()))
+    }
+
+    #[tokio::test]
+    async fn proxied_a_answers_the_default_pop_for_a_non_geo_client() {
+        // An IPv6 peer cannot be placed in the IPv4 client table, so the server
+        // passes `None`; the answer must still be an edge PoP, never the origin.
+        let resolver = resolver_with_proxied_records(true).await;
+        let outcome = resolver.resolve(&Question::new("cdn.furlpay.com", TYPE_A), None).await;
+        assert_eq!(outcome.rcode, RCODE_NOERROR);
+        assert_eq!(outcome.answers.len(), 1);
+        assert_eq!(outcome.answers[0].rdata, RData::A("192.0.2.10".parse().unwrap()));
+        assert_ne!(outcome.answers[0].rdata, RData::A("203.0.113.99".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn proxied_aaaa_is_withheld_as_nodata() {
+        let resolver = resolver_with_proxied_records(true).await;
+        let outcome = resolver.resolve(&Question::new("cdn.furlpay.com", TYPE_AAAA), None).await;
+        assert_eq!(outcome.rcode, RCODE_NOERROR);
+        assert!(outcome.answers.is_empty(), "a proxied AAAA must not leak its origin");
+        assert_eq!(outcome.authorities.len(), 1, "the withheld answer is a NODATA + SOA");
+    }
+
+    #[tokio::test]
+    async fn geo_disabled_answers_the_literal_value() {
+        let resolver = resolver_with_proxied_records(false).await;
+        let outcome = resolver
+            .resolve(&Question::new("cdn.furlpay.com", TYPE_A), Some("203.0.113.5".parse().unwrap()))
+            .await;
+        assert_eq!(outcome.rcode, RCODE_NOERROR);
+        assert_eq!(outcome.answers.len(), 1);
+        assert_eq!(outcome.answers[0].rdata, RData::A("203.0.113.99".parse().unwrap()));
     }
 }

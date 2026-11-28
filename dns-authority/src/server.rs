@@ -14,7 +14,9 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use crate::metrics::Transport;
 use crate::resolver::AuthoritativeResolver;
 use crate::store::DnsStore;
-use crate::wire::{self, Header, Message, RCODE_FORMERR, RCODE_NOTIMP};
+use crate::wire::{
+    self, Header, Message, RData, ResourceRecord, RCODE_FORMERR, RCODE_NOTIMP,
+};
 
 /// Largest client datagram we will read.
 const MAX_UDP_REQUEST: usize = 4096;
@@ -31,7 +33,6 @@ pub async fn answer<S: DnsStore + 'static>(
 ) -> Message {
     let mut header = Header::new_query(query.header.id, query.header.recursion_desired());
     header.set_response();
-    header.set_authoritative();
 
     let mut response = Message {
         header,
@@ -40,6 +41,13 @@ pub async fn answer<S: DnsStore + 'static>(
         authorities: Vec::new(),
         additionals: Vec::new(),
     };
+
+    // RFC 6891 §6.1.1: a responder that understands EDNS must include an OPT in
+    // its reply whenever the request carried one. We advertise our own UDP
+    // payload size and echo no options.
+    if query.additionals.iter().any(|rr| rr.rtype == wire::TYPE_OPT) {
+        response.additionals.push(edns_response_opt());
+    }
 
     // Someone sent us a response. Refusing to reflect it is the safe default.
     if query.header.qr() {
@@ -58,9 +66,27 @@ pub async fn answer<S: DnsStore + 'static>(
 
     let outcome = resolver.resolve(&query.questions[0], client).await;
     response.header.set_rcode(outcome.rcode);
+    // The authoritative bit is earned, not assumed: only a name inside one of
+    // our zones gets it. FORMERR, NOTIMP and REFUSED are answered without it.
+    if outcome.zone.is_some() {
+        response.header.set_authoritative();
+    }
     response.answers = outcome.answers;
     response.authorities = outcome.authorities;
     response
+}
+
+/// The OPT pseudo-record echoed when the request carried one. Its CLASS field
+/// is our advertised UDP payload size; the TTL is zero (extended rcode 0,
+/// EDNS version 0, no flags).
+fn edns_response_opt() -> ResourceRecord {
+    ResourceRecord {
+        name: String::new(),
+        rtype: wire::TYPE_OPT,
+        class: EDNS_UDP_RESPONSE_LIMIT as u16,
+        ttl: 0,
+        rdata: RData::Raw(Vec::new()),
+    }
 }
 
 /// Encode a response within `limit` octets, setting TC and dropping the answer
@@ -276,6 +302,44 @@ mod tests {
         query.header.flags = 0x2800; // opcode 5
         let response = answer(&resolver, &query, None).await;
         assert_eq!(response.header.rcode(), RCODE_NOTIMP);
+        assert!(!response.header.authoritative(), "NOTIMP must not claim authority");
+    }
+
+    #[tokio::test]
+    async fn refused_responses_do_not_claim_authority() {
+        let resolver = resolver().await;
+        let mut query = Message::new(7);
+        query.questions.push(Question::new("example.org", TYPE_A));
+        let response = answer(&resolver, &query, None).await;
+        assert_eq!(response.header.rcode(), wire::RCODE_REFUSED);
+        assert!(!response.header.authoritative(), "we are not authoritative for example.org");
+    }
+
+    #[tokio::test]
+    async fn echoes_the_edns_opt_record() {
+        let resolver = resolver().await;
+        let mut query = Message::new(9);
+        query.questions.push(Question::new("furlpay.com", TYPE_A));
+        query.additionals.push(ResourceRecord {
+            name: String::new(),
+            rtype: wire::TYPE_OPT,
+            class: 4096,
+            ttl: 0,
+            rdata: RData::Raw(Vec::new()),
+        });
+        let response = answer(&resolver, &query, None).await;
+        assert_eq!(response.additionals.len(), 1, "an EDNS reply must carry an OPT");
+        assert_eq!(response.additionals[0].rtype, wire::TYPE_OPT);
+        assert_eq!(response.additionals[0].class, EDNS_UDP_RESPONSE_LIMIT as u16);
+        // It survives a re-encode/parse round trip.
+        let parsed = Message::parse(&response.encode().unwrap()).unwrap();
+        assert_eq!(parsed.additionals.len(), 1);
+
+        // A plain query gets no OPT back.
+        let mut plain = Message::new(10);
+        plain.questions.push(Question::new("furlpay.com", TYPE_A));
+        let response = answer(&resolver, &plain, None).await;
+        assert!(response.additionals.is_empty(), "a non-EDNS query gets no OPT");
     }
 
     #[test]

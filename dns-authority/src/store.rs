@@ -36,9 +36,17 @@ pub struct Zone {
     pub owner_id: String,
     #[serde(default)]
     pub dnssec_enabled: bool,
-    #[serde(default)]
+    /// Master switch for GeoDNS in this zone. When off, a `proxied` record is
+    /// answered with its literal value. Defaults to on so the safe behaviour
+    /// (answering with an edge PoP, never the origin) is what an operator gets
+    /// without opting in.
+    #[serde(default = "default_true")]
     pub geo_routing_enabled: bool,
     pub created_at: i64,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 impl Zone {
@@ -47,7 +55,7 @@ impl Zone {
             domain: wire::canonical_name(domain),
             owner_id: owner_id.to_string(),
             dnssec_enabled: false,
-            geo_routing_enabled: false,
+            geo_routing_enabled: true,
             created_at: now_unix(),
         }
     }
@@ -284,6 +292,16 @@ mod tests {
         store.delete_zone("furlpay.com").await.unwrap();
         assert!(store.list_records("furlpay.com").await.is_empty());
         assert!(store.delete_zone("furlpay.com").await.is_err());
+    }
+
+    #[test]
+    fn legacy_snapshots_default_geo_routing_to_on() {
+        // A zone persisted before the flag existed must load with the safe
+        // default rather than silently disabling GeoDNS.
+        let zone: Zone =
+            serde_json::from_str(r#"{"domain":"furlpay.com","owner_id":"o","created_at":1}"#)
+                .unwrap();
+        assert!(zone.geo_routing_enabled);
     }
 
     #[tokio::test]
