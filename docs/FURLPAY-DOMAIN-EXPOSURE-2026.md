@@ -666,10 +666,11 @@ The identity console at `auth.furlpay.com` ships as an **installable Progressive
 
 | Feature | Caveat |
 |:---|:---|
-| Dashboard Deployments | Records requests but does **not dispatch** to engine |
-| Functions Runtime | In-process `node:vm` — isolates globals, **not the process** |
-| Workflow Worker | In-process — ordered steps, stops at first failure |
+| Dashboard Deployments | Records every request and proxies deploy/rollback to the core engine — but only when `MOBILECLOUD_BUILDER_URL` and `MOBILECLOUD_BUILDER_TOKEN` are both set; **disabled by default** (403, recorded as `blocked`) |
+| Functions Runtime | In-process `node:vm` — isolates globals, **not the process**; disabled in production unless `MOBILECLOUD_IN_PROCESS_RUNTIME=1` |
+| Workflow Worker | In-process — ordered steps, stops at first failure; inherits the functions-runtime gate |
 | Android App | Console client — does **not run** the Rust edge engine |
+| Android QR Approval Routing | Routed from `MainActivity` through `ConsoleRoot` to `LoginApprovalScreen`; the end-to-end device flow is **not exercised in CI** |
 | Local Build Preview | **Not sandboxed** — runs in plain app UID |
 | Edge Tunnel (mobilecloud-tunnel) | 7 tests — not exercised on real hardware in production |
 | Fleet Mesh | Node management only — **no** peer discovery, NAT traversal, or load balancing |
@@ -678,11 +679,10 @@ The identity console at `auth.furlpay.com` ships as an **installable Progressive
 
 | Feature | Status |
 |:---|:---|
-| Billing & Payments | Metered, but no payment provider |
+| Billing & Payments | Metered, but no payment provider, wallet, KYC, card vault or invoicing |
 | On-device AI/ML (ONNX, TFLite, NPU) | No inference code exists |
-| Trading Engine (live execution) | Paper/demo only |
-| FCM/APNs Push Notifications | Not configured |
-| Android QR Approval Routing | Compiles but not routed from MainActivity |
+| Trading Engine (live execution) | Paper/demo only — the engine itself is present |
+| FCM/APNs Push Notifications | Transport-agnostic notifier only; no credentials or delivery test |
 | CPA Attestation / Custody | NOT_ESTABLISHED |
 
 ---
@@ -853,5 +853,5 @@ flowchart TD
 
 *Report compiled: November 28, 2026*  
 *Repository: [github.com/Ashutosh0x/mobilecloud-platform](https://github.com/Ashutosh0x/mobilecloud-platform)*  
-*Commit: `ac76765` — fix(deploy): lowercase the registry path before the image build*  
+*Commit: `df56746` — feat: enforce team RBAC, enable dispatch, and harden runtime/edge*  
 *363 automated tests · 30+ documentation files · Apache-2.0 license*
