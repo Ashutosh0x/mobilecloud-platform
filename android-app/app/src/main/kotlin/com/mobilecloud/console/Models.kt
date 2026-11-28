@@ -12,7 +12,21 @@ import org.json.JSONObject
 data class User(val id: String, val email: String, val name: String, val role: String, val plan: String)
 data class Project(val id: String, val name: String, val framework: String, val target: String, val createdAt: Long, val repoUrl: String)
 data class Deployment(val id: String, val projectId: String, val project: String, val status: String, val note: String, val createdAt: Long)
-data class Domain(val id: String, val host: String, val project: String, val status: String, val detail: String)
+data class DomainLastError(val code: String, val message: String, val at: Long)
+
+/**
+ * A configured hostname. Dns / ssl / health are three independent signals and
+ * are never collapsed into one value: a live domain with a down origin keeps
+ * `healthStatus = "down"` beside a verified DNS signal. Only [status] — the
+ * lifecycle state, derived on the server — summarises all three.
+ */
+data class Domain(
+    val id: String, val host: String, val project: String, val status: String, val detail: String,
+    val dnsProvider: String?, val dnsStatus: String, val sslStatus: String, val healthStatus: String,
+    val dnsVerifiedAt: Long?, val sslExpiresAt: Long?, val sslIssuer: String?,
+    val tunnelTarget: String?, val verificationToken: String?, val verificationMethod: String,
+    val lastError: DomainLastError?, val createdAt: Long, val updatedAt: Long,
+)
 data class DbFile(val id: String, val name: String, val engine: String, val bytes: Long?, val path: String)
 data class FuncRow(val id: String, val name: String, val route: String, val hasSource: Boolean, val invocations: Int)
 data class ObjectRow(val id: String, val bucket: String, val key: String, val bytes: Long)
@@ -141,7 +155,15 @@ private inline fun <T> JSONArray.map(transform: (JSONObject) -> T): List<T> =
 private fun parseUser(o: JSONObject) = User(o.s("id"), o.s("email"), o.s("name"), o.s("role"), o.s("plan"))
 private fun parseProject(o: JSONObject) = Project(o.s("id"), o.s("name"), o.s("framework"), o.s("target"), o.l("createdAt"), o.s("repoUrl"))
 private fun parseDeployment(o: JSONObject) = Deployment(o.s("id"), o.s("projectId"), o.s("project"), o.s("status"), o.s("note"), o.l("createdAt"))
-private fun parseDomain(o: JSONObject) = Domain(o.s("id"), o.s("host"), o.s("project"), o.s("status"), o.s("detail"))
+private fun parseDomain(o: JSONObject) = Domain(
+    o.s("id"), o.s("host"), o.s("project"), o.s("status"), o.s("detail"),
+    o.sn("dnsProvider"), o.s("dnsStatus", "pending"), o.s("sslStatus", "none"), o.s("healthStatus", "unknown"),
+    o.ln("dnsVerifiedAt"), o.ln("sslExpiresAt"), o.sn("sslIssuer"), o.sn("tunnelTarget"),
+    o.sn("verificationToken"), o.s("verificationMethod", "cname"),
+    o.obj("lastError")?.let(::parseDomainError),
+    o.l("createdAt"), o.l("updatedAt"),
+)
+private fun parseDomainError(o: JSONObject) = DomainLastError(o.s("code"), o.s("message"), o.l("at"))
 private fun parseDb(o: JSONObject) = DbFile(o.s("id"), o.s("name"), o.s("engine", "sqlite"), o.ln("bytes"), o.s("path"))
 private fun parseFunc(o: JSONObject) = FuncRow(o.s("id"), o.s("name"), o.s("route"), o.b("hasSource"), o.i("invocations"))
 private fun parseObject(o: JSONObject) = ObjectRow(o.s("id"), o.s("bucket"), o.s("key"), o.l("bytes"))

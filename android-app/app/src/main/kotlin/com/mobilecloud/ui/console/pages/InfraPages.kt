@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import com.mobilecloud.console.ConsoleStore
 import com.mobilecloud.console.Fmt
@@ -35,12 +36,19 @@ import com.mobilecloud.ui.console.BtnKind
 import com.mobilecloud.ui.console.CButton
 import com.mobilecloud.ui.console.CEmpty
 import com.mobilecloud.ui.console.CField
+import com.mobilecloud.ui.console.CNotice
 import com.mobilecloud.ui.console.CPanel
 import com.mobilecloud.ui.console.CSelect
 import com.mobilecloud.ui.console.ConfirmDialog
 import com.mobilecloud.ui.console.Hint
 import com.mobilecloud.ui.console.PageHead
+import com.mobilecloud.ui.console.Tone
 import com.mobilecloud.ui.console.action
+import com.mobilecloud.ui.console.ctime
+import com.mobilecloud.ui.console.components.DnsCard
+import com.mobilecloud.ui.console.components.DomainStatusPill
+import com.mobilecloud.ui.console.components.SignalTiles
+import com.mobilecloud.ui.console.components.hostValidationMessage
 import com.mobilecloud.ui.console.jobj
 import com.mobilecloud.ui.theme.AppFonts
 import com.mobilecloud.ui.theme.Aurora
@@ -54,51 +62,110 @@ fun DomainsPage(store: ConsoleStore) {
     val q = store.query.trim().lowercase()
     var host by remember { mutableStateOf("") }
     var project by remember { mutableStateOf(snap.projects.firstOrNull()?.name ?: "") }
+    var openId by remember { mutableStateOf<String?>(null) }
+    var verifyingId by remember { mutableStateOf<String?>(null) }
     var drop by remember { mutableStateOf<String?>(null) }
     val rows = snap.domains.filter { q.isEmpty() || "${it.host} ${it.project}".lowercase().contains(q) }
+    val typed = host.trim().lowercase()
+    val error = hostValidationMessage(typed, snap.domains.map { it.host })
+    val canSubmit = project.isNotBlank() && typed.isNotEmpty() && error == null && !store.busy
 
-    PageHead("Domains", "Hostnames are saved locally. No DNS provider is configured, so nothing is published.")
+    /** Re-checks the live DNS record; the announcement states what was actually found. */
+    fun verify(id: String) {
+        if (verifyingId != null) return
+        verifyingId = id
+        scope.launch {
+            try {
+                val result = store.call("domains/$id/verify", null, "POST")
+                val domain = result.optJSONObject("domain")
+                store.notify(
+                    when {
+                        domain == null -> "DNS re-checked. Open the domain to see the result."
+                        domain.optString("dnsStatus") == "verified" -> "${domain.optString("host")} DNS verified."
+                        else -> "${domain.optString("host")} is still ${domain.optString("status").replace('_', ' ')}."
+                    },
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                store.notify(failure.message ?: "Request failed")
+            } finally {
+                verifyingId = null
+            }
+        }
+    }
+
+    PageHead(
+        "Domains",
+        "Point a hostname at this platform's tunnel, then verify. DNS, SSL and health are reported separately, and only after each one actually passes.",
+    )
     Spacer(Modifier.height(12.dp))
-    CPanel(title = "Record a hostname") {
+    CPanel(title = "Add a domain") {
         CField("Hostname", host, { host = it }, placeholder = "app.example.com")
+        if (error != null) {
+            Spacer(Modifier.height(8.dp))
+            CNotice(error, Tone.BAD)
+        }
         Spacer(Modifier.height(8.dp))
         if (snap.projects.isNotEmpty()) {
-            com.mobilecloud.ui.console.CSelect(
-                snap.projects.map { it.name }, project, { project = it }, modifier = Modifier.fillMaxWidth(),
-            )
+            CSelect(snap.projects.map { it.name }, project, { project = it }, modifier = Modifier.fillMaxWidth())
         }
         Spacer(Modifier.height(10.dp))
-        CButton("Record", onClick = {
-            store.action(scope, "Hostname recorded") { store.call("domains", jobj("host" to host, "project" to project)) }
-            host = ""
-        }, enabled = host.isNotBlank() && snap.projects.isNotEmpty())
+        CButton("Add domain", onClick = {
+            val submitted = typed
+            store.action(scope, "Domain added") { store.call("domains", jobj("host" to submitted, "project" to project)) }
+            if (host.trim().lowercase() == submitted) host = ""
+        }, enabled = canSubmit)
     }
 
     Spacer(Modifier.height(14.dp))
-    CPanel {
-        if (rows.isEmpty()) {
-            CEmpty("No hostnames recorded.")
-        } else {
-            rows.forEach { d ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+    if (rows.isEmpty()) {
+        CPanel { CEmpty("No domains yet. Add a hostname above to see the DNS records to publish.") }
+    } else {
+        rows.forEach { d ->
+            CPanel {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(d.host, color = Aurora.TextHi, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        Text("${d.project} · ${d.status} · ${d.detail}", color = Aurora.TextMid, fontSize = 11.sp)
+                        Text("${d.project} · added ${ctime(d.createdAt)}", color = Aurora.TextMid, fontSize = 11.sp)
                     }
+                    DomainStatusPill(d.status)
+                }
+                Spacer(Modifier.height(10.dp))
+                SignalTiles(d)
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CButton(
+                        if (openId == d.id) "Hide records" else "Configure DNS",
+                        onClick = { openId = if (openId == d.id) null else d.id },
+                        kind = BtnKind.GHOST,
+                        compact = true,
+                    )
+                    CButton("Verify DNS", onClick = { verify(d.id) }, kind = BtnKind.GHOST, compact = true, loading = verifyingId == d.id)
                     CButton("Remove", onClick = { drop = d.id }, kind = BtnKind.DANGER, compact = true)
                 }
+                if (openId == d.id) {
+                    Spacer(Modifier.height(10.dp))
+                    DnsCard(
+                        domain = d,
+                        verifying = verifyingId == d.id,
+                        onVerify = { verify(d.id) },
+                        onCopied = { store.notify(it) },
+                    )
+                }
             }
+            Spacer(Modifier.height(10.dp))
         }
     }
 
     drop?.let { id ->
         ConfirmDialog(
-            title = "Remove this hostname?",
-            body = "Only the local record is deleted.",
+            title = "Remove this domain?",
+            body = "The local record and its verification state are deleted. DNS records you added at your provider are not touched.",
             onCancel = { drop = null },
             onConfirm = {
                 drop = null
-                store.action(scope, "Hostname removed") { store.call("domains/$id", null, "DELETE") }
+                store.action(scope, "Domain removed") { store.call("domains/$id", null, "DELETE") }
             },
         )
     }
