@@ -61,6 +61,8 @@ on testnet on 2026-11-21 — including live rejections of six attack classes.
 | [FURLPAY-DEPLOYMENT.md](FURLPAY-DEPLOYMENT.md) | furlpay.com DNS, Cloudflare Tunnel, Docker, PWA and deployment verification |
 | [FURLPAY-DOMAIN-EXPOSURE-2026.md](FURLPAY-DOMAIN-EXPOSURE-2026.md) | Worldwide domain exposure model: Cloudflare Tunnel, GHCR CI/CD, SSO federation, security hardening and multi-region scaling |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Deploying the identity console: tunnel setup, repository secrets, the CI workflow, verification and operating notes |
+| [GITHUB-INTEGRATION.md](GITHUB-INTEGRATION.md) | Linking a GitHub identity, the sealed token, webhook verification, the repository browser and the import flow |
+| [BUILD-SYSTEM.md](BUILD-SYSTEM.md) | The live build system: the event protocol, the step timeline, the content-addressed cache decision and the isolation boundary |
 | [ACCOUNT-LINKING.md](ACCOUNT-LINKING.md) | Explicit account linking without email merging |
 | [SESSION-AND-LOGOUT.md](SESSION-AND-LOGOUT.md) | Session scopes, revocation and logout semantics |
 | [KEY-MANAGEMENT.md](KEY-MANAGEMENT.md) | Signing keys, rotation overlap and KMS blocker |

@@ -13,6 +13,7 @@ const GROUPS = [
     { href: "/projects", label: "Projects", icon: "folder" },
     { href: "/deployments", label: "Deployments", icon: "rocket" },
     { href: "/builds", label: "Builds", icon: "rocket" },
+    { href: "/github", label: "GitHub", icon: "github" },
   ] },
   { label: "Observe", items: [
     { href: "/logs", label: "Logs", icon: "logs" },

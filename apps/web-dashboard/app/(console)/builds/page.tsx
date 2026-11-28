@@ -1,7 +1,7 @@
 "use client";
 
-import { BuildsView } from "@/components/PlatformViews";
+import { LiveBuildsView } from "@/components/LiveBuilds";
 
 export default function Page() {
-  return <BuildsView />;
+  return <LiveBuildsView />;
 }

@@ -1,27 +1,65 @@
+/*
+ * MobileCloud design tokens.
+ *
+ * Dark is the default: the console is a tool people keep open all day. The
+ * light palette is the same system with the surfaces inverted, so a screen
+ * reads the same in either.
+ */
 :root {
-  --bg: #000000;
-  --header: #000000;
-  --card: #111111;
-  --elevated: #1a1a1a;
-  --hover: #1a1a1a;
-  --panel: #111111;
-  --panel-2: #1a1a1a;
-  --accent: #0070f3;
-  --text: #ededed;
-  --muted: #888888;
-  --faint: #555555;
-  --line: #333333;
-  --divider: #222222;
-  --green: #00e599;
-  --amber: #f5a623;
-  --red: #ee0000;
+  --bg: #0a0a0f;
+  --header: #0a0a0f;
+  --card: #12121a;
+  --elevated: #1a1a25;
+  --hover: #1a1a25;
+  --panel: #12121a;
+  --panel-2: #1a1a25;
+  --accent: #0066ff;
+  --accent-soft: rgba(0, 102, 255, 0.14);
+  --text: #ffffff;
+  --muted: #9ca3af;
+  --faint: #6b7280;
+  --line: #2a2a35;
+  --divider: #22222c;
+  --green: #00c853;
+  --cyan: #00d4ff;
+  --amber: #ff6d00;
+  --red: #ff1744;
+  --purple: #7c4dff;
+  --gold: #ffd600;
   --radius: 8px;
   --sans: var(--font-sans), Geist, "Segoe UI", sans-serif;
   --mono: var(--font-mono), "Geist Mono", ui-monospace, monospace;
 }
 
+/* The light palette. Applied by the theme toggle or by the OS preference. */
+[data-theme="light"] {
+  --bg: #fafbfc;
+  --header: #fafbfc;
+  --card: #ffffff;
+  --elevated: #ffffff;
+  --hover: #f3f4f6;
+  --panel: #ffffff;
+  --panel-2: #f9fafb;
+  --accent: #0066ff;
+  --accent-soft: rgba(0, 102, 255, 0.1);
+  --text: #111827;
+  --muted: #4b5563;
+  --faint: #9ca3af;
+  --line: #e5e7eb;
+  --divider: #eceef1;
+  --green: #00a844;
+  --cyan: #0090c4;
+  --amber: #d95a00;
+  --red: #dc0a34;
+  --purple: #6038e0;
+  --gold: #c9a600;
+}
+[data-theme="light"] .topbar { background: rgba(250, 251, 252, 0.85); }
+[data-theme="light"] .panel,
+[data-theme="light"] .list-row { box-shadow: 0 1px 2px rgba(17, 24, 39, 0.06); }
+
 * { box-sizing: border-box; }
-html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 20px; letter-spacing: -0.01em; }
+html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 22px; letter-spacing: -0.01em; }
 a { color: inherit; text-decoration: none; }
 button, input, select { font-family: inherit; color: inherit; }
 button { cursor: pointer; }
@@ -165,7 +203,7 @@ select, .form-row input, .filters input, .field input, .modal input, .auth-card 
   background: #1a1a1a; color: var(--text); padding: 0 10px;
 }
 .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-.page-head h2 { margin: 0; font-size: 32px; line-height: 40px; }
+.page-head h2 { margin: 0; font-size: 24px; line-height: 32px; font-weight: 600; }
 .page-head p { margin: 6px 0 0; color: var(--muted); font-size: 14px; max-width: 640px; }
 .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .card-block { display: grid; gap: 8px; }
