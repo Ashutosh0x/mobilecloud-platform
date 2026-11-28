@@ -135,6 +135,17 @@ The web console and the Android app are two synchronized clients of one backend:
   <img src="https://img.shields.io/badge/Zero--Trust%20Ingress-34495E?style=for-the-badge&logo=cloudflare&logoColor=white" alt="Zero-trust ingress" />
 </p>
 
+### Sovereign DNS & Edge Authority
+<p align="left">
+  <img src="https://img.shields.io/badge/RFC%201035-Authoritative%20DNS-00599C?style=for-the-badge&logo=rust&logoColor=white" alt="RFC 1035 authoritative DNS" />
+  <img src="https://img.shields.io/badge/DNS-UDP%20%26%20TCP%20%3A53-1E90FF?style=for-the-badge&logo=gnubash&logoColor=white" alt="DNS over UDP and TCP :53" />
+  <img src="https://img.shields.io/badge/GeoDNS-Edge%20PoP%20Selection-2EA44F?style=for-the-badge&logo=openstreetmap&logoColor=white" alt="GeoDNS edge PoP selection" />
+  <img src="https://img.shields.io/badge/RFC%203596%20%C2%B7%202782%20%C2%B7%206844-AAAA%20%C2%B7%20SRV%20%C2%B7%20CAA-6E40C9?style=for-the-badge" alt="RFC 3596, RFC 2782, RFC 6844" />
+  <img src="https://img.shields.io/badge/axum-0.7%20Management%20API-000000?style=for-the-badge&logo=rust&logoColor=white" alt="axum management API" />
+  <img src="https://img.shields.io/badge/Tokio-Async%20Runtime-0A3069?style=for-the-badge&logo=rust&logoColor=white" alt="Tokio async runtime" />
+  <img src="https://img.shields.io/badge/Prometheus-%2Fmetrics-E6522C?style=for-the-badge&logo=prometheus&logoColor=white" alt="Prometheus metrics" />
+</p>
+
 ---
 
 ## The Unified Dual-Engine Paradigm
