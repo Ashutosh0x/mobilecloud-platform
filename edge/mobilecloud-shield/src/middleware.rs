@@ -3,16 +3,21 @@
 //!
 //! # Request Processing Order
 //!
-//! 1. Extract client IP (from `X-Forwarded-For` header, falling back to
-//!    `X-Real-Ip`, then `127.0.0.1`).
+//! 1. Extract client IP. The direct peer address is read from the
+//!    [`ConnectInfo`]`<`[`SocketAddr`]`>` request extension. Forwarded headers
+//!    (`X-Forwarded-For`, `X-Real-Ip`, `CF-Connecting-Ip`) are only honored when
+//!    that peer address is in the configured trusted-proxy allowlist;
+//!    otherwise the peer address itself is used. With no peer address at all,
+//!    the loopback address (`127.0.0.1`) is used.
 //! 2. **Blocklist** check → `403 Forbidden`
 //! 3. **Rate limiter** check → `429 Too Many Requests` (with `Retry-After`
 //!    header)
 //! 4. **WAF** inspection → `403 Forbidden`
 //! 5. If all checks pass → forward to the inner service.
 
+use std::collections::HashSet;
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -27,6 +32,16 @@ use crate::blocklist::Blocklist;
 use crate::rate_limiter::SlidingWindowLimiter;
 use crate::waf::{WafEngine, WafVerdict};
 
+// ───────────────────── connection info ──────────────────────────
+
+/// Connection metadata extension carrying the direct peer address.
+///
+/// Mirrors the conventional `ConnectInfo<SocketAddr>` request extension
+/// inserted by HTTP servers so that forwarded headers can be trusted only for
+/// known reverse proxies.
+#[derive(Clone, Copy, Debug)]
+pub struct ConnectInfo<T>(pub T);
+
 // ───────────────────── shared state ──────────────────────────────
 
 /// Shared references to the shield components.
@@ -35,6 +50,9 @@ pub struct ShieldState {
     pub blocklist: Blocklist,
     pub rate_limiter: SlidingWindowLimiter,
     pub waf: Arc<WafEngine>,
+    /// Reverse-proxy IPs whose forwarded headers are honored. Empty by default,
+    /// meaning forwarded headers are never trusted.
+    pub trusted_proxies: Arc<HashSet<IpAddr>>,
 }
 
 // ───────────────────── layer ─────────────────────────────────────
@@ -57,6 +75,7 @@ impl ShieldLayer {
                 blocklist,
                 rate_limiter,
                 waf: Arc::new(waf),
+                trusted_proxies: Arc::new(HashSet::new()),
             },
         }
     }
@@ -64,6 +83,17 @@ impl ShieldLayer {
     /// Create a `ShieldLayer` from a pre-assembled [`ShieldState`].
     pub fn from_state(state: ShieldState) -> Self {
         Self { state }
+    }
+
+    /// Set the reverse-proxy IP allowlist whose forwarded headers are trusted.
+    ///
+    /// Defaults to empty (forwarded headers are never trusted).
+    pub fn with_trusted_proxies<I>(mut self, proxies: I) -> Self
+    where
+        I: IntoIterator<Item = IpAddr>,
+    {
+        self.state.trusted_proxies = Arc::new(proxies.into_iter().collect());
+        self
     }
 }
 
@@ -111,7 +141,8 @@ where
 
         Box::pin(async move {
             // 1. Extract client IP.
-            let ip = extract_client_ip(req.headers());
+            let peer = peer_addr(&req);
+            let ip = extract_client_ip(req.headers(), peer, &state.trusted_proxies);
             info!(%ip, method = %req.method(), uri = %req.uri(), "shield: inspecting request");
 
             // 2. Blocklist check.
@@ -175,17 +206,54 @@ where
 
 // ───────────────────── helpers ───────────────────────────────────
 
-/// Extract the client IP from request headers.
+/// Resolve the direct peer socket address from request extensions.
 ///
-/// Checks `X-Forwarded-For` first (takes the leftmost IP), then `X-Real-Ip`,
-/// and falls back to `127.0.0.1`.
-fn extract_client_ip(headers: &http::HeaderMap) -> IpAddr {
+/// Looks for the [`ConnectInfo`]`<`[`SocketAddr`]`>` extension inserted by the
+/// HTTP server, falling back to a bare [`SocketAddr`] extension.
+fn peer_addr<B>(req: &Request<B>) -> Option<SocketAddr> {
+    if let Some(ci) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        return Some(ci.0);
+    }
+    req.extensions().get::<SocketAddr>().copied()
+}
+
+/// Extract the client IP given the request headers, the direct peer address,
+/// and the trusted-proxy allowlist.
+///
+/// Forwarded headers are only honored when `peer` is a trusted proxy. When the
+/// peer is untrusted (or absent), the peer address itself is used; the loopback
+/// fallback (`127.0.0.1`) is used only when no peer address is available.
+fn extract_client_ip(
+    headers: &http::HeaderMap,
+    peer: Option<SocketAddr>,
+    trusted_proxies: &HashSet<IpAddr>,
+) -> IpAddr {
+    match peer {
+        Some(addr) => {
+            // Honor forwarded headers only from a trusted reverse proxy.
+            if trusted_proxies.contains(&addr.ip()) {
+                if let Some(ip) = forwarded_client_ip(headers) {
+                    return ip;
+                }
+            }
+            addr.ip()
+        }
+        // No peer information available.
+        None => "127.0.0.1".parse().unwrap(),
+    }
+}
+
+/// Parse the client IP from forwarded headers, if present and well-formed.
+///
+/// Checks `X-Forwarded-For` (leftmost IP), then `X-Real-Ip`, then
+/// `CF-Connecting-Ip`.
+fn forwarded_client_ip(headers: &http::HeaderMap) -> Option<IpAddr> {
     // X-Forwarded-For: client, proxy1, proxy2
     if let Some(xff) = headers.get("x-forwarded-for") {
         if let Ok(val) = xff.to_str() {
             if let Some(first) = val.split(',').next() {
                 if let Ok(ip) = first.trim().parse::<IpAddr>() {
-                    return ip;
+                    return Some(ip);
                 }
             }
         }
@@ -195,13 +263,21 @@ fn extract_client_ip(headers: &http::HeaderMap) -> IpAddr {
     if let Some(xri) = headers.get("x-real-ip") {
         if let Ok(val) = xri.to_str() {
             if let Ok(ip) = val.trim().parse::<IpAddr>() {
-                return ip;
+                return Some(ip);
             }
         }
     }
 
-    // Fallback
-    "127.0.0.1".parse().unwrap()
+    // CF-Connecting-Ip (Cloudflare)
+    if let Some(cf) = headers.get("cf-connecting-ip") {
+        if let Ok(val) = cf.to_str() {
+            if let Ok(ip) = val.trim().parse::<IpAddr>() {
+                return Some(ip);
+            }
+        }
+    }
+
+    None
 }
 
 /// Build a JSON error response with the given status code.
@@ -217,27 +293,107 @@ fn json_response(status: StatusCode, body: serde_json::Value) -> Response<Full<B
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    fn trusted(ips: &[&str]) -> HashSet<IpAddr> {
+        ips.iter().map(|s| ip(s)).collect()
+    }
 
     #[test]
     fn extracts_xff_ip() {
         let mut headers = http::HeaderMap::new();
         headers.insert("x-forwarded-for", "203.0.113.5, 10.0.0.1".parse().unwrap());
-        assert_eq!(extract_client_ip(&headers), "203.0.113.5".parse::<IpAddr>().unwrap());
+        let peer = Some(addr("127.0.0.1:4000"));
+        let proxies = trusted(&["127.0.0.1"]);
+        assert_eq!(
+            extract_client_ip(&headers, peer, &proxies),
+            ip("203.0.113.5")
+        );
     }
 
     #[test]
     fn extracts_x_real_ip() {
         let mut headers = http::HeaderMap::new();
         headers.insert("x-real-ip", "198.51.100.1".parse().unwrap());
-        assert_eq!(extract_client_ip(&headers), "198.51.100.1".parse::<IpAddr>().unwrap());
+        let peer = Some(addr("127.0.0.1:4000"));
+        let proxies = trusted(&["127.0.0.1"]);
+        assert_eq!(extract_client_ip(&headers, peer, &proxies), ip("198.51.100.1"));
     }
 
     #[test]
     fn falls_back_to_loopback() {
         let headers = http::HeaderMap::new();
+        let proxies = HashSet::new();
+        assert_eq!(extract_client_ip(&headers, None, &proxies), ip("127.0.0.1"));
+    }
+
+    #[test]
+    fn forwarded_header_ignored_for_untrusted_peer() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
+        headers.insert("x-real-ip", "198.51.100.1".parse().unwrap());
+        headers.insert("cf-connecting-ip", "198.51.100.7".parse().unwrap());
+        let peer = Some(addr("10.0.0.9:5000"));
+        // 10.0.0.9 is not a trusted proxy → forwarded headers must be ignored.
+        let proxies = trusted(&["127.0.0.1"]);
+        assert_eq!(extract_client_ip(&headers, peer, &proxies), ip("10.0.0.9"));
+    }
+
+    #[test]
+    fn forwarded_header_honored_for_trusted_peer() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.5, 10.0.0.1".parse().unwrap());
+        let peer = Some(addr("127.0.0.1:5000"));
+        let proxies = trusted(&["127.0.0.1"]);
         assert_eq!(
-            extract_client_ip(&headers),
-            "127.0.0.1".parse::<IpAddr>().unwrap()
+            extract_client_ip(&headers, peer, &proxies),
+            ip("203.0.113.5")
         );
+    }
+
+    #[test]
+    fn cf_connecting_ip_honored_for_trusted_peer() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("cf-connecting-ip", "198.51.100.7".parse().unwrap());
+        let peer = Some(addr("127.0.0.1:5000"));
+        let proxies = trusted(&["127.0.0.1"]);
+        assert_eq!(extract_client_ip(&headers, peer, &proxies), ip("198.51.100.7"));
+    }
+
+    #[test]
+    fn reads_connect_info_extension() {
+        let mut req = Request::builder().body(()).unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr("9.9.9.9:1234")));
+        assert_eq!(peer_addr(&req), Some(addr("9.9.9.9:1234")));
+    }
+
+    #[test]
+    fn trusted_proxy_allowlist_defaults_to_empty() {
+        let layer = ShieldLayer::new(
+            Blocklist::new(),
+            SlidingWindowLimiter::new(),
+            WafEngine::with_defaults(),
+        );
+        assert!(layer.state.trusted_proxies.is_empty());
+    }
+
+    #[test]
+    fn with_trusted_proxies_sets_allowlist() {
+        let layer = ShieldLayer::new(
+            Blocklist::new(),
+            SlidingWindowLimiter::new(),
+            WafEngine::with_defaults(),
+        )
+        .with_trusted_proxies([ip("127.0.0.1"), ip("10.0.0.1")]);
+        assert!(layer.state.trusted_proxies.contains(&ip("127.0.0.1")));
+        assert!(layer.state.trusted_proxies.contains(&ip("10.0.0.1")));
     }
 }

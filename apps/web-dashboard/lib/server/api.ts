@@ -4,7 +4,8 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { CSRF_COOKIE, CSRF_HEADER } from "../csrf.ts";
 import type { RangeKey, User } from "../types.ts";
-import { BUILDER_DISABLED } from "./builder.ts";
+import { BUILDER_DISABLED, builderConfig, dispatchDeploy, dispatchRollback, probeBuilder } from "./builder.ts";
+import { ROLES, hasPermission, normalizeRole, roleFor, viewerMayMutate } from "./rbac.ts";
 import { dataRoot, isRetiredPassword, newId, openDb, tokenHash, verifyPassword } from "./db.ts";
 import { collectAnalytics, collectHost, collectMetrics } from "./metrics.ts";
 import { capabilities, collectObservability, inspectRequest, listBuilds, listDrives, listFirewallEvents, listRules, listWorkflows, observedJa4, summarizeVitals, trafficSummary } from "./platform.ts";
@@ -511,7 +512,7 @@ function isGitUrl(value: string) {
   }
 }
 
-const NO_REPO_NOTE = "No repository is configured for this project. Engine dispatch is also disabled.";
+const NO_REPO_NOTE = "No repository is configured for this project. Connect a repository before deploying.";
 
 /** Records a deployment row and publishes `deployment.updated` atomically. */
 function recordDeployment(
@@ -1923,6 +1924,12 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   if (method !== "GET" && method !== "HEAD" && !bearerMayWrite(auth, method, parts)) {
     throw new RequestError(403, "This credential may only read the account. Sign in to make changes.");
   }
+  // Enforce the account role matrix. A viewer is read-only everywhere except
+  // its own credentials, profile and notification preferences.
+  const role = normalizeRole(user.role);
+  if (method !== "GET" && method !== "HEAD" && role === "viewer" && !viewerMayMutate(parts)) {
+    throw new RequestError(403, "Your role is read-only. Ask an account owner to grant write access.");
+  }
   if (method !== "GET" && (parts[0] === "tokens" || parts[0] === "sessions" || parts[0] === "webhooks" || parts[0] === "devices"
     || (parts[0] === "auth" && parts[1] === "sessions") || parts[0] === "admin"
     || (parts[0] === "oauth" && parts[1] === "clients")
@@ -2000,7 +2007,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   // OAuth client management (the discovery document names /oauth/clients).
   // Registering a client is account-wide trust; only the owner may do it.
   if (parts[0] === "oauth" && parts[1] === "clients") {
-    if (user.role !== "owner") throw new RequestError(403, "Only the account owner may manage OAuth clients.");
+    if (!hasPermission(role, "oauth.manage")) throw new RequestError(403, `Only an account ${roleFor("oauth.manage")} may manage OAuth clients.`);
     const clientId = parts[2] ?? "";
     try {
       if (method === "GET" && !clientId) {
@@ -2059,7 +2066,7 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   // Registering an application that can receive identity claims is an
   // account-wide trust decision, so it is limited to the owner role.
   if (parts[0] === "admin") {
-    if (user.role !== "owner") throw new RequestError(403, "Only the account owner may manage SSO.");
+    if (!hasPermission(role, "sso.manage")) throw new RequestError(403, `Only an account ${roleFor("sso.manage")} may manage SSO.`);
     const resource = parts[1] ?? "";
     const id = parts[2] ?? "";
     if (resource === "signing-keys") {
@@ -2325,20 +2332,76 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
       return { response: json({ ok: true, status: "blocked", note: NO_REPO_NOTE }), status: 403, owner };
     }
 
-    recordDeployment(db, owner, project, "blocked", BUILDER_DISABLED);
-    log(owner, "warn", "builder", `${project.name}: ${BUILDER_DISABLED}`);
-    return { response: json({ ok: true, status: "blocked", note: BUILDER_DISABLED }), status: 403, owner };
+    const builder = builderConfig();
+    if (!builder.enabled) {
+      recordDeployment(db, owner, project, "blocked", BUILDER_DISABLED);
+      log(owner, "warn", "builder", `${project.name}: ${BUILDER_DISABLED}`);
+      return { response: json({ ok: true, status: "blocked", note: BUILDER_DISABLED }), status: 403, owner };
+    }
+    // The engine is the authority: it re-validates the project, clone URL and
+    // ref, and refuses anything it was not configured for.
+    const dispatched = await dispatchDeploy(builder, { project: project.name, cloneUrl: repoUrl, branch: str(input.branch) || "main", commit: str(input.commit) || undefined });
+    if (!dispatched.ok) {
+      recordDeployment(db, owner, project, "failed", dispatched.note);
+      log(owner, "error", "builder", `${project.name}: ${dispatched.note}`);
+      notify(db, owner, "deployment.failed", "Deployment dispatch failed", `${project.name}: ${dispatched.note}`);
+      return { response: json({ ok: false, status: "failed", note: dispatched.note }), status: 502, owner };
+    }
+    const deployId = recordDeployment(db, owner, project, "queued", dispatched.note);
+    log(owner, "info", "builder", `${project.name}: ${dispatched.note}`);
+    notify(db, owner, "deployment.queued", "Deployment queued", `${project.name}: ${dispatched.note}`);
+    return { response: json({ ok: true, status: "queued", deploymentId: deployId, note: dispatched.note }), status: 202, owner };
   }
 
   if (method === "POST" && parts[0] === "deployments" && parts[2] === "rollback") {
-    return { response: json({ ok: false, status: "blocked", note: BUILDER_DISABLED }), status: 503, owner };
+    const input = await body(req);
+    const deployId = str(input.deployId);
+    const project = db.prepare("SELECT id, name FROM projects WHERE owner_id = ? AND id = ?")
+      .get(owner, str(input.projectId)) as { id: string; name: string } | undefined;
+    const builder = builderConfig();
+    if (!builder.enabled) return { response: json({ ok: false, status: "blocked", note: BUILDER_DISABLED }), status: 503, owner };
+    if (!project || !deployId) return { response: json({ error: "A project and a deployment id are required" }, 400), status: 400, owner };
+    const rolled = await dispatchRollback(builder, project.name, deployId);
+    if (!rolled.ok) {
+      log(owner, "error", "builder", `${project.name}: rollback failed: ${rolled.note}`);
+      return { response: json({ ok: false, status: "failed", note: rolled.note }), status: 502, owner };
+    }
+    recordDeployment(db, owner, project, "rolled_back", rolled.note);
+    log(owner, "warn", "builder", `${project.name}: rolled back to ${deployId}`);
+    notify(db, owner, "deployment.rolled_back", "Deployment rolled back", `${project.name}: ${deployId}`);
+    return { response: json({ ok: true, status: "rolled_back", note: rolled.note }), status: 200, owner };
   }
 
   if (key === "GET builder") {
-    return { response: json({ enabled: false, baseUrl: "", reachable: false, detail: BUILDER_DISABLED }), status: 200, owner };
+    const builder = builderConfig();
+    const reachable = builder.enabled ? await probeBuilder(builder) : false;
+    return {
+      response: json({
+        enabled: builder.enabled,
+        baseUrl: builder.url,
+        reachable,
+        detail: builder.enabled
+          ? reachable ? "The engine is reachable." : "The engine is configured but did not answer its health probe."
+          : BUILDER_DISABLED,
+      }),
+      status: 200,
+      owner,
+    };
   }
   if (method === "GET" && parts[0] === "builder" && parts[1] === "deployments" && parts[2]) {
-    throw new RequestError(503, BUILDER_DISABLED);
+    const builder = builderConfig();
+    if (!builder.enabled) throw new RequestError(503, BUILDER_DISABLED);
+    const project = db.prepare("SELECT name FROM projects WHERE owner_id = ? AND id = ?").get(owner, parts[2]) as { name: string } | undefined;
+    if (!project) return { response: json({ error: "Project not found" }, 404), status: 404, owner };
+    try {
+      const upstream = await fetch(`${builder.url}/api/v1/deployments/${encodeURIComponent(project.name)}`, {
+        headers: { authorization: `Bearer ${builder.token}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      return { response: new Response(await upstream.text(), { status: upstream.status, headers: { "content-type": "application/json" } }), status: upstream.status, owner };
+    } catch (error) {
+      throw new RequestError(503, `Engine unreachable: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
   }
 
   if (key === "POST domains") {
@@ -2471,19 +2534,90 @@ async function route(req: Request, parts: string[]): Promise<{ response: Respons
   }
 
   if (key === "POST team") {
+    if (!hasPermission(role, "team.manage")) throw new RequestError(403, `Only an account ${roleFor("team.manage")} may manage the team.`);
     const input = await body(req);
     const email = str(input.email).toLowerCase();
     const name = str(input.name);
     if (!email.includes("@") || !name) return { response: json({ error: "Name and email are required" }, 400), status: 400, owner };
+    const requested = input.role === undefined ? "member" : str(input.role).toLowerCase();
+    if (!(ROLES as readonly string[]).includes(requested)) {
+      return { response: json({ error: "role must be one of owner, member, viewer" }, 400), status: 400, owner };
+    }
+    if (requested === "owner") return { response: json({ error: "An invite cannot grant the owner role. Promote the member after they join." }, 400), status: 400, owner };
     const id = newId();
     tx(db, () => {
       db.prepare(
-        "INSERT INTO invites (id, owner_id, email, name, role, email_sent, created_at) VALUES (?, ?, ?, ?, 'member', 0, ?)",
-      ).run(id, owner, email, name, Date.now());
-      publish(db, owner, "configuration.updated", id, { resource: "invite", id, email, name });
+        "INSERT INTO invites (id, owner_id, email, name, role, email_sent, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+      ).run(id, owner, email, name, requested, Date.now());
+      publish(db, owner, "configuration.updated", id, { resource: "invite", id, email, name, role: requested });
     });
-    log(owner, "info", "team", `saved invite for ${email}. SMTP is not configured, so no email was sent.`);
-    return { response: json({ ok: true, emailSent: false }), status: 201, owner };
+    log(owner, "info", "team", `saved invite for ${email} as ${requested}. SMTP is not configured, so no email was sent.`);
+    return { response: json({ ok: true, emailSent: false, role: requested }), status: 201, owner };
+  }
+
+  // Role changes for an existing user or a pending invite. The last active
+  // owner cannot be demoted, so an account can never lock itself out.
+  if (method === "PATCH" && parts[0] === "team" && parts[1]) {
+    if (!hasPermission(role, "team.manage")) throw new RequestError(403, `Only an account ${roleFor("team.manage")} may manage the team.`);
+    const input = await body(req);
+    const requested = str(input.role).toLowerCase();
+    if (!(ROLES as readonly string[]).includes(requested)) {
+      return { response: json({ error: "role must be one of owner, member, viewer" }, 400), status: 400, owner };
+    }
+    const target = parts[1];
+    const member = db.prepare("SELECT id, name, email, role FROM users WHERE id = ?")
+      .get(target) as { id: string; name: string; email: string; role: string } | undefined;
+    if (member) {
+      if (member.role === "owner" && requested !== "owner") {
+        const owners = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'owner' AND active = 1").get() as { n: number };
+        if (owners.n <= 1) return { response: json({ error: "The account must keep at least one owner." }, 400), status: 400, owner };
+      }
+      tx(db, () => {
+        db.prepare("UPDATE users SET role = ? WHERE id = ?").run(requested, member.id);
+        publish(db, owner, "configuration.updated", member.id, { resource: "member", id: member.id, role: requested });
+      });
+      log(owner, "warn", "team", `set ${member.email} to ${requested}`);
+      return { response: json({ ok: true, role: requested }), status: 200, owner };
+    }
+    const invite = db.prepare("SELECT id, email FROM invites WHERE owner_id = ? AND id = ?")
+      .get(owner, target) as { id: string; email: string } | undefined;
+    if (!invite) return { response: json({ error: "Team member not found" }, 404), status: 404, owner };
+    if (requested === "owner") return { response: json({ error: "An invite cannot grant the owner role." }, 400), status: 400, owner };
+    tx(db, () => {
+      db.prepare("UPDATE invites SET role = ? WHERE owner_id = ? AND id = ?").run(requested, owner, invite.id);
+      publish(db, owner, "configuration.updated", invite.id, { resource: "invite", id: invite.id, role: requested });
+    });
+    log(owner, "info", "team", `set invite ${invite.email} to ${requested}`);
+    return { response: json({ ok: true, role: requested }), status: 200, owner };
+  }
+
+  if (method === "DELETE" && parts[0] === "team" && parts[1]) {
+    if (!hasPermission(role, "team.manage")) throw new RequestError(403, `Only an account ${roleFor("team.manage")} may manage the team.`);
+    const target = parts[1];
+    if (target === owner) return { response: json({ error: "You cannot remove your own account." }, 400), status: 400, owner };
+    const invite = db.prepare("SELECT id, email FROM invites WHERE owner_id = ? AND id = ?")
+      .get(owner, target) as { id: string; email: string } | undefined;
+    if (invite) {
+      tx(db, () => {
+        db.prepare("DELETE FROM invites WHERE owner_id = ? AND id = ?").run(owner, invite.id);
+        publish(db, owner, "configuration.updated", invite.id, { resource: "invite", id: invite.id, removed: true });
+      });
+      log(owner, "warn", "team", `removed invite ${invite.email}`);
+      return { response: json({ ok: true }), status: 200, owner };
+    }
+    const member = db.prepare("SELECT id, email, role FROM users WHERE id = ?")
+      .get(target) as { id: string; email: string; role: string } | undefined;
+    if (!member) return { response: json({ error: "Team member not found" }, 404), status: 404, owner };
+    if (member.role === "owner") {
+      const owners = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'owner' AND active = 1").get() as { n: number };
+      if (owners.n <= 1) return { response: json({ error: "The account must keep at least one owner." }, 400), status: 400, owner };
+    }
+    tx(db, () => {
+      db.prepare("UPDATE users SET active = 0 WHERE id = ?").run(member.id);
+      publish(db, owner, "configuration.updated", member.id, { resource: "member", id: member.id, active: false });
+    });
+    log(owner, "warn", "team", `deactivated ${member.email}`);
+    return { response: json({ ok: true }), status: 200, owner };
   }
 
   if (key === "POST settings") {

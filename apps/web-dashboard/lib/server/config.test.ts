@@ -46,3 +46,89 @@ test("enabling FurlPay requires a client id, HTTPS redirect and issuer", () => {
   });
   assert.ok(enabled.includes("furlpay_redirect"));
 });
+
+test("external integrations stay off until their enable flag is set", () => {
+  const names = failed(base);
+  const optional = [
+    "push_provider",
+    "push_fcm_credentials",
+    "push_apns_credentials",
+    "social_providers",
+    "social_github_oauth",
+    "magic_link_smtp",
+    "sms_otp_provider",
+    "sms_otp_api_key",
+    "payments_provider",
+    "payments_stripe_secrets",
+    "payments_paddle_secrets",
+  ];
+  for (const name of optional) {
+    assert.ok(!names.includes(name), `${name} must not be required while its feature is disabled`);
+  }
+});
+
+test("enabling push notifications requires a supported provider and its credentials", () => {
+  assert.ok(failed({ ...base, MOBILECLOUD_PUSH_ENABLED: "1" }).includes("push_provider"));
+  assert.ok(failed({ ...base, MOBILECLOUD_PUSH_ENABLED: "1", MOBILECLOUD_PUSH_PROVIDER: "onesignal" }).includes("push_provider"));
+  assert.ok(failed({ ...base, MOBILECLOUD_PUSH_ENABLED: "1", MOBILECLOUD_PUSH_PROVIDER: "fcm" }).includes("push_fcm_credentials"));
+  assert.ok(failed({ ...base, MOBILECLOUD_PUSH_ENABLED: "1", MOBILECLOUD_PUSH_PROVIDER: "apns" }).includes("push_apns_credentials"));
+});
+
+test("an fcm push configuration with credentials passes", () => {
+  assert.deepEqual(
+    failed({
+      ...base,
+      MOBILECLOUD_PUSH_ENABLED: "1",
+      MOBILECLOUD_PUSH_PROVIDER: "fcm",
+      MOBILECLOUD_FCM_CREDENTIALS: "service-account-json",
+    }),
+    [],
+  );
+});
+
+test("enabling social login requires each provider's OAuth secrets", () => {
+  const missing = failed({ ...base, MOBILECLOUD_SOCIAL_LOGIN_ENABLED: "1", MOBILECLOUD_SOCIAL_PROVIDERS: "github" });
+  assert.ok(missing.includes("social_github_oauth"));
+  assert.ok(missing.includes("social_providers") === false);
+  assert.ok(failed({ ...base, MOBILECLOUD_SOCIAL_LOGIN_ENABLED: "1", MOBILECLOUD_SOCIAL_PROVIDERS: "facebook" }).includes("social_providers"));
+});
+
+test("a complete github social login configuration passes", () => {
+  assert.deepEqual(
+    failed({
+      ...base,
+      MOBILECLOUD_SOCIAL_LOGIN_ENABLED: "1",
+      MOBILECLOUD_SOCIAL_PROVIDERS: "github",
+      GITHUB_OAUTH_CLIENT_ID: "client-id",
+      GITHUB_OAUTH_CLIENT_SECRET: "client-secret",
+    }),
+    [],
+  );
+});
+
+test("enabling payments requires a supported provider and its keys", () => {
+  assert.ok(failed({ ...base, MOBILECLOUD_PAYMENTS_ENABLED: "1" }).includes("payments_provider"));
+  assert.ok(failed({ ...base, MOBILECLOUD_PAYMENTS_ENABLED: "1", MOBILECLOUD_PAYMENTS_PROVIDER: "braintree" }).includes("payments_provider"));
+  assert.ok(failed({ ...base, MOBILECLOUD_PAYMENTS_ENABLED: "1", MOBILECLOUD_PAYMENTS_PROVIDER: "stripe" }).includes("payments_stripe_secrets"));
+  assert.ok(failed({ ...base, MOBILECLOUD_PAYMENTS_ENABLED: "1", MOBILECLOUD_PAYMENTS_PROVIDER: "paddle" }).includes("payments_paddle_secrets"));
+});
+
+test("a complete stripe payments configuration passes", () => {
+  assert.deepEqual(
+    failed({
+      ...base,
+      MOBILECLOUD_PAYMENTS_ENABLED: "1",
+      MOBILECLOUD_PAYMENTS_PROVIDER: "stripe",
+      MOBILECLOUD_STRIPE_SECRET_KEY: "sk_live_x",
+      MOBILECLOUD_STRIPE_WEBHOOK_SECRET: "whsec_x",
+    }),
+    [],
+  );
+});
+
+test("kms signing without a key id fails closed", () => {
+  const names = failed({ ...base, MOBILECLOUD_KEY_PROVIDER: "kms" });
+  assert.ok(names.includes("kms_provider"));
+  assert.ok(names.includes("kms_key_id"));
+  assert.ok(!failed({ ...base, MOBILECLOUD_KEY_PROVIDER: "kms", MOBILECLOUD_KMS_KEY_ID: "arn:aws:kms:key" }).includes("kms_key_id"));
+});

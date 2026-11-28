@@ -24,9 +24,10 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
@@ -34,6 +35,56 @@ use yamux::Control;
 
 /// Maximum allowed clock skew for handshake timestamps (5 minutes).
 const HANDSHAKE_MAX_AGE_SECS: u64 = 300;
+
+// ───────────────────── replay cache ──────────────────────────────
+
+/// In-memory cache of recently-seen handshake nonces, used to reject replays.
+///
+/// Each accepted nonce is stored with its arrival [`Instant`]. Entries older
+/// than [`HANDSHAKE_MAX_AGE_SECS`] are evicted whenever the cache is accessed,
+/// so the cache stays bounded by the handshake rate over that window.
+#[derive(Debug, Default)]
+pub struct ReplayCache {
+    seen: Mutex<HashMap<String, Instant>>,
+}
+
+impl ReplayCache {
+    /// Create an empty replay cache.
+    pub fn new() -> Self {
+        Self {
+            seen: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Record an accepted `nonce`, rejecting it if it has already been seen.
+    ///
+    /// Evicts entries older than [`HANDSHAKE_MAX_AGE_SECS`] before checking.
+    /// Returns `Ok(())` if the nonce was newly recorded, or an error if it is
+    /// a replay of a previously accepted handshake.
+    pub fn check_and_insert(&self, nonce: &str) -> anyhow::Result<()> {
+        let mut seen = self.seen.lock().expect("replay cache mutex poisoned");
+        let now = Instant::now();
+
+        // Evict stale entries so the cache cannot grow unbounded.
+        let max_age = Duration::from_secs(HANDSHAKE_MAX_AGE_SECS);
+        seen.retain(|_, inserted| now.duration_since(*inserted) < max_age);
+
+        if seen.contains_key(nonce) {
+            anyhow::bail!("handshake rejected: replayed nonce '{nonce}'");
+        }
+
+        seen.insert(nonce.to_string(), now);
+        Ok(())
+    }
+}
+
+/// Reject handshakes that carry a missing or empty anti-replay nonce.
+fn validate_nonce(nonce: &str) -> anyhow::Result<()> {
+    if nonce.trim().is_empty() {
+        anyhow::bail!("handshake rejected: missing anti-replay nonce");
+    }
+    Ok(())
+}
 
 // ───────────────────── service registry ──────────────────────────
 
@@ -75,6 +126,7 @@ pub struct RelayConfig {
 pub struct TunnelRelay {
     config: RelayConfig,
     registry: ServiceRegistry,
+    replay_cache: Arc<ReplayCache>,
 }
 
 impl TunnelRelay {
@@ -83,6 +135,7 @@ impl TunnelRelay {
         Self {
             config,
             registry: Arc::new(DashMap::new()),
+            replay_cache: Arc::new(ReplayCache::new()),
         }
     }
 
@@ -92,13 +145,15 @@ impl TunnelRelay {
     pub async fn run(&self) -> Result<()> {
         let registry = self.registry.clone();
         let config = self.config.clone();
+        let replay_cache = self.replay_cache.clone();
 
         // Run both listeners concurrently
         let tunnel_handle = {
             let registry = registry.clone();
             let config = config.clone();
+            let replay_cache = replay_cache.clone();
             tokio::spawn(async move {
-                if let Err(e) = listen_tunnel(config, registry).await {
+                if let Err(e) = listen_tunnel(config, registry, replay_cache).await {
                     error!(%e, "tunnel listener failed");
                 }
             })
@@ -135,7 +190,11 @@ impl TunnelRelay {
 // ───────────────────── tunnel listener ──────────────────────────
 
 /// Accept incoming WebSocket connections from tunnel clients.
-async fn listen_tunnel(config: RelayConfig, registry: ServiceRegistry) -> Result<()> {
+async fn listen_tunnel(
+    config: RelayConfig,
+    registry: ServiceRegistry,
+    replay_cache: Arc<ReplayCache>,
+) -> Result<()> {
     let listener = TcpListener::bind(config.tunnel_addr)
         .await
         .context("failed to bind tunnel listener")?;
@@ -148,10 +207,17 @@ async fn listen_tunnel(config: RelayConfig, registry: ServiceRegistry) -> Result
 
         let registry = registry.clone();
         let authorized_keys = config.authorized_keys.clone();
+        let replay_cache = replay_cache.clone();
 
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_tunnel_connection(tcp_stream, peer_addr, &authorized_keys, registry).await
+            if let Err(e) = handle_tunnel_connection(
+                tcp_stream,
+                peer_addr,
+                &authorized_keys,
+                registry,
+                replay_cache,
+            )
+            .await
             {
                 warn!(%peer_addr, %e, "tunnel client connection failed");
             }
@@ -165,6 +231,7 @@ async fn handle_tunnel_connection(
     _peer_addr: SocketAddr,
     authorized_keys: &[VerifyingKey],
     registry: ServiceRegistry,
+    replay_cache: Arc<ReplayCache>,
 ) -> Result<()> {
     // 1. WebSocket handshake
     let ws_stream = tokio_tungstenite::accept_async(tcp_stream)
@@ -214,6 +281,8 @@ async fn handle_tunnel_connection(
             key,
             &handshake.client_id,
             handshake.timestamp,
+            &handshake.nonce,
+            &handshake.relay_id,
             &handshake.signature,
         )
         .is_ok()
@@ -229,6 +298,24 @@ async fn handle_tunnel_connection(
             .send(Message::Text(serde_json::to_string(&ctl).unwrap().into()))
             .await;
         anyhow::bail!("unauthorized tunnel client {}", handshake.client_id);
+    }
+
+    // 4b. Reject missing/empty anti-replay nonces outright.
+    if let Err(e) = validate_nonce(&handshake.nonce) {
+        let ctl = ControlMessage::Error(e.to_string());
+        let _ = ws_write
+            .send(Message::Text(serde_json::to_string(&ctl).unwrap().into()))
+            .await;
+        return Err(e);
+    }
+
+    // 4c. Reject replayed handshakes (nonce already accepted within the window).
+    if let Err(e) = replay_cache.check_and_insert(&handshake.nonce) {
+        let ctl = ControlMessage::Error(e.to_string());
+        let _ = ws_write
+            .send(Message::Text(serde_json::to_string(&ctl).unwrap().into()))
+            .await;
+        return Err(e);
     }
 
     info!(client_id = %handshake.client_id, "tunnel client authorized");
@@ -640,5 +727,42 @@ mod tests {
         let raw = b"HTTP/1.1 204 No Content\r\n\r\n";
         let resp = parse_raw_http_response(raw);
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    fn replay_cache_rejects_duplicate_nonce() {
+        let cache = ReplayCache::new();
+        assert!(cache.check_and_insert("nonce-a").is_ok());
+        assert!(cache.check_and_insert("nonce-b").is_ok());
+        // Replaying an already-seen nonce is rejected.
+        assert!(cache.check_and_insert("nonce-a").is_err());
+    }
+
+    #[test]
+    fn replay_cache_evicts_stale_entries() {
+        let cache = ReplayCache::new();
+
+        // Seed an entry older than the max age.
+        {
+            let mut seen = cache.seen.lock().unwrap();
+            seen.insert(
+                "stale".to_string(),
+                Instant::now() - Duration::from_secs(HANDSHAKE_MAX_AGE_SECS + 1),
+            );
+        }
+
+        // A fresh insert evicts the stale entry...
+        assert!(cache.check_and_insert("fresh").is_ok());
+        assert!(!cache.seen.lock().unwrap().contains_key("stale"));
+
+        // ...so the previously-stale nonce is accepted again.
+        assert!(cache.check_and_insert("stale").is_ok());
+    }
+
+    #[test]
+    fn empty_nonce_is_rejected() {
+        assert!(validate_nonce("").is_err());
+        assert!(validate_nonce("   ").is_err());
+        assert!(validate_nonce("deadbeef").is_ok());
     }
 }

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { handle } from "./api.ts";
-import { openDb, tokenHash } from "./db.ts";
+import { hashPassword, newId, openDb, tokenHash } from "./db.ts";
 
 const root = mkdtempSync(join(tmpdir(), "mc-api-"));
 process.env.MOBILECLOUD_DB = join(root, "t.db");
@@ -35,6 +37,14 @@ async function login() {
   assert.ok(user);
   assert.match(csrfToken, /^[a-f0-9]{64}$/);
   return { cookie, "x-mc-csrf": csrfToken as string, userId: user.id as string };
+}
+
+async function loginAs(email: string, password: string) {
+  const response = await request("auth/login", "POST", { email, password }, { origin });
+  assert.equal(response.status, 200);
+  const cookie = response.headers.getSetCookie().find((value) => value.startsWith("mc_session="))!.split(";")[0];
+  const { user, csrfToken } = await (await request("auth/me", "GET", undefined, { cookie })).json();
+  return { cookie, "x-mc-csrf": csrfToken as string, userId: user.id as string, role: user.role as string };
 }
 
 test("public signup is disabled while operator provisioning and HTTPS discovery work", async () => {
@@ -169,4 +179,87 @@ test("storage keeps distinct object keys in distinct opaque files", async () => 
   assert.equal((await upload("a/b", "replacement")).status, 409);
   const paths = openDb().prepare("SELECT path FROM objects WHERE owner_id = ? ORDER BY key").all(userId);
   assert.deepEqual(paths.map((row) => readFileSync(String(row.path), "utf8")), ["first", "second"]);
+});
+
+test("the role matrix keeps viewers read-only and reserves team management for owners", async () => {
+  const db = openDb();
+  const viewerPassword = "viewer-password-example";
+  db.prepare("INSERT INTO users (id, email, name, password_hash, role, plan, created_at) VALUES (?, ?, ?, ?, 'viewer', 'community', ?)")
+    .run(newId(), "viewer@example.test", "Viewer", hashPassword(viewerPassword), Date.now());
+  const viewer = await loginAs("viewer@example.test", viewerPassword);
+  assert.equal(viewer.role, "viewer");
+  // A viewer reads and may still edit its own profile.
+  assert.equal((await request("overview", "GET", undefined, viewer)).status, 200);
+  assert.equal((await request("profile", "POST", { name: "Renamed viewer" }, viewer)).status, 200);
+  // Account resources and admin surfaces are refused.
+  assert.equal((await request("projects", "POST", { name: "nope", framework: "Next.js" }, viewer)).status, 403);
+  assert.equal((await request("team", "POST", { name: "x", email: "x@example.test" }, viewer)).status, 403);
+  assert.equal((await request("admin/apps", "POST", { name: "x" }, viewer)).status, 403);
+
+  // Only an owner manages team roles.
+  const owner = await login();
+  assert.equal((await request("team", "POST", { name: "Owner invite", email: "o@example.test", role: "owner" }, owner)).status, 400);
+  assert.equal((await request("team", "POST", { name: "Bad role", email: "b@example.test", role: "root" }, owner)).status, 400);
+  const invite = await request("team", "POST", { name: "Dev", email: "dev@example.test", role: "viewer" }, owner);
+  assert.equal(invite.status, 201);
+  assert.equal((await invite.json()).role, "viewer");
+  const inviteId = String((db.prepare("SELECT id FROM invites WHERE owner_id = ?").get(owner.userId) as { id: string }).id);
+  assert.equal((await request(`team/${inviteId}`, "PATCH", { role: "member" }, owner)).status, 200);
+  assert.equal((await request(`team/${inviteId}`, "PATCH", { role: "owner" }, owner)).status, 400);
+  // The last owner cannot be demoted or removed.
+  assert.equal((await request(`team/${owner.userId}`, "PATCH", { role: "viewer" }, owner)).status, 400);
+  assert.equal((await request(`team/${owner.userId}`, "DELETE", undefined, owner)).status, 400);
+  assert.equal((await request(`team/${inviteId}`, "DELETE", undefined, owner)).status, 200);
+});
+
+test("a fully configured engine receives the dispatch with its bearer token", async (t) => {
+  const engineRequests: { url?: string; auth?: string; body: Record<string, unknown> }[] = [];
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      if (req.url === "/healthz") { res.writeHead(200); res.end("ok"); return; }
+      const body = JSON.parse(raw || "{}") as Record<string, unknown>;
+      engineRequests.push({ url: req.url, auth: req.headers.authorization, body });
+      // The engine is the authority and refuses projects it was not configured for.
+      if (body.project === "engine-demo") { res.writeHead(202, { "content-type": "application/json" }); res.end(JSON.stringify({ status: "queued" })); return; }
+      res.writeHead(403, { "content-type": "text/plain" }); res.end("unknown preview project");
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const previous = { url: process.env.MOBILECLOUD_BUILDER_URL, token: process.env.MOBILECLOUD_BUILDER_TOKEN };
+  process.env.MOBILECLOUD_BUILDER_URL = `http://127.0.0.1:${port}`;
+  process.env.MOBILECLOUD_BUILDER_TOKEN = "engine-shared-secret";
+  t.after(() => {
+    server.close();
+    if (previous.url === undefined) delete process.env.MOBILECLOUD_BUILDER_URL; else process.env.MOBILECLOUD_BUILDER_URL = previous.url;
+    if (previous.token === undefined) delete process.env.MOBILECLOUD_BUILDER_TOKEN; else process.env.MOBILECLOUD_BUILDER_TOKEN = previous.token;
+  });
+
+  const { userId, ...auth } = await login();
+  const info = await (await request("builder", "GET", undefined, auth)).json();
+  assert.equal(info.enabled, true);
+  assert.equal(info.reachable, true);
+  assert.equal(info.baseUrl, `http://127.0.0.1:${port}`);
+
+  const ok = await request("projects", "POST", { name: "engine-demo", framework: "Next.js", repoUrl: "https://github.com/acme/demo.git" }, auth);
+  assert.equal(ok.status, 201);
+  const demo = await ok.json();
+  const queued = await request("deployments", "POST", { projectId: demo.id }, auth);
+  assert.equal(queued.status, 202);
+  assert.equal((await queued.json()).status, "queued");
+
+  const refused = await request("projects", "POST", { name: "engine-refused", framework: "Next.js", repoUrl: "https://github.com/acme/other.git" }, auth);
+  const other = await refused.json();
+  const failed = await request("deployments", "POST", { projectId: other.id }, auth);
+  assert.equal(failed.status, 502);
+  assert.equal((await failed.json()).status, "failed");
+
+  assert.equal(engineRequests.length, 2);
+  assert.equal(engineRequests[0].url, "/api/v1/deploy/agent");
+  assert.equal(engineRequests[0].auth, "Bearer engine-shared-secret");
+  assert.deepEqual(engineRequests[0].body, { project: "engine-demo", clone_url: "https://github.com/acme/demo.git", branch: "main", agent_id: "dashboard" });
+  const recorded = openDb().prepare("SELECT status FROM deployments WHERE owner_id = ? AND project_id IN (?, ?)").all(userId, demo.id, other.id) as { status: string }[];
+  assert.deepEqual(recorded.map((row) => row.status).sort(), ["failed", "queued"]);
 });

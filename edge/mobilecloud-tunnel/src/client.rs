@@ -9,6 +9,7 @@ use crate::protocol::{AuthToken, ControlMessage, ServiceMapping, TunnelHandshake
 
 use ed25519_dalek::SigningKey;
 use futures_util::{SinkExt, StreamExt};
+use rand::RngCore;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
@@ -24,6 +25,9 @@ pub struct ClientConfig {
     pub relay_url: String,
     /// Unique identifier for this client.
     pub client_id: String,
+    /// Identifier of the relay this client targets. Bound into the handshake
+    /// signature; defaults to empty.
+    pub relay_id: String,
     /// Ed25519 signing key for authentication.
     pub signing_key: SigningKey,
     /// Map of service name → local port.
@@ -44,6 +48,7 @@ impl ClientConfig {
         Self {
             relay_url,
             client_id,
+            relay_id: String::new(),
             signing_key,
             services: HashMap::new(),
             initial_delay: Duration::from_secs(1),
@@ -129,14 +134,24 @@ impl TunnelClient {
             })
             .collect();
 
-        let signature =
-            AuthToken::sign(&self.config.signing_key, &self.config.client_id, timestamp);
+        // Fresh random anti-replay nonce for this handshake.
+        let nonce = generate_nonce();
+
+        let signature = AuthToken::sign(
+            &self.config.signing_key,
+            &self.config.client_id,
+            timestamp,
+            &nonce,
+            &self.config.relay_id,
+        );
 
         let handshake = TunnelHandshake {
             client_id: self.config.client_id.clone(),
             timestamp,
             services: services.clone(),
             signature,
+            nonce,
+            relay_id: self.config.relay_id.clone(),
         };
 
         let handshake_json = serde_json::to_string(&handshake)?;
@@ -202,6 +217,13 @@ impl TunnelClient {
             }
         }
     }
+}
+
+/// Generate a fresh random anti-replay nonce (128 bits), hex-encoded.
+fn generate_nonce() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }
 
 /// Handle a single inbound yamux stream from the relay.

@@ -36,6 +36,15 @@ test("a handler cannot reach the host process, require, or fetch", () => {
   }
 });
 
+test("a handler cannot compile new code with eval or the Function constructor", () => {
+  for (const source of [
+    "module.exports = () => eval('1 + 1');",
+    "module.exports = () => new Function('return 1')();",
+  ]) {
+    assert.throws(() => runFunction(source, req), (error: unknown) => error instanceof FunctionError && error.status === 422);
+  }
+});
+
 test("a handler with no exported function is rejected", () => {
   assert.throws(() => runFunction("const x = 1;", req), (error: unknown) => error instanceof FunctionError && error.status === 422);
 });

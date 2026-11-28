@@ -135,7 +135,9 @@ export function runFunction(source: string, req: FunctionRequest): FunctionResul
   validateSource(source);
   const moduleObject = { exports: {} as unknown };
   const sandbox: Record<string, unknown> = { ...globals(), module: moduleObject, exports: moduleObject.exports, __req: Object.freeze({ ...req }) };
-  const context = createContext(sandbox);
+  // `codeGeneration` blocks `eval`/`new Function` inside the context (and Wasm),
+  // so a handler cannot compile its way out of the restricted globals.
+  const context = createContext(sandbox, { codeGeneration: { strings: false, wasm: false } });
   const started = Date.now();
   try {
     new Script(source, { filename: "handler.js" }).runInContext(context, { timeout: EXEC_TIMEOUT_MS });

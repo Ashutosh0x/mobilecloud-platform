@@ -1,5 +1,5 @@
 {
-  "updated": "2026-11-27",
+  "updated": "2026-11-28",
   "legend": {
     "implemented": "Code exists, is exercised by tests or a build, and is deployable for its documented scope.",
     "partial": "Some production path is missing; the limitation is documented.",
@@ -9,7 +9,7 @@
   },
   "components": [
     { "name": "Passkeys and WebAuthn", "status": "implemented", "evidence": "passkey.ts, Credential Manager client; registration/authentication, origin/RP checks, counter replay defence; dashboard tests" },
-    { "name": "QR login (phone approves browser)", "status": "partial", "evidence": "qrlogin.ts and server tests complete; Android approval screen is not routed from MainActivity" },
+    { "name": "QR login (phone approves browser)", "status": "partial", "evidence": "qrlogin.ts and server tests complete; MainActivity reads the approval intent and routes it to LoginApprovalScreen via ConsoleRoot, but the end-to-end device flow is not exercised in CI" },
     { "name": "CLI device grant and PKCE", "status": "implemented", "evidence": "oauth.ts, cli/; RFC 8628, PKCE S256, refresh rotation; CLI tests and live end-to-end login" },
     { "name": "OIDC provider", "status": "implemented", "evidence": "oidc.ts, api.ts; discovery, JWKS, code+PKCE, ID tokens, userinfo, introspection, revocation, logout; 40 SSO tests" },
     { "name": "SAML 2.0 IdP", "status": "implemented", "evidence": "saml.ts; metadata, signed request verification, signed assertion; 12 tests. No SLO or encrypted assertions" },
@@ -19,21 +19,21 @@
     { "name": "Web passkey sign-in and management", "status": "implemented", "evidence": "login page conditional UI and passkey button, /security page, register/list/delete APIs; browser ceremony itself is not unit-testable" },
     { "name": "WebAuthn payment step-up", "status": "implemented", "evidence": "stepup.ts issues action/payload-bound 5-minute tokens after UV assertion; FurlPay adapter verifies signature/aud/action/payload; 4 tests" },
     { "name": "Android OIDC PKCE migration", "status": "partial", "evidence": "Passkey approval intent is routed through MainActivity/ConsoleRoot; app session and CLI login still use the cookie/ticket paths, and no push transport exists" },
-    { "name": "CloudShell OIDC migration", "status": "absent", "evidence": "CloudShell still uses the short-lived terminal ticket" },
-    { "name": "Functions runtime", "status": "partial", "evidence": "node:vm bounded runtime, disabled in production unless MOBILECLOUD_IN_PROCESS_RUNTIME=1; no process isolation" },
+    { "name": "CloudShell OIDC migration", "status": "absent", "evidence": "CloudShell still uses the short-lived, single-use terminal ticket issued behind the operator bearer credential; no OIDC-issued ticket path" },
+    { "name": "Functions runtime", "status": "partial", "evidence": "node:vm bounded runtime (frozen globals, 32 KB source, 256 KB output, 250 ms budget, codeGeneration disabled for strings and wasm), disabled in production unless MOBILECLOUD_IN_PROCESS_RUNTIME=1; no process isolation" },
     { "name": "Workflows", "status": "partial", "evidence": "In-process sequential steps over owner functions; inherits the functions-runtime gate" },
-    { "name": "Builder and project deployment dispatch", "status": "absent", "evidence": "BUILDER_DISABLED; deploy/build routes answer 403 and record nothing" },
-    { "name": "Preview isolation", "status": "partial", "evidence": "One-time token to cookie; CSP sandbox blocks console credentials. Separate preview origin not implemented" },
-    { "name": "Edge tunnel", "status": "partial", "evidence": "Ed25519 handshake, yamux, WSS; handshake lacks relay nonce/replay cache; 7 tests" },
-    { "name": "Edge shield", "status": "partial", "evidence": "Blocklist, rate limiter, regex WAF; forwarded headers trusted without a proxy allowlist" },
+    { "name": "Builder and project deployment dispatch", "status": "partial", "evidence": "Opt-in engine dispatch in builder.ts/api.ts: deploy, rollback and deployment lookup proxy to the core engine only when MOBILECLOUD_BUILDER_URL and MOBILECLOUD_BUILDER_TOKEN are both set; the engine re-validates project, clone URL and ref. Disabled by default (403, recorded as blocked); no per-tenant isolation on the engine side" },
+    { "name": "Preview isolation", "status": "partial", "evidence": "One-time token to cookie; CSP `sandbox` blocks console credentials; loopback-only upstream with privileged ports refused. Separate preview origin not implemented" },
+    { "name": "Edge tunnel", "status": "partial", "evidence": "Ed25519 handshake, yamux, WSS; the signed handshake now binds a relay nonce and enforces a replay cache; not exercised against real hardware" },
+    { "name": "Edge shield", "status": "partial", "evidence": "Blocklist, rate limiter, regex WAF; forwarded headers are honoured only from a configured trusted-proxy allowlist" },
     { "name": "Proof-of-reserve kernel and contract", "status": "partial", "evidence": "Kernel, contract and testnet baseline exist; quorum key independence and custody are not independently established" },
     { "name": "Trading engine", "status": "partial", "evidence": "Paper/demo only; live execution is not enabled or validated" },
     { "name": "Fleet mesh", "status": "partial", "evidence": "Node registry, signed heartbeats and placement; no peer transport, discovery or dashboard wiring" },
-    { "name": "Billing and payments", "status": "absent", "evidence": "Usage is metered; no payment provider, wallet, KYC, card vault or invoicing" },
-    { "name": "Team roles and RBAC", "status": "partial", "evidence": "Owner/member/viewer fields and invites exist; no enforced multi-tenant role matrix" },
-    { "name": "Social login, magic links, SMS OTP", "status": "absent", "evidence": "No provider configuration or delivery transport" },
-    { "name": "Push notifications (FCM/APNs)", "status": "absent", "evidence": "Android notifier is transport-agnostic; no credentials or delivery test" },
-    { "name": "KMS/HSM signing", "status": "absent", "evidence": "Database signing keys; MOBILECLOUD_KEY_PROVIDER=kms fails configuration validation" },
+    { "name": "Billing and payments", "status": "absent", "evidence": "Usage is metered; no payment provider, wallet, KYC, card vault or invoicing. MOBILECLOUD_PAYMENTS_ENABLED config validation fails closed when incomplete, but no provider is wired" },
+    { "name": "Team roles and RBAC", "status": "implemented", "evidence": "rbac.ts owner/member/viewer matrix enforced on every API mutation and in the team console (invite with role, promote/demote with last-owner protection, remove); unknown roles fail closed. Account resources are scoped by owner_id (single account, no org membership tables)" },
+    { "name": "Social login, magic links, SMS OTP", "status": "absent", "evidence": "No provider configuration or delivery transport. MOBILECLOUD_SOCIAL_LOGIN_ENABLED config validation fails closed when incomplete, but no flow is wired" },
+    { "name": "Push notifications (FCM/APNs)", "status": "absent", "evidence": "Android notifier is transport-agnostic; no credentials or delivery test. MOBILECLOUD_PUSH_ENABLED config validation fails closed when incomplete" },
+    { "name": "KMS/HSM signing", "status": "absent", "evidence": "Database signing keys; MOBILECLOUD_KEY_PROVIDER=kms fails configuration validation and now also requires MOBILECLOUD_KMS_KEY_ID, but no KMS-backed signer exists" },
     { "name": "Production readiness", "status": "partial", "evidence": "Health, config validation, SBOM and runbooks exist; KMS, live FurlPay round trip, Android migration and drills remain" }
   ]
 }

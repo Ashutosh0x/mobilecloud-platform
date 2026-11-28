@@ -494,21 +494,44 @@ export function SettingsView() {
   );
 }
 
+const ACCOUNT_ROLES = ["owner", "member", "viewer"] as const;
+const INVITE_ROLES = ["member", "viewer"] as const;
+
 export function TeamView() {
   const { state, call, setToast } = useCloud();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [role, setRole] = useState("member");
   const rows = useFiltered(state.team, (m) => `${m.name} ${m.email}`);
+  const selfId = state.user?.id;
   return (
     <>
-      <header className="page-head"><div><h2>Team</h2><p>Invites are stored. SMTP is not configured, so no email is sent.</p></div></header>
-      <form className="form-row" onSubmit={(e) => { e.preventDefault(); run(() => call("team", { method: "POST", body: JSON.stringify({ name, email }) }), setToast, "Invite saved. No email was sent."); setName(""); setEmail(""); }}>
+      <header className="page-head"><div><h2>Team</h2><p>Invites are stored. SMTP is not configured, so no email is sent. Owners manage roles, members read and write the account, viewers are read-only.</p></div></header>
+      <form className="form-row" onSubmit={(e) => { e.preventDefault(); run(() => call("team", { method: "POST", body: JSON.stringify({ name, email, role }) }), setToast, "Invite saved. No email was sent."); setName(""); setEmail(""); }}>
         <input aria-label="Name" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} required />
         <input aria-label="Email" type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+        <select aria-label="Invite role" value={role} onChange={(e) => setRole(e.target.value)}>
+          {INVITE_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+        </select>
         <button className="primary" type="submit">Save invite</button>
       </form>
       <article className="panel">
-        {rows.map((m) => <div key={m.id} className="list-row"><div className="name">{m.name}</div><div className="sub">{m.email} · {m.role} · {m.emailSent ? "account" : "invite stored, email not sent"}</div></div>)}
+        {rows.map((m) => {
+          const isSelf = m.id === selfId;
+          const options = m.emailSent ? ACCOUNT_ROLES : INVITE_ROLES;
+          return (
+            <div key={m.id} className="list-row">
+              <div className="name">{m.name}</div>
+              <div className="sub">{m.email} · {m.emailSent ? "account" : "invite stored, email not sent"}</div>
+              <select aria-label={`Role for ${m.email}`} value={m.role} disabled={isSelf}
+                onChange={(e) => run(() => call(`team/${m.id}`, { method: "PATCH", body: JSON.stringify({ role: e.target.value }) }, (s) => ({ team: s.team.map((x) => (x.id === m.id ? { ...x, role: e.target.value } : x)) })), setToast, "Role updated")}>
+                {options.map((r) => <option key={r} value={r}>{r}</option>)}
+              </select>
+              <button className="ghost" type="button" disabled={isSelf}
+                onClick={() => run(() => call(`team/${m.id}`, { method: "DELETE" }, (s) => ({ team: s.team.filter((x) => x.id !== m.id) })), setToast, "Team member removed")}>Remove</button>
+            </div>
+          );
+        })}
       </article>
     </>
   );
